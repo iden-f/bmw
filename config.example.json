@@ -1,0 +1,126 @@
+{
+  "version": 2,
+  "searches": [
+    {
+      "id": "example-civic",
+      "name": "Honda Civic, 2017 onwards",
+      "url": "https://www.autotrader.ca/cars/honda/civic/reg_on/cit_toronto/?modelyearfrom=2017",
+      "enabled": true,
+      "notes": "An example: replace it with your own. Run the search you want on autotrader.ca and paste the address bar. The 2026 platform drops the model, the year range and the radius out of a pasted link, so set those again under `filters` and the bot will enforce them itself.",
+      "filters": {
+        "models": [
+          "Civic"
+        ],
+        "min_year": 2017,
+        "near": "Toronto, ON",
+        "max_distance_km": 100
+      }
+    }
+  ],
+  "filters": {
+    "min_price": null,
+    "max_price": null,
+    "min_year": null,
+    "max_year": null,
+    "max_mileage_km": null,
+    "include_keywords": [],
+    "exclude_keywords": [],
+    "exclude_sellers": [],
+    "require_price": false
+  },
+  "notifications": {
+    "digest": true,
+    "dashboard_url": "",
+    "max_listings_per_message": 12,
+    "timezone": "America/Toronto",
+    "quiet_hours": {
+      "enabled": false,
+      "start": "23:00",
+      "end": "07:00"
+    },
+    "notify_on": {
+      "new": true,
+      "price_drop": true,
+      "price_rise": false,
+      "unpriced": null,
+      "priced": true,
+      "removed": false,
+      "relisted": false,
+      "qualified": true,
+      "errors": true
+    },
+    "price_drop_min_pct": 1.0,
+    "price_drop_min_abs": 250,
+    "price_drop_alert_abs": 0,
+    "small_drops_ride_along": true,
+    "channels": {
+      "telegram": {
+        "enabled": "auto",
+        "photos": true
+      },
+      "discord": {
+        "enabled": "auto"
+      },
+      "ntfy": {
+        "enabled": false,
+        "server": "https://ntfy.sh",
+        "topic": "",
+        "priority": "default",
+        "priority_new": "high"
+      },
+      "slack": {
+        "enabled": "auto"
+      },
+      "email": {
+        "enabled": "auto",
+        "to": "",
+        "html": true
+      },
+      "webhook": {
+        "enabled": false,
+        "url": ""
+      },
+      "twilio": {
+        "enabled": false
+      }
+    }
+  },
+  "scraping": {
+    "max_pages": 3,
+    "results_per_page": 50,
+    "timeout_seconds": 30,
+    "retries": 3,
+    "delay_ms": 1200,
+    "enrich_details": true,
+    "enrich_limit": 25,
+    "unpriced_rechecks": 3,
+    "request_budget": 250,
+    "user_agent": "auto"
+  },
+  "archive": {
+    "mode": "metadata",
+    "images": 0,
+    "keep_last": 400,
+    "keep_days": 730
+  },
+  "budget": {
+    "enabled": true,
+    "included_minutes": 3000,
+    "stop_at": 0.85,
+    "job_overhead_seconds": 25,
+    "charged": null
+  },
+  "health": {
+    "alert_after_failures": 3,
+    "heartbeat_hours": 0,
+    "disable_channel_after": 2,
+    "watch_page_shape": true,
+    "expected_interval_minutes": 120,
+    "min_interval_minutes": 90,
+    "silent_after_hours": 6
+  },
+  "dashboard": {
+    "enabled": true,
+    "max_listings": 500
+  }
+}

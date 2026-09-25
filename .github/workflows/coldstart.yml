@@ -1,0 +1,87 @@
+name: Cold start
+
+# Does a fresh install work? Everything a running install accumulates is
+# thrown away, then this sets itself up from nothing and checks a generic
+# search against the live site. It never pushes and never touches the vault.
+
+on:
+  schedule:
+    - cron: '23 6 * * 0'
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - 'autotrader/**'
+      - '.github/workflows/coldstart.yml'
+
+concurrency:
+  group: autotrader-coldstart
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  from-nothing:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+          cache-dependency-path: requirements.txt
+
+      - run: pip install -q -r requirements.txt
+
+      - name: Start from nothing
+        run: |
+          rm -rf archives diagnostics docs/thumbs
+          rm -f state.json config.json EVENTS.md validation-report.md \
+                docs/data.json docs/events.json
+
+      - name: Set up, watch something, check it
+        run: |
+          set -eo pipefail
+          python -m autotrader --no-colour setup --non-interactive
+          test -f config.json || { echo "::error::setup wrote no config"; exit 1; }
+          python -m autotrader --no-colour add \
+            "https://www.autotrader.ca/cars/honda/civic/?prx=-2&inMarket=advancedSearch"
+          # A throwaway topic nobody is subscribed to; send nothing anyway.
+          python -m autotrader --no-colour run --no-notify
+
+      - name: Prove it worked
+        run: |
+          python - <<'PY'
+          import json, pathlib, sys
+          state = json.loads(pathlib.Path("state.json").read_text())
+          run = state["runs"][0]
+          problems = []
+          if not run.get("ok"):
+              problems.append(f"the run failed: {run.get('errors')}")
+          if run.get("invariants"):
+              problems.append(f"bookkeeping: {run['invariants']}")
+          live = [e for e in state["listings"].values() if e.get("status") == "active"]
+          if not live:
+              problems.append("no listings were recorded from a live search")
+          elif not any(e.get("price") for e in live):
+              problems.append("not one listing came back with a price")
+          working = [len(h.get("shape", {}).get("working", []))
+                     for h in (state.get("searches") or {}).values()]
+          if working and min(working) < 2:
+              problems.append(f"only {min(working)} parse strategy scored")
+          data = json.loads(pathlib.Path("docs/data.json").read_text())
+          shown, held = len(data["listings"]), len(state["listings"])
+          left_out = int((data.get("health") or {}).get("left_out") or 0)
+          if shown > held or shown + left_out != held:
+              problems.append("the dashboard and state disagree on how many cars there are")
+          if data["health"]["accounted"]["unexplained"]:
+              problems.append("a car was recorded that nobody decided about")
+          print(f"from nothing: {len(live)} live listing(s), "
+                f"{min(working) if working else 0} of 4 parsers, "
+                f"{run.get('requests_made')} request(s)")
+          if problems:
+              sys.exit("::error::" + "; ".join(problems))
+          PY

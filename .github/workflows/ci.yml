@@ -1,0 +1,34 @@
+name: Tests
+
+on:
+  push:
+    branches-ignore: [vault, gh-pages]
+    paths-ignore: ['control/**', 'BUDGET-STOP']
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ['3.10', '3.11', '3.12']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+          cache: pip
+          cache-dependency-path: |
+            requirements.txt
+            requirements-dev.txt
+      - run: pip install -r requirements.txt -r requirements-dev.txt
+      - run: python -m pytest -q
+      - name: Command-line smoke test
+        run: |
+          python -m autotrader --config /tmp/c.json --state /tmp/s.json list
+          python -m autotrader --config /tmp/c.json add \
+            "https://www.autotrader.ca/cars/honda/civic/?rcp=15&srt=35&prx=-2"
+          python -m autotrader --config /tmp/c.json --state /tmp/s.json doctor --offline || true

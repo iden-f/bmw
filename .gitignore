@@ -1,0 +1,34 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+*.egg-info/
+
+# Local secrets
+.env
+.env.*
+!.env.example
+
+# Working files
+*.tmp
+state.corrupt.json
+.autotrader.lock
+
+# The watch's own data. It lives encrypted on the `vault` branch and is only
+# ever decrypted here for the length of a run - never committed in the clear.
+/config.json
+/state.json
+/EVENTS.md
+/NOTIFY.md
+/SOAK.md
+/run.log
+/validation-report.md
+/docs/data.json
+/docs/events.json
+/docs/thumbs/
+/diagnostics/
+/archives/
+/vault/
+/site/

@@ -1,0 +1,57 @@
+name: Publish dashboard
+
+# Rebuilds and publishes the dashboard when the page itself changes. A check
+# publishes on its own; this is for changes to the code. The site is built
+# from the vault and carries only ciphertext; see autotrader/vault.py.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'docs/**'
+      - 'autotrader/dashboard.py'
+      - 'autotrader/vault.py'
+      - '.github/workflows/pages.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+          cache-dependency-path: requirements.txt
+
+      - run: pip install -q -r requirements.txt
+
+      - name: Build and publish
+        env:
+          WATCH_PASSPHRASE: ${{ secrets.WATCH_PASSPHRASE }}
+          WATCH_PASSPHRASE_PREVIOUS: ${{ secrets.WATCH_PASSPHRASE_PREVIOUS }}
+        run: |
+          set -e
+          if [ -z "$WATCH_PASSPHRASE" ]; then
+            echo "::error::Add a repository secret named WATCH_PASSPHRASE (12 or more characters). See the README."
+            exit 1
+          fi
+          python -m autotrader vault pull
+          if [ ! -f vault/meta.json ]; then
+            echo "Nothing to publish until the first check has run."
+            exit 0
+          fi
+          python -m autotrader vault open
+          python -m autotrader --no-colour dashboard > /dev/null 2>&1
+          python -m autotrader vault site site
+          python -m autotrader vault publish site

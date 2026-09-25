@@ -1,0 +1,13 @@
+# The test suite only. The bot itself needs nothing in here, which is why it
+# is a separate file: a watcher that runs every thirty minutes should install
+# what it uses and no more.
+pytest>=8,<9
+# tests/test_workflows.py reads .github/workflows/*.yml the way GitHub does.
+# It is a test dependency and not a runtime one, and the suite failed in CI
+# the first time precisely because that distinction was not written down.
+PyYAML>=6,<7
+# tests/test_dashboard_layout.py opens the published page in a real browser,
+# because every layout fault this project has shipped was one where the CSS
+# said the right thing and the browser did something else. The suite skips
+# itself when playwright or a browser is missing, so CI without one still runs.
+playwright>=1.40

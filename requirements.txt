@@ -1,0 +1,13 @@
+# Exact versions, dependencies included: a check runs with the passphrase in
+# its environment, so nothing new may arrive in a run without a review.
+requests==2.34.2
+beautifulsoup4==4.15.0
+cryptography==46.0.7
+certifi==2026.7.22
+cffi==2.1.1
+charset-normalizer==3.5.1
+idna==3.19
+pycparser==3.0
+soupsieve==2.9.2
+typing_extensions==4.16.0
+urllib3==2.7.0

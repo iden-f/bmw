@@ -1,0 +1,169 @@
+name: Check AutoTrader
+
+# The watch itself. This repository is public, and so is every Actions log:
+# nothing here prints a search, a car or a topic. The bot's own output goes
+# to run.log, which is sealed into the vault with the rest of its data.
+
+on:
+  schedule:
+    # Every half hour, because GitHub drops scheduled runs, often in
+    # clusters. The bot stands down unless a check is due (every two hours
+    # by default).
+    - cron: '7,37 * * * *'
+  # A change sent from the dashboard lands as a file in control/.
+  push:
+    branches: [main]
+    paths: ['control/**']
+  # An outside timer can ask for a check; see scripts/keep-time.sh.
+  repository_dispatch:
+    types: [check]
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Report what would happen without sending or saving anything'
+        type: boolean
+        default: false
+      automatic:
+        description: 'Treat this as a scheduled check (stand down if one ran recently)'
+        type: boolean
+        default: false
+
+concurrency:
+  group: autotrader-watch
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  check:
+    # Anyone can see this repository; only its owner can drive it.
+    if: github.event_name != 'push' || github.actor == github.repository_owner
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      # The runner label, for the cost figures; tests keep it in step with
+      # runs-on above.
+      REPO_RUNNER: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Written by the bot when this month's runner minutes are projected to
+      # run out. Delete the file to resume.
+      - name: Stop if this month's budget is spent
+        id: guard
+        run: |
+          if [ -f BUDGET-STOP ]; then
+            echo "::warning::BUDGET-STOP is present - not checking. Delete it to resume."
+            echo "stop=1" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/setup-python@v5
+        if: ${{ !steps.guard.outputs.stop }}
+        with:
+          python-version: '3.11'
+          cache: pip
+          cache-dependency-path: requirements.txt
+
+      - name: Install
+        if: ${{ !steps.guard.outputs.stop }}
+        run: pip install -q -r requirements.txt
+
+      - name: Open the vault
+        if: ${{ !steps.guard.outputs.stop }}
+        env:
+          WATCH_PASSPHRASE: ${{ secrets.WATCH_PASSPHRASE }}
+          # Only while changing the passphrase: the old one, so the vault can
+          # be re-encrypted under the new. Delete it after one check.
+          WATCH_PASSPHRASE_PREVIOUS: ${{ secrets.WATCH_PASSPHRASE_PREVIOUS }}
+        run: |
+          if [ -z "$WATCH_PASSPHRASE" ]; then
+            echo "::error::Add a repository secret named WATCH_PASSPHRASE (12 or more characters). See the README."
+            exit 1
+          fi
+          python -m autotrader vault pull
+          python -m autotrader vault open
+
+      - name: Check
+        id: bot
+        if: ${{ !steps.guard.outputs.stop }}
+        # A failed search still saves what the others found; the job is
+        # failed at the end instead.
+        continue-on-error: true
+        env:
+          WATCH_PASSPHRASE:    ${{ secrets.WATCH_PASSPHRASE }}
+          REPO_VISIBILITY:     ${{ github.event.repository.visibility }}
+          RUN_TRIGGER:         ${{ github.event_name }}
+          AUTOTRADER_SCHEDULED: ${{ (github.event_name == 'schedule'
+            || github.event_name == 'repository_dispatch'
+            || inputs.automatic) && '1' || '' }}
+          TELEGRAM_BOT_TOKEN:  ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID:    ${{ secrets.TELEGRAM_CHAT_ID }}
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          SLACK_WEBHOOK_URL:   ${{ secrets.SLACK_WEBHOOK_URL }}
+          NTFY_TOKEN:          ${{ secrets.NTFY_TOKEN }}
+          GMAIL_USER:          ${{ secrets.GMAIL_USER }}
+          GMAIL_APP_PASSWORD:  ${{ secrets.GMAIL_APP_PASSWORD }}
+          TWILIO_SID:          ${{ secrets.TWILIO_SID }}
+          TWILIO_TOKEN:        ${{ secrets.TWILIO_TOKEN }}
+          TWILIO_FROM:         ${{ secrets.TWILIO_FROM }}
+          TWILIO_TO:           ${{ secrets.TWILIO_TO }}
+        run: |
+          set +e
+          {
+            python -m autotrader --no-colour setup --non-interactive
+            if [ -d control ]; then python -m autotrader --no-colour control control; fi
+            python -m autotrader --no-colour run ${{ inputs.dry_run && '--dry-run' || '' }}
+            echo "$?" > "$RUNNER_TEMP/status"
+            if [ "${{ inputs.dry_run }}" != "true" ]; then
+              python -m autotrader --no-colour events --notify
+            fi
+          } > run.log 2>&1
+          status=$(cat "$RUNNER_TEMP/status")
+          echo "check finished (exit $status)"
+          exit "$status"
+
+      - name: Save
+        id: save
+        if: ${{ !steps.guard.outputs.stop && !inputs.dry_run }}
+        env:
+          WATCH_PASSPHRASE: ${{ secrets.WATCH_PASSPHRASE }}
+        run: |
+          set -eu
+          python -m autotrader vault seal
+          python -m autotrader vault push
+          # main carries no data: the bot's data files are untracked, and
+          # applied change files are removed.
+          git config user.name  "autotrader-bot"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git rm -r -q --cached --ignore-unmatch -- $(python -m autotrader vault paths)
+          git rm -r -q --ignore-unmatch -- control
+          if [ -e BUDGET-STOP ] || [ -n "$(git ls-files -- BUDGET-STOP)" ]; then
+            git add -A -- BUDGET-STOP
+          fi
+          if git diff --cached --quiet; then exit 0; fi
+          git commit -q -m "Tidy up after a check [skip ci]"
+          for attempt in 1 2 3 4 5; do
+            git rebase --abort 2>/dev/null || true
+            if git pull -q --rebase origin "$GITHUB_REF_NAME" && \
+               git push -q origin "HEAD:$GITHUB_REF_NAME"; then
+              exit 0
+            fi
+            sleep $((attempt * 4))
+          done
+          echo "::error::could not push to $GITHUB_REF_NAME"
+          exit 1
+
+      - name: Publish the dashboard
+        if: ${{ steps.save.outputs.page }}
+        env:
+          WATCH_PASSPHRASE: ${{ secrets.WATCH_PASSPHRASE }}
+        run: |
+          python -m autotrader vault site site
+          python -m autotrader vault publish site
+
+      - name: Report failure
+        if: steps.bot.outcome == 'failure'
+        run: |
+          echo "::error::The check reported a problem. Results were still saved; the dashboard's Status tab says what."
+          exit 1

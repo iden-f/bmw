@@ -1,0 +1,64 @@
+name: Watchdog
+
+# Runs on its own schedule because a watch cannot report its own absence: if
+# no check has happened for hours, this is what says so. It also sends the
+# weekly market digest. Its output is discarded; the alerts are the output.
+
+on:
+  schedule:
+    - cron: '41 1,7,13,19 * * *'
+    # The weekly digest, Monday morning.
+    - cron: '20 14 * * 1'
+  workflow_dispatch:
+
+concurrency:
+  group: autotrader-events
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  watchdog:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      TELEGRAM_BOT_TOKEN:  ${{ secrets.TELEGRAM_BOT_TOKEN }}
+      TELEGRAM_CHAT_ID:    ${{ secrets.TELEGRAM_CHAT_ID }}
+      DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+      SLACK_WEBHOOK_URL:   ${{ secrets.SLACK_WEBHOOK_URL }}
+      NTFY_TOKEN:          ${{ secrets.NTFY_TOKEN }}
+      GMAIL_USER:          ${{ secrets.GMAIL_USER }}
+      GMAIL_APP_PASSWORD:  ${{ secrets.GMAIL_APP_PASSWORD }}
+      TWILIO_SID:          ${{ secrets.TWILIO_SID }}
+      TWILIO_TOKEN:        ${{ secrets.TWILIO_TOKEN }}
+      TWILIO_FROM:         ${{ secrets.TWILIO_FROM }}
+      TWILIO_TO:           ${{ secrets.TWILIO_TO }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+          cache-dependency-path: requirements.txt
+
+      - run: pip install -q -r requirements.txt
+
+      - name: Look for silence, and send the week
+        env:
+          WATCH_PASSPHRASE:    ${{ secrets.WATCH_PASSPHRASE }}
+          WATCH_PASSPHRASE_PREVIOUS: ${{ secrets.WATCH_PASSPHRASE_PREVIOUS }}
+        run: |
+          set -e
+          python -m autotrader vault pull
+          if [ ! -f vault/meta.json ]; then echo "No vault yet."; exit 0; fi
+          python -m autotrader vault open
+          if [ "${{ github.event.schedule }}" = '20 14 * * 1' ]; then
+            python -m autotrader --no-colour weekly --notify > /dev/null 2>&1 \
+              || echo "::warning::the weekly digest was not sent"
+          fi
+          python -m autotrader --no-colour events --notify > /dev/null 2>&1 || true
+          python -m autotrader vault seal
+          # Refused if a check saved in the meantime; the check's copy is newer.
+          python -m autotrader vault push --lease || echo "a check saved first; nothing to add"
