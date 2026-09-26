@@ -1,0 +1,11 @@
+{
+  "format": "autotrader-vault",
+  "version": 1,
+  "kdf": {
+    "name": "PBKDF2",
+    "hash": "SHA-256",
+    "iterations": 600000,
+    "salt": "XmFHK6evyUp7RW52ME4tFA=="
+  },
+  "check": "QVRXAQDizQEbAy2g194EnYoJ/OZ9E9rQz90Og4hAlUfpDLcBlWfdx/PvNZLoPCvWrGOcsY1Ibg=="
+}
