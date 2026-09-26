@@ -1533,3 +1533,47 @@ def test_the_clock_strip_is_the_same_height_whatever_it_says(browser, site, widt
         assert not cut, f"cut off at {width}px: {cut}"
     finally:
         ctx.close()
+
+
+class TestTheStatusTabSaysOnlyWhatCanBeActedOn:
+    """A switched-off channel with no credentials set has nothing to switch
+    back on; a thin schedule with no outside timer has one obvious fix."""
+
+    def status(self, browser, site, payload):
+        import json
+        ctx = browser.new_context(viewport={"width": 1440, "height": 900},
+                                  service_workers="block")
+        page = ctx.new_page()
+        page.route("**/data.json", lambda route: route.fulfill(
+            status=200, content_type="application/json", body=json.dumps(payload)))
+        page.goto(site + "#/status", wait_until="networkidle")
+        page.wait_for_selector("text=Alerts")
+        return ctx, page
+
+    def retired(self, payload, missing):
+        import copy
+        d = copy.deepcopy(payload)
+        d["channels"]["email"] = dict(d["channels"].get("email") or {},
+                                      label="Email (Gmail)", active=False,
+                                      missing=missing,
+                                      disabled_reason="the credentials were rejected")
+        return d
+
+    def test_a_retired_channel_without_credentials_is_not_listed(
+            self, browser, site, payload):
+        ctx, page = self.status(browser, site, self.retired(payload, ["GMAIL_USER"]))
+        assert "credentials were rejected" not in page.inner_text("main")
+        ctx.close()
+
+    def test_a_retired_channel_with_credentials_says_why(self, browser, site, payload):
+        ctx, page = self.status(browser, site, self.retired(payload, []))
+        assert "credentials were rejected" in page.inner_text("main")
+        ctx.close()
+
+    def test_the_coverage_alarm_points_at_an_outside_timer_until_there_is_one(
+            self, browser, site, payload):
+        ctx, page = self.status(browser, site, payload)
+        assert page.evaluate("hasOutsideTimer({by_trigger: {schedule: 3}})") is False
+        assert page.evaluate(
+            "hasOutsideTimer({by_trigger: {schedule: 1, 'repository_dispatch:cron-job': 3}})") is True
+        ctx.close()

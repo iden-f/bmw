@@ -492,6 +492,9 @@ function whoKeptTime(cov) {
   return { level: 'all', mine, all };
 }
 
+const hasOutsideTimer = cov => Object.keys(cov?.by_trigger || {})
+  .some(k => k.startsWith('repository_dispatch'));
+
 /* What started the checks, in the words of the thing that started them. */
 const TRIGGER_WORDS = {
   schedule: 'the schedule',
@@ -611,8 +614,13 @@ function trustState() {
         level: 'warn',
         // slots_covered, to agree with the Status card and the strip.
         text: `Only ${pct}% of the last ${hours(cov.window_hours)} were watched — ${cov.slots_covered ?? cov.successful} of ${cov.expected} ${slotWord(cov)} had a check. A car can be listed and sold between checks at this rate.`,
-        detail: cov.longest_gap_minutes
-          ? `Longest gap: ${(cov.longest_gap_minutes / 60).toFixed(1)} hours.` : '',
+        detail: [
+          cov.longest_gap_minutes
+            ? `Longest gap: ${(cov.longest_gap_minutes / 60).toFixed(1)} hours.` : '',
+          // GitHub's scheduler is the usual cause, and the fix is outside it.
+          hasOutsideTimer(cov) ? ''
+            : 'GitHub runs scheduled checks late or not at all; an outside timer keeps them on time (README, Schedule).',
+        ].filter(Boolean).join(' '),
       },
     };
   }
@@ -2296,7 +2304,7 @@ function renderStatus() {
     // A channel switched off on purpose, with the reason given, so a
     // deliberate decision does not read as a fault.
     Object.entries(d.channels || {})
-      .filter(([name, c]) => !c.active && c.disabled_reason)
+      .filter(([name, c]) => !c.active && c.disabled_reason && !(c.missing || []).length)
       .map(([name, c]) => `<tr><td>${esc(c.label || name)}</td>
         <td colspan="2" class="note">${esc(sentence(c.disabled_reason, 'Switched off'))}</td></tr>`).join('') +
     `</tbody>`;

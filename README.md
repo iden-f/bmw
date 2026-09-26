@@ -216,6 +216,19 @@ service send the same request. Extra requests are deduplicated like the
 schedule. The token expires on the date you chose, so put that date in a
 calendar.
 
+With [cron-job.org](https://cron-job.org) (free), create a job with:
+
+| Field | Value |
+|---|---|
+| URL | `https://api.github.com/repos/<you>/<repo>/dispatches` |
+| Schedule | fires every 30 minutes |
+| Request method | `POST` |
+| Headers | `Authorization: Bearer <token>`, `Accept: application/vnd.github+json` |
+| Request body | `{"event_type":"check","client_payload":{"from":"cron-job"}}` |
+
+A test run answers `204` when it works. The Status tab then shows checks kept
+by "cron-job (an outside timer)".
+
 ## Stopping it
 
 To pause, disable **Check AutoTrader** and **Watchdog** (Actions → the
