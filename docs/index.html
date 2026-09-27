@@ -746,6 +746,21 @@ body[data-locked] .clock, body[data-locked] .tabs, body[data-locked] .trust{ dis
 .tbl td:last-child,.tbl th:last-child{ padding-right:0; }
 .tbl .r{ text-align:right; font-variant-numeric:tabular-nums; }
 .tbl tr:last-child td{ border-bottom:0; }
+/* A table whose last column matters most stacks on a phone, each number
+   under its own label, rather than leave that column behind a scroll. */
+@media (max-width:559px){
+  .tbl--stack thead{ display:none; }
+  .tbl--stack tr{ display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:var(--s2) var(--s3);
+    padding:var(--s3) 0; border-bottom:1px solid var(--line); }
+  .tbl--stack tr:last-child{ border-bottom:0; }
+  .tbl--stack td{ display:block; padding:0; border:0; }
+  .tbl--stack td.r{ text-align:left; }
+  .tbl--stack td:nth-child(-n+2){ grid-column:1/-1; }
+  .tbl--stack td[data-label]::before{
+    content:attr(data-label); display:block; color:var(--text-3);
+    font-size:var(--t-micro); letter-spacing:.06em; text-transform:uppercase;
+  }
+}
 
 .kv{ display:grid; grid-template-columns:auto 1fr; gap:var(--s2) var(--s4); font-size:var(--t-small); }
 .kv dt{ color:var(--text-3); font-size:var(--t-micro); letter-spacing:.06em; text-transform:uppercase; padding-top:2px; }

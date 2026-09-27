@@ -2090,10 +2090,12 @@ function marketplaceSwitch(s) {
 /* The Marketplace settings the watch keeps. The collector's own pace is set
    on the Mac and shown on the Status tab. */
 const MP_SETTINGS = [
-  ['radius_km', 'Radius, km', 'number', "each search's own, up to 500",
-   'How far from each search\'s place Marketplace is asked to look. Each search\'s distance rule still applies.'],
-  ['place', 'Place', 'text', "from each search's “near”",
-   'The word for your area in Marketplace\'s own web addresses: what follows /marketplace/ when you browse it.'],
+  ['radius_km', 'Radius, km', 'number', 'per search',
+   'How far from the place Marketplace is asked to look, up to 500. Left blank, each search '
+   + 'uses its own distance. Each search\'s distance rule still applies.'],
+  ['place', 'Place', 'text', 'per search',
+   'The word for your area in Marketplace\'s own web addresses: what follows /marketplace/ '
+   + 'when you browse it. Left blank, each search\'s \u201cnear\u201d is used.'],
   ['new_within_days', 'New within, days', 'number', '7',
    'A car Facebook dates further back is recorded, not announced, when it first shows up among the results read.'],
   ['gone_after_days', 'Gone after, days', 'number', '10',
@@ -2420,8 +2422,10 @@ function marketplaceSection(m) {
     // Where every car read went. A Marketplace search is loose - it returns
     // most cars of the make - so "read 60, kept 3" is the normal shape, and
     // the columns say where the other 57 went rather than let it look lost.
-    const cell = n => `<td class="r num">${n === undefined || n === null ? '\u2014' : num(n)}</td>`;
-    s.appendChild(table(`<thead><tr><th>Search</th><th>Last read</th>
+    // Labelled, so the table can stack on a phone without its header.
+    const cell = (n, label) => `<td class="r num" data-label="${label}">${
+      n === undefined || n === null ? '\u2014' : num(n)}</td>`;
+    const breakdown = table(`<thead><tr><th>Search</th><th>Last read</th>
         <th class="r">Read</th><th class="r">Other models</th>
         <th class="r">Hidden by a rule</th><th class="r">On your list</th></tr></thead><tbody>` +
       m.searches.map(x => {
@@ -2432,11 +2436,13 @@ function marketplaceSection(m) {
           ? `<br><span class="note" style="margin:0">${num(b.elsewhere)} also found, and kept, by another search</span>` : '';
         return `<tr><td>${esc(x.name)}${aside
             ? `<br><span class="note" style="margin:0">set aside: ${aside}</span>` : ''}${also}</td>
-          <td>${x.last_error && x.consecutive_failures
+          <td data-label="Last read">${x.last_error && x.consecutive_failures
             ? `<span class="err">${esc(x.last_error)}</span>` : when(x.last_ok)}</td>
-          ${cell(x.breakdown ? b.read : x.last_count)}${cell(b.other_models)}
-          ${cell(b.hidden)}${cell(b.kept)}</tr>`;
-      }).join('') + `</tbody>`));
+          ${cell(x.breakdown ? b.read : x.last_count, 'Read')}${cell(b.other_models, 'Other models')}
+          ${cell(b.hidden, 'Hidden by a rule')}${cell(b.kept, 'On your list')}</tr>`;
+      }).join('') + `</tbody>`);
+    breakdown.firstChild.classList.add('tbl--stack');
+    s.appendChild(breakdown);
   }
   if (m.refused && Date.now() - Date.parse(m.refused.at) < 864e5) {
     s.appendChild(el('p', 'note warnt',

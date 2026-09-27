@@ -1935,6 +1935,20 @@ class TestTheCollectorOnThePage:
         assert not errors, errors
         ctx.close()
 
+    def test_on_a_phone_the_breakdown_shows_every_column_without_scrolling(self, browser, site,
+                                                                          payload):
+        ctx, page, errors = self.open(browser, site, self.payload_with(payload), "#/status",
+                                      width=375)
+        kept = page.locator('.tbl--stack td[data-label="On your list"]').first
+        kept.wait_for()
+        box = kept.bounding_box()
+        assert box and box["x"] >= 0 and box["x"] + box["width"] <= 375, box
+        assert kept.evaluate("e => getComputedStyle(e, '::before').content") == '"On your list"'
+        wrap = page.locator(".tblwrap", has=page.locator(".tbl--stack"))
+        assert wrap.evaluate("e => e.scrollWidth <= e.clientWidth")
+        assert not errors, errors
+        ctx.close()
+
     def test_a_young_watch_says_it_is_young(self, browser, site, payload):
         import copy
         d = copy.deepcopy(payload)
