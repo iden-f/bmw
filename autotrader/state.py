@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Any, Iterable
 
 from . import clock
-from .listing import Listing
+from .listing import Listing, on_marketplace
 
 # The opening of every "a rule of yours hid it" quiet reason. A prefix rather
 # than a flag, because the rest of the sentence names the rule and the
@@ -288,6 +288,7 @@ class State:
         was_unpriced = (existing.get("unpriced") if "unpriced" in existing
                         else existing.get("price") is None)
         entry.pop("removed_at", None)
+        entry.pop("gone_reason", None)
         entry["notified"] = existing.get("notified", False)
         # An unfiltered car cannot keep a hidden-by-a-rule quiet reason; the
         # invariants fail the run on that contradiction. Clearing `notified`
@@ -524,6 +525,8 @@ class State:
         for lid, entry in self.listings.items():
             if entry.get("search_id") != search_id or entry.get("status") != "active":
                 continue
+            if on_marketplace(lid):
+                continue          # Marketplace says when its cars go
             if lid in seen_ids:
                 entry["misses"] = 0
                 entry.pop("gone_evidence", None)
@@ -574,6 +577,17 @@ class State:
             entry["removed_at"] = utcnow()
             changes.append(Change(Change.REMOVED, Listing.from_dict(entry)))
         return changes
+
+    def mark_gone(self, listing_id: str, why: str) -> Change | None:
+        """Record a car as gone on its own site's word, not by its absence."""
+        entry = self.listings.get(listing_id)
+        if entry is None or entry.get("status") != "active":
+            return None
+        entry["status"] = "gone"
+        entry["removed_at"] = utcnow()
+        entry["gone_reason"] = why
+        entry["misses"] = 0
+        return Change(Change.REMOVED, Listing.from_dict(entry))
 
     # ---------------- run + search health ----------------
 

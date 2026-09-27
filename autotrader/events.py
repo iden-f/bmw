@@ -343,6 +343,66 @@ def silence(cfg, state, record: dict[str, Any],
     }
 
 
+def marketplace_silence(cfg, state, record: dict[str, Any],
+                        now: datetime | None = None) -> dict[str, Any] | None:
+    """Has the Marketplace collector stopped reporting, or stopped reading?
+
+    The collector checks in every half hour, reading or not, so no batch for
+    hours means the computer is off, asleep, offline or locked out of GitHub.
+    Batches that arrive but read nothing mean Facebook is the problem. Each
+    silence is reported once. Returns what to say, or None.
+    """
+    section = state.data.get("marketplace") or {}
+    last = section.get("last_batch") or {}
+    if not last.get("received"):
+        return None            # Marketplace was never set up
+    conf = cfg.get("marketplace", {}) or {}
+    hours = float(conf.get("silent_after_hours", 2) or 0)
+    if hours <= 0:
+        return None
+    now = now or clock.now()
+
+    heard_for = clock.hours_since(last["received"], now)
+    if heard_for is not None and heard_for >= hours:
+        key = f"quiet:{last['received']}"
+        if record.get("marketplace_reported") == key:
+            return None
+        return {
+            "key": key, "hours": round(heard_for, 1),
+            "subject": "Marketplace collector has gone quiet",
+            "body": (f"Nothing has come from the Marketplace collector for "
+                     f"{heard_for:.1f} hours (the last was from "
+                     f"{last.get('host') or 'the collector'} at {last['received']}). "
+                     f"It checks in every half hour, reading or not, so the "
+                     f"computer is probably asleep, off or offline, or its "
+                     f"GitHub token has expired.\n\nOn that computer, run "
+                     f"collector/run status to see which. AutoTrader is still "
+                     f"being watched."),
+        }
+
+    # Checking in, but not reading: the searches themselves are failing.
+    read = [str(h.get("last_ok") or "") for h in (section.get("searches") or {}).values()]
+    last_read = max(read) if read else ""
+    unread_for = clock.hours_since(last_read, now) if last_read else None
+    limit = float(conf.get("unread_after_hours", 6) or 0)
+    if limit > 0 and unread_for is not None and unread_for >= limit \
+            and last.get("polled"):
+        key = f"unread:{last_read}"
+        if record.get("marketplace_reported") == key:
+            return None
+        errors = sorted({str(h.get("last_error")) for h in
+                         (section.get("searches") or {}).values() if h.get("last_error")})
+        return {
+            "key": key, "hours": round(unread_for, 1),
+            "subject": "Marketplace is not being read",
+            "body": (f"The collector is checking in, but no Marketplace search "
+                     f"has read successfully for {unread_for:.1f} hours."
+                     + (f"\n\nWhat it says: {errors[0]}" if errors else "")
+                     + "\n\nOn the collecting computer, run collector/run status."),
+        }
+    return None
+
+
 def save(record: dict[str, Any], data_path: Path = DATA_PATH,
          ledger_path: Path = LEDGER_PATH) -> None:
     """Write the ledger back, after something was added to it."""

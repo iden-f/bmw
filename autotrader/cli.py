@@ -808,6 +808,18 @@ def cmd_events(args: argparse.Namespace) -> int:
         # last_check, not last_run: a firing that stands down is not a check.
         print(_ok(f"last successful check {state.last_check.get('at')}"))
 
+    mp_quiet = events.marketplace_silence(cfg, state, record)
+    if mp_quiet:
+        print(_bad(mp_quiet["subject"]))
+        if args.notify:
+            results = notifiers.alert(cfg, mp_quiet["subject"], mp_quiet["body"],
+                                      dict(os.environ))
+            for result in results:
+                print(f"   {result}")
+            if any(r.ok for r in results):
+                record["marketplace_reported"] = mp_quiet["key"]
+                events.save(record)
+
     # Running is not the same as covering the market: a watcher that gets a
     # fraction of its scheduled checks is never silent but still misses most.
     thin = events.thin_coverage(cfg, state, record)
@@ -893,6 +905,79 @@ def cmd_control(args: argparse.Namespace) -> int:
         state.save()
     print(f"{_many(applied, 'change')} applied, {refused} refused")
     return 1 if refused else 0
+
+
+def cmd_marketplace(args: argparse.Namespace) -> int:
+    """Facebook Marketplace: take in a batch from the collector, or show the plan.
+
+    ``ingest`` reads the sealed batch from a file, or with no file from the
+    repository_dispatch event that carried it. A batch that does not open,
+    is stale or was already taken in is refused and changes nothing.
+    """
+    from . import clock
+    from . import marketplace as M
+    from . import vault as V
+
+    cfg = Config.load(args.config)
+    if args.action == "plan":
+        print(json.dumps(M.plan(cfg), indent=2))
+        return 0
+
+    state = State.load(args.state)
+    if args.file:
+        text = Path(args.file).read_text(encoding="utf-8")
+    else:
+        event_path = os.environ.get("GITHUB_EVENT_PATH", "")
+        try:
+            event = json.loads(Path(event_path).read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            event = {}
+        text = str((event.get("client_payload") or {}).get("batch") or "")
+    if not text.strip():
+        print("no Marketplace batch to take in")
+        return 0
+    try:
+        key = V.Vault.unlock(Path(".")).key
+        batch = M.open_batch(key, text, state)
+    except M.AlreadyTakenIn:
+        print("Marketplace batch already taken in")
+        return 0
+    except (M.BatchError, V.VaultError) as exc:
+        state.data.setdefault("marketplace", {})["refused"] = {
+            "at": clock.stamp(), "why": str(exc)[:300]}
+        if not args.dry_run:
+            state.save()
+        print(_bad(f"Marketplace batch refused: {exc}"))
+        return 1
+
+    fetcher = None
+    if not args.dry_run:
+        scraping = cfg.get("scraping", {}) or {}
+        fetcher = Fetcher(timeout=int(scraping.get("timeout_seconds", 30) or 30),
+                          retries=1, delay_ms=300,
+                          user_agent=str(scraping.get("user_agent", "auto")),
+                          budget=40)
+    try:
+        report = M.ingest(cfg, state, batch, env=dict(os.environ),
+                          notify=not args.no_notify, dry_run=args.dry_run,
+                          fetcher=fetcher)
+    finally:
+        if fetcher is not None:
+            fetcher.close()
+    host = str(batch.get("host") or "collector")
+    if batch.get("polled"):
+        print(f"Marketplace, from {host}: {report.summary()}")
+    else:
+        print(f"Marketplace, from {host}: checking in, nothing read "
+              f"({batch.get('note') or 'resting'})")
+    for warning in report.warnings:
+        print(_warn(warning))
+    for line in report.notified:
+        print(f"   {line}")
+    if not args.dry_run:
+        state.save()
+        dashboard.write(cfg, state)
+    return 0 if report.ok else 1
 
 
 CHANGE_MAX_AGE_DAYS = 14
@@ -1241,6 +1326,16 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--dry-run", action="store_true",
                    help="say what would change without writing anything")
     p.set_defaults(func=cmd_control)
+
+    p = sub.add_parser("marketplace",
+                       help="Facebook Marketplace: take in what the collector read")
+    p.add_argument("action", choices=("ingest", "plan"))
+    p.add_argument("file", nargs="?",
+                   help="with ingest: the sealed batch (default: the dispatch event)")
+    p.add_argument("--dry-run", action="store_true",
+                   help="say what would change without sending or saving")
+    p.add_argument("--no-notify", action="store_true")
+    p.set_defaults(func=cmd_marketplace)
 
     p = sub.add_parser("vault", help="private mode: the encrypted copy of the data")
     p.add_argument("action", choices=("pull", "open", "seal", "site", "push",

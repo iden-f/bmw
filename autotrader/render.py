@@ -32,7 +32,20 @@ def _facts(listing) -> list[str]:
         # Skip what display_title already says, such as the trim.
         if text.lower() not in title:
             out.append(text)
+    if _on_marketplace(listing):
+        out.append("on Facebook Marketplace")
     return out
+
+
+def _on_marketplace(listing) -> bool:
+    return getattr(listing, "site", "") == "marketplace"
+
+
+def _prefix(changes: list[Change]) -> str:
+    """The name a message goes by: Marketplace when every car is from it."""
+    if changes and all(_on_marketplace(c.listing) for c in changes):
+        return "Marketplace: "
+    return "AutoTrader: "
 
 
 def _short(listing) -> str:
@@ -87,7 +100,7 @@ def headline(changes: list[Change]) -> str:
     if not changes:
         return "AutoTrader: no changes"
     if len(changes) == 1:
-        return "AutoTrader: " + _one_line(changes[0])
+        return _prefix(changes) + _one_line(changes[0])
 
     counts = {kind: sum(1 for c in changes if c.kind == kind)
               for kind in (Change.PRICE_DROP, Change.QUALIFIED, Change.NEW,
@@ -98,7 +111,7 @@ def headline(changes: list[Change]) -> str:
         best = min(drops, key=lambda c: c.delta or 0)
         lead = f"{_short(best.listing)} down ${abs(best.delta or 0):,}"
         rest = len(changes) - 1
-        return f"AutoTrader: {lead}" + (f", +{rest} more change{'s' if rest != 1 else ''}" if rest else "")
+        return f"{_prefix(changes)}{lead}" + (f", +{rest} more change{'s' if rest != 1 else ''}" if rest else "")
 
     label = {
         # Before "new" on purpose: a car coming back inside your rules is
@@ -115,7 +128,7 @@ def headline(changes: list[Change]) -> str:
         n = counts.get(kind, 0)
         if n:
             bits.append(f"{n} {one if n == 1 else many}")
-    return "AutoTrader: " + ", ".join(bits)
+    return _prefix(changes) + ", ".join(bits)
 
 
 #: The mark each kind of change wears where a channel can render one.
@@ -412,7 +425,8 @@ def push_title(changes: list[Change]) -> str:
     where, km = _where(car), (car.mileage_text if car.mileage_km is not None else "")
     tail = [part for part in (where, km) if part]
     if lead.kind == Change.NEW:
-        parts = [f"New {name}", car.price_text, *tail]
+        parts = [f"New on Marketplace: {name}" if _on_marketplace(car)
+                 else f"New {name}", car.price_text, *tail]
     elif lead.kind == Change.QUALIFIED:
         parts = [f"Now in your rules: {name}", car.price_text, *tail]
     elif lead.kind == Change.RELISTED:
@@ -423,7 +437,7 @@ def push_title(changes: list[Change]) -> str:
     elif lead.kind == Change.PRICED:
         parts = [f"{name} priced", car.price_text, *tail]
     else:
-        return headline(ordered).removeprefix("AutoTrader: ")
+        return headline(ordered).split(": ", 1)[-1]
     title = " · ".join(parts)
     # Count the rest by kind: "(+1 price drop)" says whether it is worth
     # expanding, where "(+1 more)" would not.
@@ -607,7 +621,7 @@ def as_email_html(changes: list[Change], *, limit: int = 25,
    <div style="margin-top:10px;">
     <a href="{_esc(listing.url)}" style="display:inline-block;background:#111827;color:#ffffff;
        font:600 13px/1 -apple-system,BlinkMacSystemFont,'Segoe UI',Arial,sans-serif;
-       padding:9px 14px;border-radius:6px;text-decoration:none;">View on AutoTrader</a>
+       padding:9px 14px;border-radius:6px;text-decoration:none;">View on {'Marketplace' if _on_marketplace(listing) else 'AutoTrader'}</a>
    </div>
   </td>
  </tr>

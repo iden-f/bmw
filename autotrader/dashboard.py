@@ -19,7 +19,7 @@ from .archive import size_report
 from . import geo, insight, qr, thumbs
 from . import budget
 from .config import CHANNEL_SECRETS, Config
-from .listing import name_of
+from .listing import name_of, on_marketplace
 from .parser import STRATEGIES
 from .state import State
 from .urls import describe_search
@@ -50,6 +50,8 @@ LISTING_FIELDS = (
     # The owner's marks on a car (shortlisted, dismissed, muted, a note). A
     # static page cannot write, so the page sends these as a change file.
     "you",
+    # Marketplace says itself when a car sells or has a sale pending.
+    "gone_reason", "sale_pending",
 )
 
 
@@ -128,6 +130,7 @@ def build_payload(cfg: Config, state: State, env: dict[str, str] | None = None
         item["unpriced"] = entry.get("price") is None
         item["price_history"] = (entry.get("price_history") or [])[-20:]
         item["is_new"] = False
+        item["site"] = "marketplace" if on_marketplace(entry.get("id")) else "autotrader"
         if item["filtered"]:
             # A hidden car only needs to be listed and explained, so its
             # photos and most of its price history are left out to keep the
@@ -319,6 +322,7 @@ def build_payload(cfg: Config, state: State, env: dict[str, str] | None = None
         "repo": _repo_slug(env),
         # The last few changes sent from the dashboard, and what became of them.
         "changes": state.data.get("changes") or [],
+        "marketplace": _marketplace(cfg, state),
         "stats": state.stats(),
         "listings": listings,
         "searches": searches,
@@ -391,6 +395,35 @@ _SECRET_VALUE_RES = (
     re.compile(r"\bsk-(?:proj-)?[A-Za-z0-9_-]{32,}\b"),            # OpenAI-style key
     re.compile(r"\bsk_(?:live|test)_[A-Za-z0-9]{24,}\b"),          # Stripe
 )
+
+
+def _marketplace(cfg: Config, state: State) -> dict[str, Any] | None:
+    """What the Marketplace collector last said, for the Status tab.
+
+    None until a collector has sent its first batch: an unused feature says
+    nothing on the page.
+    """
+    section = state.data.get("marketplace") or {}
+    last = section.get("last_batch")
+    if not last:
+        return None
+    names = {s.id: s.name for s in cfg.searches}
+    return {
+        "last_batch": last,
+        "hosts": section.get("hosts") or {},
+        "searches": [
+            {"id": sid, "name": names.get(sid, sid),
+             "last_ok": h.get("last_ok"), "last_count": h.get("last_count", 0),
+             "last_error": h.get("last_error"),
+             "consecutive_failures": h.get("consecutive_failures", 0)}
+            for sid, h in (section.get("searches") or {}).items() if sid in names],
+        "batches": (section.get("batches") or [])[:12],
+        "refused": section.get("refused"),
+        "session_told": section.get("session_told"),
+        "cars": sum(1 for lid, e in state.listings.items()
+                    if on_marketplace(lid) and e.get("status") == "active"
+                    and not e.get("filtered")),
+    }
 
 
 def find_secrets(node: Any, path: str = "") -> list[str]:

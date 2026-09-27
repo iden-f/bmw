@@ -1407,6 +1407,11 @@ function shot(l, cls) {
 const sellerWord = kind => kind === 'private' ? 'private seller'
                         : kind === 'dealer' ? 'dealer' : '';
 
+/* Where a car is listed, as its link names it. */
+function siteName(l) {
+  return l.site === 'marketplace' ? 'Facebook Marketplace' : 'autotrader.ca';
+}
+
 function card(l) {
   const b = el('button', 'card');
   b.type = 'button';
@@ -1457,6 +1462,8 @@ function card(l) {
   // Dealer or private goes on this line, not among the facts, which would
   // overflow the card's width.
   if (l.seller_type) foot.push(`<span>${esc(sellerWord(l.seller_type))}</span>`);
+  if (l.site === 'marketplace') foot.unshift('<span class="site">Marketplace</span>');
+  if (l.sale_pending) foot.push('<span>sale pending</span>');
   const yourMarks = marks.of(l.id);
   // Muting is said in words: a greyed card does not say alerts are off.
   if (yourMarks.muted) foot.push('<span>muted — no alerts</span>');
@@ -1480,6 +1487,7 @@ function card(l) {
   b.setAttribute('aria-label',
     `${carName(l)}, ${l.unpriced ? 'call for price' : money(l.price)}` +
     (l.mileage_km ? `, ${km(l.mileage_km)} kilometres` : '') +
+    (l.site === 'marketplace' ? ', on Facebook Marketplace' : '') +
     (l.filtered ? `, hidden: ${l.filter_reason || 'a rule'}` : '') +
     (mine.shortlisted ? ', on your shortlist' : '') +
     (mine.muted ? ', muted' : '') +
@@ -2086,6 +2094,50 @@ function pasteALink() {
 }
 
 /* ----------------------------------------------------------------- status */
+/* The computer reading Facebook Marketplace: when it last checked in,
+   whether Facebook still lets it in, and what each search read. */
+const SESSION_SAYS = {
+  signed_out: 'Signed out — run collector/run login on that computer',
+  checkpoint: 'Facebook wants the account confirmed — run collector/run login',
+  blocked: 'Facebook is refusing its searches',
+};
+function marketplaceSection(m) {
+  if (!m || !m.last_batch) return null;
+  const last = m.last_batch;
+  const quietHours = (Date.now() - Date.parse(last.received)) / 3.6e6;
+  const s = el('section', 'section');
+  s.innerHTML = `<div class="section__head"><h2>Facebook Marketplace</h2>
+    <span class="count num">${num(m.cars ?? 0)} watched</span></div>`;
+  const stats = el('dl', 'stats');
+  const session = SESSION_SAYS[last.session];
+  stats.innerHTML = `
+    <div class="stat" data-tone="${quietHours > 2 ? 'bad' : 'good'}">
+      <dt>Collector last heard</dt><dd>${when(last.received)}</dd>
+      <dd class="stat__note">${esc(last.host || 'collector')}${
+        last.role ? ` \u00b7 ${esc(last.role)}` : ''}${
+        last.polled ? '' : ` \u00b7 ${esc(last.note || 'resting')}`}</dd></div>
+    <div class="stat" data-tone="${session ? 'bad' : 'good'}">
+      <dt>Facebook</dt><dd>${session ? 'Not reading' : 'Signed in'}</dd>
+      <dd class="stat__note">${esc(session || 'reading as the signed-in account')}</dd></div>`;
+  s.appendChild(stats);
+  if ((m.searches || []).length) {
+    s.appendChild(table(`<thead><tr><th>Search</th><th>Last read</th><th class="r">Cars</th></tr></thead><tbody>` +
+      m.searches.map(x => `<tr><td>${esc(x.name)}</td>
+        <td>${x.last_error && x.consecutive_failures
+          ? `<span class="err">${esc(x.last_error)}</span>` : when(x.last_ok)}</td>
+        <td class="r num">${num(x.last_count ?? 0)}</td></tr>`).join('') + `</tbody>`));
+  }
+  if (m.refused && Date.now() - Date.parse(m.refused.at) < 864e5) {
+    s.appendChild(el('p', 'note warnt',
+      `A batch was refused ${when(m.refused.at)}: ${esc(m.refused.why)}`));
+  }
+  s.appendChild(el('p', 'note',
+    'A computer at home reads Marketplace while signed in to Facebook and '
+    + 'sends what it saw here, sealed. Cars from it go through the same rules '
+    + 'and alerts as the rest.'));
+  return s;
+}
+
 function renderStatus() {
   const host = document.querySelector('[data-view="status"]');
   host.innerHTML = '';
@@ -2196,6 +2248,9 @@ function renderStatus() {
       <dd class="num">${h.accounted?.unexplained ?? 0}</dd>
       <dd class="stat__note">${h.accounted?.delivered ?? 0} told, ${h.accounted?.quiet ?? 0} deliberately quiet</dd></div>`;
   host.appendChild(stats);
+
+  const mp = marketplaceSection(d.marketplace);
+  if (mp) host.appendChild(mp);
 
   // When the checks happened, not just how many: a percentage cannot tell a
   // schedule thin everywhere from one absent for hours at a stretch.
@@ -2516,7 +2571,7 @@ function sheetBody(l) {
       const note = el('p', 'note');
       note.style.margin = '0 0 var(--s4)';
       note.innerHTML = `${imgs.length} of ${published} photos kept here. `
-        + `<a href="${esc(l.url || '#')}" rel="noopener" target="_blank">See them all on autotrader.ca</a>`;
+        + `<a href="${esc(l.url || '#')}" rel="noopener" target="_blank">See them all on ${siteName(l)}</a>`;
       frag.appendChild(note);
     }
   } else {
@@ -2677,7 +2732,7 @@ function sheetBody(l) {
 
   const go = el('div', 'bar');
   go.style.marginTop = 'var(--s3)';
-  const a = el('a', 'btn btn--primary', 'Open on autotrader.ca');
+  const a = el('a', 'btn btn--primary', `Open on ${siteName(l)}`);
   a.href = l.url; a.rel = 'noopener'; a.target = '_blank';
   a.style.cssText = 'display:inline-flex;align-items:center;text-decoration:none';
   go.appendChild(a);

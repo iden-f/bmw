@@ -14,9 +14,10 @@ on:
   push:
     branches: [main]
     paths: ['control/**']
-  # An outside timer can ask for a check; see scripts/keep-time.sh.
+  # An outside timer can ask for a check (scripts/keep-time.sh), and the
+  # Marketplace collector sends what it read, sealed (collector/).
   repository_dispatch:
-    types: [check]
+    types: [check, marketplace]
   workflow_dispatch:
     inputs:
       dry_run:
@@ -94,6 +95,7 @@ jobs:
           WATCH_PASSPHRASE:    ${{ secrets.WATCH_PASSPHRASE }}
           REPO_VISIBILITY:     ${{ github.event.repository.visibility }}
           RUN_TRIGGER:         ${{ github.event_name }}
+          DISPATCH_TYPE:       ${{ github.event.action }}
           AUTOTRADER_SCHEDULED: ${{ (github.event_name == 'schedule'
             || github.event_name == 'repository_dispatch'
             || inputs.automatic) && '1' || '' }}
@@ -113,6 +115,11 @@ jobs:
           {
             python -m autotrader --no-colour setup --non-interactive
             if [ -d control ]; then python -m autotrader --no-colour control control; fi
+            # Read from the event file, never interpolated into this script.
+            if [ "$RUN_TRIGGER" = repository_dispatch ] && [ "$DISPATCH_TYPE" = marketplace ]; then
+              python -m autotrader --no-colour marketplace ingest
+              echo "$?" > "$RUNNER_TEMP/ingest"
+            fi
             python -m autotrader --no-colour run ${{ inputs.dry_run && '--dry-run' || '' }}
             echo "$?" > "$RUNNER_TEMP/status"
             if [ "${{ inputs.dry_run }}" != "true" ]; then
@@ -120,6 +127,9 @@ jobs:
             fi
           } > run.log 2>&1
           status=$(cat "$RUNNER_TEMP/status")
+          if [ "$status" = 0 ] && [ -f "$RUNNER_TEMP/ingest" ]; then
+            status=$(cat "$RUNNER_TEMP/ingest")
+          fi
           echo "check finished (exit $status)"
           exit "$status"
 

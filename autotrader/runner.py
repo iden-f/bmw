@@ -25,7 +25,7 @@ from . import provision, render, shape, validate
 from .config import Config
 from .enrich import detail_from_html, enrich
 from .http import BlockedError, BudgetExhausted, FetchError, Fetcher
-from .listing import Listing
+from .listing import Listing, on_marketplace
 from .parser import looks_like_no_results, parse_search_page
 from .state import HIDDEN_REASON_PREFIX, Change, State, utcnow
 from .urls import normalise_search_url, page_url
@@ -178,6 +178,9 @@ class RunReport:
         return (", ".join(bits)
                 + f" - {_many(self.requests_made, 'request')} in {self.duration_s}s")
 
+
+# Why a car found while a search establishes what it watches stays quiet.
+BASELINE_REASON = "recorded as a starting point when this search's scope changed"
 
 # Below this a search is too small for "half of last time" to mean anything.
 MIN_COUNT_FOR_COLLAPSE = 6
@@ -456,6 +459,265 @@ def enrich_listings(listings: list[Listing], cfg: Config, fetcher: Fetcher,
             report.warnings.append(f"enrichment error on {listing.id}: {exc}")
 
 
+def _take(kept: list[Listing], unpriced: list[Listing], *, state: State,
+          report: "RunReport", rules: dict[str, Any],
+          search_filters: dict[str, Any], search_notify: dict[str, Any],
+          baseline: bool, queue, silence, on_new=None,
+          starting_point: str = BASELINE_REASON) -> None:
+    """Record the cars one search keeps, and announce or quiet each change.
+
+    Shared by a check and a Marketplace batch, so a car is judged by the same
+    rules wherever it was found. ``on_new`` is told about each new car.
+    """
+    on_new = on_new or (lambda listing: None)
+    for listing in kept:
+        # A car the rules hid and now admit is news, though it has been
+        # stored all along. Otherwise it would change state silently and
+        # keep "hidden by your rules" as its reason for being quiet.
+        was_hidden = str((state.listings.get(listing.id) or {}).get(
+            "quiet_reason") or "").startswith(HIDDEN_REASON_PREFIX)
+        change = state.record(listing, filtered=False)
+        if change is None and was_hidden:
+            # Not new: it was on the market all along, hidden by a
+            # rule. What changed is that it now qualifies.
+            change = Change(Change.QUALIFIED, listing,
+                            new_price=listing.price)
+        if change is None:
+            continue
+        if change.kind == Change.NEW:
+            report.new += 1
+            if baseline:
+                silence(listing.id, starting_point)
+            elif search_notify.get("new", True):
+                queue(change)
+            else:
+                silence(listing.id,
+                        "new listings are switched off for this search")
+            on_new(listing)
+        elif change.kind == Change.PRICE_DROP:
+            # Every branch either sends or records why not, so no car
+            # keeps a stale delivery mark from an earlier alert.
+            #
+            # Measured from the price the user last heard, not the
+            # last run, so a series of small cuts adds up to an alert.
+            heard = state.heard_price(listing.id)
+            now = change.new_price or 0
+            was = (heard if heard is not None else change.old_price) or 0
+            alert_abs = int(rules.get("price_drop_alert_abs") or 0)
+            worth_mentioning = filters.is_significant_drop(
+                was, now,
+                rules["price_drop_min_pct"], rules["price_drop_min_abs"])
+            big_enough_alone = (worth_mentioning and alert_abs <= 0) or (
+                alert_abs > 0 and was - now >= alert_abs)
+            if worth_mentioning or big_enough_alone:
+                report.price_drops += 1
+            if heard is not None and now >= heard:
+                # Down since the last run but not below the price the
+                # user last heard, so announcing a drop would be false.
+                silence(listing.id, (
+                    f"came down ${abs(change.delta or 0):,}, but is "
+                    f"still ${now - heard:,} above the ${heard:,} you "
+                    f"last heard"))
+            elif not (worth_mentioning or big_enough_alone):
+                silence(listing.id, (
+                    f"the price moved ${abs(change.delta or 0):,}, under "
+                    f"the ${int(rules['price_drop_min_abs']):,} and "
+                    f"{rules['price_drop_min_pct']:g}% you asked to hear about"))
+            elif baseline:
+                silence(listing.id, starting_point)
+            elif not search_notify.get("price_drop", True):
+                silence(listing.id, "price drops are switched off "
+                                    "for this search")
+            elif big_enough_alone:
+                queue(Change(Change.PRICE_DROP, listing,
+                             old_price=was, new_price=now))
+            elif rules.get("small_drops_ride_along", True):
+                state.hold_for_ride_along(listing.id, (
+                    f"${was - now:,} off since you last heard, under the "
+                    f"${alert_abs:,} that sends an alert on its own - it "
+                    f"goes out with the next new car"))
+            else:
+                silence(listing.id, (
+                    f"${was - now:,} off since you last heard, under the "
+                    f"${alert_abs:,} you asked to be alerted about"))
+        elif change.kind == Change.PRICE_RISE:
+            report.price_rises += 1
+            if baseline:
+                silence(listing.id, starting_point)
+            elif search_notify.get("price_rise", False):
+                queue(change)
+            else:
+                silence(listing.id, "you asked not to be told about "
+                                    "prices going up")
+        elif change.kind == Change.PRICED:
+            report.priced += 1
+            if baseline:
+                silence(listing.id, starting_point)
+            elif search_notify.get("priced", True):
+                queue(change)
+            else:
+                silence(listing.id, "a price appearing is switched off "
+                                    "for this search")
+        elif change.kind == Change.RELISTED:
+            report.relisted += 1
+            # A relist that comes back meaningfully cheaper is also
+            # announced under the price-drop switch: relists are off by
+            # default, and these are often the best drops there are.
+            came_back_cheaper = bool(
+                change.delta and change.delta < 0
+                and filters.is_significant_drop(
+                    change.old_price or 0, change.new_price or 0,
+                    rules["price_drop_min_pct"], rules["price_drop_min_abs"])
+                # The same bar a price drop has to clear on its own.
+                and -(change.delta or 0) >= int(
+                    rules.get("price_drop_alert_abs") or 0))
+            if baseline:
+                pass
+            elif search_notify.get("relisted", False):
+                queue(change)
+            elif came_back_cheaper and search_notify.get("price_drop", True):
+                report.price_drops += 1
+                queue(change)
+        elif change.kind == Change.QUALIFIED:
+            report.qualified += 1
+            if baseline:
+                silence(listing.id, starting_point)
+            elif search_notify.get("qualified", True):
+                queue(change)
+            else:
+                silence(listing.id, "it came back inside your rules, "
+                                    "and that is switched off here")
+
+    # Call-for-price cars are tracked and stay visible: they are not
+    # rejections, just cars that cannot be judged yet. An explicit
+    # notify_on "unpriced" decides whether they alert; unset follows
+    # require_price.
+    want_unpriced = search_notify.get("unpriced")
+    tell_me_about_unpriced = (
+        not bool(search_filters.get("require_price"))
+        if want_unpriced is None else bool(want_unpriced))
+    for listing in unpriced:
+        # As in the kept loop: a car the rules stop hiding may arrive
+        # with no price on its card, and it still needs an
+        # announcement or a reason.
+        was_hidden = str((state.listings.get(listing.id) or {}).get(
+            "quiet_reason") or "").startswith(HIDDEN_REASON_PREFIX)
+        change = state.record(listing)
+        if change is None and was_hidden:
+            change = Change(Change.QUALIFIED, listing,
+                            new_price=listing.price)
+        if change is None:
+            continue
+        if change.kind == Change.NEW:
+            report.new += 1
+            if baseline:
+                silence(listing.id, starting_point)
+            elif tell_me_about_unpriced and search_notify.get("new", True):
+                queue(change)
+            else:
+                # Seen, recorded, deliberately quiet - so it cannot
+                # come back as "new" once a price appears on it.
+                silence(listing.id, "no price published, and this "
+                                    "search asks for a price")
+            on_new(listing)
+        elif change.kind == Change.PRICED:
+            # A car that was call-for-price now has a figure. That is
+            # worth hearing about whatever require_price says: it is
+            # the moment the car becomes judgeable.
+            report.priced += 1
+            if search_notify.get("priced", True):
+                queue(change)
+        elif change.kind == Change.RELISTED:
+            report.relisted += 1
+            if (tell_me_about_unpriced and not baseline
+                    and search_notify.get("relisted", False)):
+                queue(change)
+        elif change.kind == Change.QUALIFIED:
+            report.qualified += 1
+            if baseline:
+                silence(listing.id, starting_point)
+            elif tell_me_about_unpriced and search_notify.get("qualified", True):
+                queue(change)
+            else:
+                silence(listing.id, "it came back inside your rules "
+                                    "but still has no price on it")
+
+
+def _hide(rejected: dict[str, tuple[Listing, filters.Verdict]], owned: set[str],
+          *, state: State, report: "RunReport", silence) -> None:
+    """Record the cars no search wanted: quietly, each with its reason."""
+    for lid, (listing, verdict) in rejected.items():
+        if lid in owned:
+            continue
+        why = verdict.reason
+        change = state.record(listing, filtered=True, filter_reason=why,
+                              filter_rule=verdict.rule)
+        # Changes on hidden cars are not announced but are counted: they
+        # are still facts about the market.
+        if change is not None and change.kind != Change.NEW:
+            report.hidden_events[change.kind] = (
+                report.hidden_events.get(change.kind, 0) + 1)
+        silence(lid, f"{HIDDEN_REASON_PREFIX}{why}")
+
+
+def _deliver(cfg: Config, state: State, report: "RunReport",
+             changes: list[Change], *, env: dict[str, str], notify: bool,
+             dry_run: bool) -> list[Change]:
+    """Send what is owed, or hold it, and return what was in the message."""
+    settings = cfg.get("notifications", {}) or {}
+    # Anything an earlier run detected but could not deliver (quiet hours,
+    # a channel outage) is picked back up here rather than being lost.
+    if not dry_run:
+        already = {c.listing.id for c in changes}
+        held = [c for c in state.pending_changes() if c.listing.id not in already]
+        if held:
+            report.warnings.append(f"re-sending {_many(len(held), 'held alert')}")
+            changes = held + changes
+
+    # Small drops ride along with a new car, and only with one: they
+    # follow the new cars in the next notification that has any, so the
+    # phone never buzzes for a small drop alone.
+    if not dry_run and any(c.kind in Change.NEW_TO_YOU for c in changes):
+        already = {c.listing.id for c in changes}
+        changes = changes + [c for c in state.ride_along_changes()
+                             if c.listing.id not in already]
+    # One order for every channel, and the order the digest cap cuts in.
+    changes = render.in_order(changes)
+
+    report.quiet = notifiers.in_quiet_hours(settings)
+    if changes and notify and not dry_run and not report.quiet:
+        results = notifiers.dispatch(cfg, changes, report.to_dict(), env)
+        report.notified = [str(r) for r in results]
+        if any(r.ok for r in results):
+            # Mark only the cars the message named. A capped digest ends
+            # "...and N more", so the overflow stays owed and the next run
+            # leads with it.
+            told_about = changes[:max(0, int(
+                settings.get("max_listings_per_message", 12) or 0))] or changes
+            state.mark_notified(c.listing.id for c in told_about)
+            overflow = len(changes) - len(told_about)
+            if overflow > 0:
+                # A rider the cap left out stays a rider. Deferring it
+                # would make it an ordinary owed alert, and it would buzz
+                # the phone on its own next run.
+                state.defer(c for c in changes[len(told_about):] if not c.rider)
+        else:
+            # Every channel failed. Hold on to them and try again next run.
+            state.defer(c for c in changes if not c.rider)
+        report.channel_results.extend(results)
+        for result in results:
+            if not result.ok and not result.skipped:
+                report.warnings.append(f"notification failed: {result}")
+    elif changes and not dry_run and (report.quiet or not notify):
+        state.defer(changes)
+        report.warnings.append(
+            _many(len(changes), "change") + " held"
+            + (" until quiet hours end." if report.quiet else "."))
+    elif changes and dry_run:
+        report.notified = ["dry run: nothing sent"]
+    return changes
+
+
 def run(cfg: Config | None = None, state: State | None = None, *,
         dry_run: bool = False, env: dict[str, str] | None = None,
         notify: bool = True, fetcher: Fetcher | None = None,
@@ -520,7 +782,6 @@ def run(cfg: Config | None = None, state: State | None = None, *,
             # user cannot act on it, `report.missed_by` records the gap, and
             # the dashboard already shows a late check.
 
-    settings = cfg.get("notifications", {}) or {}
     scraping = cfg.get("scraping", {}) or {}
     archive_conf = cfg.get("archive", {}) or {}
 
@@ -888,184 +1149,11 @@ def run(cfg: Config | None = None, state: State | None = None, *,
             if kept or unpriced:
                 state.search_health(search.id).pop("shut_out", None)
 
-            for listing in kept:
-                # A car the rules hid and now admit is news, though it has been
-                # stored all along. Otherwise it would change state silently and
-                # keep "hidden by your rules" as its reason for being quiet.
-                was_hidden = str((state.listings.get(listing.id) or {}).get(
-                    "quiet_reason") or "").startswith(HIDDEN_REASON_PREFIX)
-                change = state.record(listing, filtered=False)
-                if change is None and was_hidden:
-                    # Not new: it was on the market all along, hidden by a
-                    # rule. What changed is that it now qualifies.
-                    change = Change(Change.QUALIFIED, listing,
-                                    new_price=listing.price)
-                if change is None:
-                    continue
-                if change.kind == Change.NEW:
-                    report.new += 1
-                    if baseline:
-                        silence(listing.id, "recorded as a starting point when "
-                                            "this search's scope changed")
-                    elif search_notify.get("new", True):
-                        queue(change)
-                    else:
-                        silence(listing.id,
-                                "new listings are switched off for this search")
-                    archive_mod.archive_listing(listing, archive_conf, fetcher)
-                elif change.kind == Change.PRICE_DROP:
-                    # Every branch either sends or records why not, so no car
-                    # keeps a stale delivery mark from an earlier alert.
-                    #
-                    # Measured from the price the user last heard, not the
-                    # last run, so a series of small cuts adds up to an alert.
-                    heard = state.heard_price(listing.id)
-                    now = change.new_price or 0
-                    was = (heard if heard is not None else change.old_price) or 0
-                    alert_abs = int(rules.get("price_drop_alert_abs") or 0)
-                    worth_mentioning = filters.is_significant_drop(
-                        was, now,
-                        rules["price_drop_min_pct"], rules["price_drop_min_abs"])
-                    big_enough_alone = (worth_mentioning and alert_abs <= 0) or (
-                        alert_abs > 0 and was - now >= alert_abs)
-                    if worth_mentioning or big_enough_alone:
-                        report.price_drops += 1
-                    if heard is not None and now >= heard:
-                        # Down since the last run but not below the price the
-                        # user last heard, so announcing a drop would be false.
-                        silence(listing.id, (
-                            f"came down ${abs(change.delta or 0):,}, but is "
-                            f"still ${now - heard:,} above the ${heard:,} you "
-                            f"last heard"))
-                    elif not (worth_mentioning or big_enough_alone):
-                        silence(listing.id, (
-                            f"the price moved ${abs(change.delta or 0):,}, under "
-                            f"the ${int(rules['price_drop_min_abs']):,} and "
-                            f"{rules['price_drop_min_pct']:g}% you asked to hear about"))
-                    elif baseline:
-                        silence(listing.id, "recorded as a starting point "
-                                            "when this search's scope changed")
-                    elif not search_notify.get("price_drop", True):
-                        silence(listing.id, "price drops are switched off "
-                                            "for this search")
-                    elif big_enough_alone:
-                        queue(Change(Change.PRICE_DROP, listing,
-                                     old_price=was, new_price=now))
-                    elif rules.get("small_drops_ride_along", True):
-                        state.hold_for_ride_along(listing.id, (
-                            f"${was - now:,} off since you last heard, under the "
-                            f"${alert_abs:,} that sends an alert on its own - it "
-                            f"goes out with the next new car"))
-                    else:
-                        silence(listing.id, (
-                            f"${was - now:,} off since you last heard, under the "
-                            f"${alert_abs:,} you asked to be alerted about"))
-                elif change.kind == Change.PRICE_RISE:
-                    report.price_rises += 1
-                    if baseline:
-                        silence(listing.id, "recorded as a starting point when "
-                                            "this search's scope changed")
-                    elif search_notify.get("price_rise", False):
-                        queue(change)
-                    else:
-                        silence(listing.id, "you asked not to be told about "
-                                            "prices going up")
-                elif change.kind == Change.PRICED:
-                    report.priced += 1
-                    if baseline:
-                        silence(listing.id, "recorded as a starting point when "
-                                            "this search's scope changed")
-                    elif search_notify.get("priced", True):
-                        queue(change)
-                    else:
-                        silence(listing.id, "a price appearing is switched off "
-                                            "for this search")
-                elif change.kind == Change.RELISTED:
-                    report.relisted += 1
-                    # A relist that comes back meaningfully cheaper is also
-                    # announced under the price-drop switch: relists are off by
-                    # default, and these are often the best drops there are.
-                    came_back_cheaper = bool(
-                        change.delta and change.delta < 0
-                        and filters.is_significant_drop(
-                            change.old_price or 0, change.new_price or 0,
-                            rules["price_drop_min_pct"], rules["price_drop_min_abs"])
-                        # The same bar a price drop has to clear on its own.
-                        and -(change.delta or 0) >= int(
-                            rules.get("price_drop_alert_abs") or 0))
-                    if baseline:
-                        pass
-                    elif search_notify.get("relisted", False):
-                        queue(change)
-                    elif came_back_cheaper and search_notify.get("price_drop", True):
-                        report.price_drops += 1
-                        queue(change)
-                elif change.kind == Change.QUALIFIED:
-                    report.qualified += 1
-                    if baseline:
-                        silence(listing.id, "recorded as a starting point when "
-                                            "this search's scope changed")
-                    elif search_notify.get("qualified", True):
-                        queue(change)
-                    else:
-                        silence(listing.id, "it came back inside your rules, "
-                                            "and that is switched off here")
-
-            # Call-for-price cars are tracked and stay visible: they are not
-            # rejections, just cars that cannot be judged yet. An explicit
-            # notify_on "unpriced" decides whether they alert; unset follows
-            # require_price.
-            want_unpriced = search_notify.get("unpriced")
-            tell_me_about_unpriced = (
-                not bool(search_filters.get("require_price"))
-                if want_unpriced is None else bool(want_unpriced))
-            for listing in unpriced:
-                # As in the kept loop: a car the rules stop hiding may arrive
-                # with no price on its card, and it still needs an
-                # announcement or a reason.
-                was_hidden = str((state.listings.get(listing.id) or {}).get(
-                    "quiet_reason") or "").startswith(HIDDEN_REASON_PREFIX)
-                change = state.record(listing)
-                if change is None and was_hidden:
-                    change = Change(Change.QUALIFIED, listing,
-                                    new_price=listing.price)
-                if change is None:
-                    continue
-                if change.kind == Change.NEW:
-                    report.new += 1
-                    if baseline:
-                        silence(listing.id, "recorded as a starting point when "
-                                            "this search's scope changed")
-                    elif tell_me_about_unpriced and search_notify.get("new", True):
-                        queue(change)
-                    else:
-                        # Seen, recorded, deliberately quiet - so it cannot
-                        # come back as "new" once a price appears on it.
-                        silence(listing.id, "no price published, and this "
-                                            "search asks for a price")
-                    archive_mod.archive_listing(listing, archive_conf, fetcher)
-                elif change.kind == Change.PRICED:
-                    # A car that was call-for-price now has a figure. That is
-                    # worth hearing about whatever require_price says: it is
-                    # the moment the car becomes judgeable.
-                    report.priced += 1
-                    if search_notify.get("priced", True):
-                        queue(change)
-                elif change.kind == Change.RELISTED:
-                    report.relisted += 1
-                    if (tell_me_about_unpriced and not baseline
-                            and search_notify.get("relisted", False)):
-                        queue(change)
-                elif change.kind == Change.QUALIFIED:
-                    report.qualified += 1
-                    if baseline:
-                        silence(listing.id, "recorded as a starting point when "
-                                            "this search's scope changed")
-                    elif tell_me_about_unpriced and search_notify.get("qualified", True):
-                        queue(change)
-                    else:
-                        silence(listing.id, "it came back inside your rules "
-                                            "but still has no price on it")
+            _take(kept, unpriced, state=state, report=report, rules=rules,
+                  search_filters=search_filters, search_notify=search_notify,
+                  baseline=baseline, queue=queue, silence=silence,
+                  on_new=lambda listing: archive_mod.archive_listing(
+                      listing, archive_conf, fetcher))
 
             # Held until every search has been read: recording a rejection now
             # would mark the car silenced before a later search that wants it
@@ -1097,18 +1185,7 @@ def run(cfg: Config | None = None, state: State | None = None, *,
         # hid by filter is still on the site, and forgetting it makes the next
         # run report it as removed - but quietly, and only now that every
         # search has had its say.
-        for lid, (listing, verdict) in rejected.items():
-            if lid in owned:
-                continue
-            why = verdict.reason
-            change = state.record(listing, filtered=True, filter_reason=why,
-                                  filter_rule=verdict.rule)
-            # Changes on hidden cars are not announced but are counted: they
-            # are still facts about the market.
-            if change is not None and change.kind != Change.NEW:
-                report.hidden_events[change.kind] = (
-                    report.hidden_events.get(change.kind, 0) + 1)
-            silence(lid, f"{HIDDEN_REASON_PREFIX}{why}")
+        _hide(rejected, owned, state=state, report=report, silence=silence)
 
         # Now that every search has had its say, drop the results none of
         # them was for: a car one search does not want may be another's.
@@ -1135,6 +1212,8 @@ def run(cfg: Config | None = None, state: State | None = None, *,
             for lid, entry in state.listings.items():
                 if entry.get("search_id") != search.id or lid in owned:
                     continue
+                if on_marketplace(lid):
+                    continue      # judged when its own batch arrives
                 stored = Listing(id=lid, model=str(entry.get("model") or ""))
                 if filters.check(stored, {"models": rules_now["models"]}).wrong_car:
                     wrong_car_ids.add(lid)
@@ -1162,6 +1241,8 @@ def run(cfg: Config | None = None, state: State | None = None, *,
                     continue
                 if entry.get("in_results_at") or lid in seen_anywhere:
                     continue
+                if on_marketplace(lid):
+                    continue      # never in an AutoTrader search to begin with
                 if str(entry.get("status") or "") != "active":
                     # A car already recorded as gone keeps that record;
                     # `prune` clears it on age.
@@ -1207,7 +1288,8 @@ def run(cfg: Config | None = None, state: State | None = None, *,
                 # way, ask the listing pages before calling a sale.
                 watched = [lid for lid, e in state.listings.items()
                            if e.get("search_id") == search.id
-                           and e.get("status") == "active"]
+                           and e.get("status") == "active"
+                           and not on_marketplace(lid)]
                 vanished = [lid for lid in watched if lid not in seen_anywhere]
                 mass = (len(watched) >= MIN_COUNT_FOR_COLLAPSE
                         and len(vanished) > len(watched) * MASS_REMOVAL_FRACTION)
@@ -1271,56 +1353,8 @@ def run(cfg: Config | None = None, state: State | None = None, *,
             # spent on a page we could not read.
 
         # ---- notify -------------------------------------------------
-        # Anything an earlier run detected but could not deliver (quiet hours,
-        # a channel outage) is picked back up here rather than being lost.
-        if not dry_run:
-            already = {c.listing.id for c in changes}
-            held = [c for c in state.pending_changes() if c.listing.id not in already]
-            if held:
-                report.warnings.append(f"re-sending {_many(len(held), 'held alert')}")
-                changes = held + changes
-
-        # Small drops ride along with a new car, and only with one: they
-        # follow the new cars in the next notification that has any, so the
-        # phone never buzzes for a small drop alone.
-        if not dry_run and any(c.kind in Change.NEW_TO_YOU for c in changes):
-            already = {c.listing.id for c in changes}
-            changes = changes + [c for c in state.ride_along_changes()
-                                 if c.listing.id not in already]
-        # One order for every channel, and the order the digest cap cuts in.
-        changes = render.in_order(changes)
-
-        report.quiet = notifiers.in_quiet_hours(settings)
-        if changes and notify and not dry_run and not report.quiet:
-            results = notifiers.dispatch(cfg, changes, report.to_dict(), env)
-            report.notified = [str(r) for r in results]
-            if any(r.ok for r in results):
-                # Mark only the cars the message named. A capped digest ends
-                # "...and N more", so the overflow stays owed and the next run
-                # leads with it.
-                told_about = changes[:max(0, int(
-                    settings.get("max_listings_per_message", 12) or 0))] or changes
-                state.mark_notified(c.listing.id for c in told_about)
-                overflow = len(changes) - len(told_about)
-                if overflow > 0:
-                    # A rider the cap left out stays a rider. Deferring it
-                    # would make it an ordinary owed alert, and it would buzz
-                    # the phone on its own next run.
-                    state.defer(c for c in changes[len(told_about):] if not c.rider)
-            else:
-                # Every channel failed. Hold on to them and try again next run.
-                state.defer(c for c in changes if not c.rider)
-            report.channel_results.extend(results)
-            for result in results:
-                if not result.ok and not result.skipped:
-                    report.warnings.append(f"notification failed: {result}")
-        elif changes and not dry_run and (report.quiet or not notify):
-            state.defer(changes)
-            report.warnings.append(
-                _many(len(changes), "change") + " held"
-                + (" until quiet hours end." if report.quiet else "."))
-        elif changes and dry_run:
-            report.notified = ["dry run: nothing sent"]
+        changes = _deliver(cfg, state, report, changes, env=env, notify=notify,
+                           dry_run=dry_run)
 
         # ---- first-run self-check ------------------------------------
         if report.first_run and assessments:

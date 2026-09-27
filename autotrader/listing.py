@@ -13,6 +13,16 @@ _EDGE_SEPARATOR = re.compile(r"^[\s|,/·\-]+|[\s|,/·\-]+$")
 # What the parser writes when a results card carries no readable name.
 PLACEHOLDER_TITLE = "AutoTrader listing "
 
+# Cars found on Facebook Marketplace carry its item number behind this prefix.
+# No AutoTrader id can start with it: theirs are UUIDs or plain numbers.
+MARKETPLACE_PREFIX = "fb-"
+_MARKETPLACE_ID = re.compile(r"^fb-\d{5,20}$")
+
+
+def on_marketplace(listing_id: Any) -> bool:
+    """True for a car found on Facebook Marketplace rather than AutoTrader."""
+    return bool(_MARKETPLACE_ID.match(str(listing_id or "")))
+
 
 # Where a dealer's hand-typed feature list starts, shared by the trim and the
 # title so both are cut the same way. Dealers type " I " for a pipe and use
@@ -127,6 +137,11 @@ class Listing:
         parts = [str(self.year) if self.year else "", self.make, self.model,
                  self.short_trim]
         return " ".join(p for p in parts if p).strip()
+
+    @property
+    def site(self) -> str:
+        """Where the car is listed: "marketplace" or "autotrader"."""
+        return "marketplace" if on_marketplace(self.id) else "autotrader"
 
     @property
     def price_text(self) -> str:
