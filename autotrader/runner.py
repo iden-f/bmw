@@ -191,14 +191,16 @@ def scope_of(search, cfg: Config) -> str:
     Covers everything that changes which cars a search returns: the link, the
     rules layered on it, and how many pages are read. When it changes, the
     cars that appear were always in scope, so they are a baseline rather
-    than new listings.
+    than new listings. Not the other spellings of the model: adding one is
+    asking to hear about a car the watch was missing, and a baseline would
+    also silence every car that really is new since the last check.
     """
     scraping = cfg.get("scraping", {}) or {}
     rules = cfg.rules_for(search)
     parts = {
         "url": normalise_search_url(search.url),
         "filters": {k: v for k, v in sorted((rules["filters"] or {}).items())
-                    if v not in (None, "", [], {})},
+                    if k != "aliases" and v not in (None, "", [], {})},
         "pages": int(search.max_pages or scraping.get("max_pages", 3) or 1),
         "per_page": int(scraping.get("results_per_page", 50) or 50),
     }

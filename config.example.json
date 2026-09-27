@@ -110,6 +110,15 @@
     "job_overhead_seconds": 25,
     "charged": null
   },
+  "marketplace": {
+    "radius_km": null,
+    "place": "",
+    "exact": false,
+    "new_within_days": 7,
+    "gone_after_days": 10,
+    "silent_after_hours": 2,
+    "unread_after_hours": 6
+  },
   "health": {
     "alert_after_failures": 3,
     "heartbeat_hours": 0,

@@ -277,17 +277,19 @@ class TestAFiringThatStoodDownIsNotACheck:
         when the published file predates the key. Every place that needs the
         answer goes through it; none reads last_run for this.
 
-        Three of them now. The clock strip under the masthead is the third,
+        Four of them now. The clock strip under the masthead is the third,
         and it is the one that would be most obviously wrong: it counts down
         to the next check from the last one, and counting from a firing that
         stood down without reading the site would show a countdown that had
-        already started for a check that never happened.
+        already started for a check that never happened. The fourth is the
+        "What is set up" list on the Status tab, which says when the
+        AutoTrader searches were last read.
         """
         from pathlib import Path
         app = Path("docs/app.js").read_text(encoding="utf-8")
-        assert app.count("= lastCheck(d);") == 3, (
-            "the header, the Status tiles and the clock strip all read the "
-            "last CHECK")
+        assert app.count("= lastCheck(d);") == 4, (
+            "the header, the Status tiles, the clock strip and the set-up "
+            "list all read the last CHECK")
         assert "function lastCheck(" in app
         assert "d.last_check || d.last_run" not in app, (
             "the fallback belongs inside lastCheck, where it can work the "

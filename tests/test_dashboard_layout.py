@@ -1949,6 +1949,86 @@ class TestTheCollectorOnThePage:
         assert not errors, errors
         ctx.close()
 
+    def test_a_long_error_does_not_push_the_page_sideways(self, browser, site, payload):
+        # What a failed page load looks like: a web address with no place to
+        # break it.
+        url = ("https://www.facebook.com/marketplace/example/search/?query=Honda+Civic"
+               "&minYear=2014&maxYear=2021&radius=300&sortBy=creation_time_descend&exact=false")
+        error = f"Error: Page.goto: net::ERR_TIMED_OUT at {url}"
+        d = self.payload_with(payload, failure={"at": payload["generated_at"], "error": error})
+        d["marketplace"]["searches"][0].update(last_error=error, consecutive_failures=2)
+        ctx, page, errors = self.open(browser, site, d, "#/status", width=375)
+        page.wait_for_selector("text=Last problem")
+        wide = page.evaluate("document.documentElement.scrollWidth")
+        assert wide <= 375, f"the Status tab is {wide}px wide"
+        assert not errors, errors
+        ctx.close()
+
+    def test_the_next_batch_note_uses_the_mac_s_own_pace(self, browser, site, payload):
+        d = self.payload_with(payload)
+        d["marketplace"]["last_batch"]["settings"].update(every_minutes=60, jitter_minutes=10)
+        ctx, page, _ = self.open(browser, site, d, "#/status")
+        section = page.locator("section.section", has=page.locator("h2", has_text="Facebook Marketplace"))
+        section.wait_for()
+        text = " ".join(section.text_content().split())
+        assert "then every 50–70 minutes" in text and "a pass every 50–70 minutes" in text
+        assert "20–30" not in text
+        ctx.close()
+
+    def test_a_signed_out_primary_shows_through_a_standby_s_check_in(self, browser, site, payload):
+        from datetime import datetime, timedelta, timezone
+        d = self.payload_with(payload)
+        standby = dict(d["marketplace"]["last_batch"], host="collector-b", role="standby",
+                       polled=False, note="standing by for collector-a")
+        primary = dict(standby, host="collector-a", role="primary", polled=True,
+                       session="signed_out", received=(datetime.now(timezone.utc)
+                       - timedelta(minutes=20)).isoformat(timespec="seconds"))
+        d["marketplace"]["last_batch"] = standby
+        d["marketplace"]["hosts"] = {"collector-a": primary, "collector-b": standby}
+        ctx, page, errors = self.open(browser, site, d, "#/status")
+        page.wait_for_selector("#clock-mp-cell:not([hidden])")
+        assert page.text_content("#clock-mp") == "signed out"
+        assert "collector-a" in page.get_attribute("#clock-mp", "title")
+        setup = page.locator("section.section", has=page.locator("h2", has_text="What is set up"))
+        row = setup.locator("li", has_text="Facebook Marketplace")
+        assert row.get_attribute("data-state") == "todo" and "collector/run login" in row.text_content()
+        assert not errors, errors
+        ctx.close()
+
+    def test_one_spelling_set_by_hand_still_draws_the_searches_tab(self, browser, site, payload):
+        d = self.payload_with(payload)
+        d["searches"][0]["rules"]["filters"]["aliases"] = "Civik"
+        ctx, page, errors = self.open(browser, site, d, "#/searches")
+        page.wait_for_selector("text=Also counts as Civic")
+        box = page.locator("input[placeholder^='other spellings']")
+        assert box.input_value() == "Civik"
+        assert not errors, errors
+        ctx.close()
+
+    def test_an_open_tab_re_reads_when_the_next_batch_is_due(self, browser, site, payload):
+        from datetime import datetime, timezone
+        d = self.payload_with(payload, minutes_ago=2, next_in=2)
+        ctx = browser.new_context(viewport={"width": 1440, "height": 900},
+                                  service_workers="block")
+        page = ctx.new_page()
+        page.clock.install(time=datetime.now(timezone.utc))
+        fetched: list[int] = []
+
+        def serve(route):
+            fetched.append(1)
+            route.fulfill(status=200, content_type="application/json", body=json.dumps(d))
+        page.route("**/data.json", serve)
+        page.goto(site + "#/feed", wait_until="networkidle")
+        at_load = len(fetched)
+        # The AutoTrader countdown is far from due, so only the collector's
+        # next batch can be the reason to ask again.
+        page.clock.run_for(60_000)
+        assert len(fetched) == at_load
+        page.clock.run_for(5 * 60_000)
+        page.wait_for_timeout(200)
+        assert len(fetched) > at_load
+        ctx.close()
+
     def test_a_young_watch_says_it_is_young(self, browser, site, payload):
         import copy
         d = copy.deepcopy(payload)

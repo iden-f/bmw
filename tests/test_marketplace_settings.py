@@ -46,7 +46,46 @@ class TestOtherSpellings:
         cfg.data["searches"][0]["filters"]["aliases"] = ["Civik"]
         [item] = M.plan(cfg)
         judged = M.judge(cfg, cfg.searches[0], [rec("100000001", title="2018 Honda civik ex")], item)
+        # Stored as the model it stands for, so it is priced with the others.
+        assert [l.model for l in judged.kept] == ["Civic"]
+
+    def test_with_several_models_the_spelling_found_is_kept(self, cfg):
+        cfg.data["searches"][0]["filters"].update(models=["Civic", "Accord"], aliases=["Civik"])
+        [item] = M.plan(cfg)
+        judged = M.judge(cfg, cfg.searches[0], [rec("100000001", title="2018 Honda civik ex")], item)
+        # Which of the two it stands for is not known, so it is not guessed.
         assert [l.model for l in judged.kept] == ["Civik"]
+
+    def test_adding_one_does_not_restart_the_autotrader_search(self, cfg, tmp_path):
+        from autotrader.runner import scope_of
+        before = scope_of(cfg.searches[0], cfg)
+        apply(cfg, State(path=tmp_path / "s.json"),
+              {"action": "set-rule", "search": cfg.searches[0].id, "rule": "aliases",
+               "value": ["Civik"]})
+        assert cfg.searches[0].filters["aliases"] == ["Civik"]
+        assert scope_of(cfg.searches[0], cfg) == before
+
+    def test_taking_one_away_drops_the_cars_it_let_in(self, cfg, tmp_path):
+        st = State(path=tmp_path / "s.json")
+        sid = cfg.searches[0].id
+        apply(cfg, st, {"action": "set-rule", "search": sid, "rule": "aliases", "value": ["Civik"]})
+        car = rec("100000001", title="2018 Honda civik ex")
+        M.ingest(cfg, st, batch(part(sid, car, rec("100000002"))), env={}, notify=False)
+        assert st.listings["fb-100000001"]["status"] == "active"
+        apply(cfg, st, {"action": "set-rule", "search": sid, "rule": "aliases", "value": None})
+        report = M.ingest(cfg, st, batch(part(sid, car, rec("100000002"))), env={}, notify=False)
+        assert "fb-100000001" not in st.listings and report.discarded == 1
+        assert st.listings["fb-100000002"]["status"] == "active"
+
+    def test_one_written_by_hand_is_one_name_not_its_letters(self, cfg):
+        cfg.data["searches"][0]["filters"]["aliases"] = "Civik"
+        assert M.plan(cfg)[0]["aliases"] == ["Civik"]
+
+    def test_the_set_command_stores_one_as_a_list(self, cfg):
+        from autotrader import cli
+        assert cli.main(["--config", str(cfg.path), "set", "aliases", "Civik",
+                         "--search", "Example search"]) == 0
+        assert Config.load(cfg.path).searches[0].filters["aliases"] == ["Civik"]
 
     def test_adding_one_does_not_restart_the_search(self, cfg):
         before = M.plan(cfg)[0]["scope"]
@@ -104,6 +143,50 @@ class TestReadingASearchOnMarketplaceOrNot:
         entry = st.listings["fb-100000001"]
         assert entry["status"] == "gone"
         assert entry["gone_reason"] == "Marketplace is switched off for this search"
+        # Quietly: nothing is owed an alert.
+        assert entry.get("pending") is None and entry.get("notified") is not False
+
+    def test_a_batch_still_reading_it_is_not_taken_in(self, cfg, tmp_path):
+        # A pass planned before the switch, or a Mac not yet updated.
+        st = State(path=tmp_path / "s.json")
+        sid = cfg.searches[0].id
+        M.ingest(cfg, st, batch(part(sid, rec("100000001"))), env={}, notify=False)
+        apply(cfg, st, {"action": "set-marketplace", "search": sid, "enabled": False})
+        for _ in range(2):
+            report = M.ingest(cfg, st, batch(part(sid, rec("100000001", price=21000),
+                                                  rec("100000003"))), env={}, notify=False)
+            assert report.new == 0 and report.relisted == 0
+        assert "fb-100000003" not in st.listings
+        entry = st.listings["fb-100000001"]
+        assert entry["status"] == "gone" and "relisted_at" not in entry
+        assert entry.get("pending") is None
+
+    def test_switched_back_on_its_cars_did_not_come_back(self, cfg, tmp_path):
+        st = State(path=tmp_path / "s.json")
+        sid = cfg.searches[0].id
+        M.ingest(cfg, st, batch(part(sid, rec("100000001"), rec("100000002"))),
+                 env={}, notify=False)
+        apply(cfg, st, {"action": "set-marketplace", "search": sid, "enabled": False})
+        M.ingest(cfg, st, batch(), env={}, notify=False)
+        apply(cfg, st, {"action": "set-marketplace", "search": sid, "enabled": True})
+        report = M.ingest(cfg, st, batch(part(sid, rec("100000001"),
+                                              rec("100000002", price=21000))),
+                          env={}, notify=False)
+        assert report.relisted == 0
+        for lid in ("fb-100000001", "fb-100000002"):
+            entry = st.listings[lid]
+            assert entry["status"] == "active" and "relisted_at" not in entry
+            assert "gone_reason" not in entry and entry.get("pending") is None
+
+    def test_switched_off_its_old_error_goes_with_it(self, cfg, tmp_path):
+        st = State(path=tmp_path / "s.json")
+        sid = cfg.searches[0].id
+        M.ingest(cfg, st, batch(part(sid, ok=False, error="the page came back empty")),
+                 env={}, notify=False)
+        assert build_payload(cfg, st, {})["marketplace"]["searches"]
+        apply(cfg, st, {"action": "set-marketplace", "search": sid, "enabled": False})
+        M.ingest(cfg, st, batch(), env={}, notify=False)
+        assert build_payload(cfg, st, {})["marketplace"]["searches"] == []
 
     def test_needs_a_real_search_and_a_yes_or_no(self, cfg, tmp_path):
         st = State(path=tmp_path / "s.json")
@@ -164,7 +247,9 @@ class TestWhatTheCollectorSaysOfItself:
     def test_nonsense_is_dropped(self, cfg, tmp_path):
         st = State(path=tmp_path / "s.json")
         b = batch()
-        b["settings"] = {"every_minutes": "lots", "quiet_start": "midnight"}
+        b["settings"] = {"every_minutes": "lots", "quiet_start": "midnight",
+                         "jitter_minutes": float("nan"), "scrolls": True,
+                         "takeover_after_minutes": float("inf")}
         b["last_failure"] = "not a dict"
         M.ingest(cfg, st, b, env={}, notify=False)
         heard = st.data["marketplace"]["last_batch"]

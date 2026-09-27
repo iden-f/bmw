@@ -125,8 +125,8 @@ On the watch's side, from the dashboard's **Searches** tab:
 
 | Setting | Default | Meaning |
 |---|---|---|
-| Marketplace, per search | on | Whether the search is also read on Marketplace. Switched off, its Marketplace cars are written off quietly. |
-| Also counts as | none | Other spellings of the search's model |
+| Marketplace, per search | on | Whether the search is also read on Marketplace. Switched off, its Marketplace cars are written off quietly and any batch still reading it is ignored; switched back on, its first read is a starting point, not a list of new cars. |
+| Also counts as | none | Other spellings of the search's model. Taking one away drops the Marketplace cars only it let in. |
 | `marketplace.radius_km` | each search's own | How far Marketplace is asked to look, at most 500 km |
 | `marketplace.place` | from `near` | The word for your area in Marketplace's own addresses |
 | `marketplace.exact` | loose | Exact matching reads fewer cars of other models, and may miss one titled another way. The same pages are read either way. |

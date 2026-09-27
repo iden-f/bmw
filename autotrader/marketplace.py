@@ -16,6 +16,7 @@ import binascii
 import hashlib
 import json
 import logging
+import math
 import re
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
@@ -477,9 +478,16 @@ def model_in(title: str, models: Iterable[str]) -> str:
 
 
 def to_listing(rec: dict[str, Any], search, *, make: str = "",
-               models: Iterable[str] = ()) -> Listing:
-    """A collector's record as a car the rest of the bot understands."""
+               models: Iterable[str] = (), aliases: Iterable[str] = ()) -> Listing:
+    """A collector's record as a car the rest of the bot understands.
+
+    ``aliases`` are other spellings the owner said count as the model. A car
+    found by one is stored under the model itself when the search has only
+    one, so it is priced and grouped with the rest of that model.
+    """
     models = [str(m) for m in models if str(m).strip()]
+    aliases = [str(a) for a in aliases if str(a).strip()]
+    names = models + aliases
     title = tidy_title(rec.get("title") or "")
     status = str(rec.get("title_status") or "")
     if status and status.lower() not in ("clean", "unknown", "not sure"):
@@ -493,10 +501,12 @@ def to_listing(rec: dict[str, Any], search, *, make: str = "",
     # in turn, and the field is trusted as it stands only when none of them
     # names a watched model.
     named = str(rec.get("model") or "")
-    model = (model_in(named, models)
-             or model_in(f"{named} {rec.get('trim') or ''}", models)
-             or model_in(title, models)
+    model = (model_in(named, names)
+             or model_in(f"{named} {rec.get('trim') or ''}", names)
+             or model_in(title, names)
              or named)
+    if model in aliases and model not in models and len(models) == 1:
+        model = models[0]
     if not model and make:
         # Not a model the search wants, so name whatever follows the make:
         # the models rule then says which car it is instead of "unnamed".
@@ -507,7 +517,7 @@ def to_listing(rec: dict[str, Any], search, *, make: str = "",
                 model = words[i + len(mk)].upper()
                 break
     car_make = str(rec.get("make") or "")
-    if not car_make and make and (model in models or make.lower() in title.lower()):
+    if not car_make and make and (model in names or make.lower() in title.lower()):
         car_make = make
 
     listing = Listing(
@@ -594,7 +604,8 @@ def judge(cfg, search, records: Iterable[dict[str, Any]],
     records = [r for r in records
                if isinstance(r, dict) and _ITEM_ID.match(str(r.get("id") or ""))]
     listings = [to_listing(r, search, make=item.get("make", ""),
-                           models=matching(item)) for r in records]
+                           models=item.get("models") or (),
+                           aliases=item.get("aliases") or ()) for r in records]
     out = Judged()
     out.sold = {MARKETPLACE_PREFIX + str(r["id"]) for r in records if r.get("sold")}
     out.pending = {MARKETPLACE_PREFIX + str(r["id"]) for r in records if r.get("pending")}
@@ -621,11 +632,6 @@ SCOPE_KEYS = ("search", "make", "models", "min_year", "max_year", "min_price",
 # "exact" changes the queries' addresses, so it moves the scope through them.
 
 
-def matching(item: dict[str, Any]) -> list[str]:
-    """The names a plan entry's cars may go by: its models, then their aliases."""
-    return list(item.get("models") or []) + list(item.get("aliases") or [])
-
-
 def plan(cfg) -> list[dict[str, Any]]:
     """What the collector should look for: one entry per active search.
 
@@ -640,8 +646,8 @@ def plan(cfg) -> list[dict[str, Any]]:
         rules = cfg.rules_for(search)["filters"]
         summary = describe_search(search.url)
         make = summary.make or ""
-        models = [str(m).strip() for m in (rules.get("models") or []) if str(m).strip()] \
-            or ([summary.model] if summary.model else [])
+        models = [str(m).strip() for m in filters._as_list(rules.get("models"))
+                  if str(m).strip()] or ([summary.model] if summary.model else [])
         if not make and not models:
             continue
         near = str(rules.get("near") or "").strip() or ", ".join(
@@ -667,7 +673,7 @@ def plan(cfg) -> list[dict[str, Any]]:
             "exact": bool(conf.get("exact")),
             # Other spellings that count as the model. They change what is
             # kept, not what is asked, so they are not part of the scope.
-            "aliases": [str(a).strip() for a in (rules.get("aliases") or [])
+            "aliases": [str(a).strip() for a in filters._as_list(rules.get("aliases"))
                         if str(a).strip()] if models else [],
         }
         item["queries"] = [{"query": " ".join(p for p in (make, model) if p),
@@ -706,6 +712,7 @@ GONE_AFTER_DAYS = 10
 NEW_WITHIN_DAYS = 7
 STARTING_POINT = ("already for sale when Marketplace was first read for this "
                   "search, so recorded as a starting point")
+SWITCHED_OFF = "Marketplace is switched off for this search"
 SESSION_WORDS = {
     "signed_out": "Facebook has signed the collector out",
     "checkpoint": "Facebook wants the collector's account to confirm who it is",
@@ -792,12 +799,15 @@ def ingest(cfg, state: State, batch: dict[str, Any], *,
     rejected: dict[str, tuple[Listing, filters.Verdict]] = {}
     read_ok: set[str] = set()
     settled: list[tuple[dict[str, Any], Judged]] = []
+    wrong: set[str] = set()
     health_all = section.setdefault("searches", {})
 
     for part in batch.get("searches") or []:
         search = by_id.get(str(part.get("search") or ""))
-        if search is None:
-            continue          # a search deleted since the collector last looked
+        if search is None or not search.marketplace:
+            # Deleted, or switched off for Marketplace, since the collector
+            # last looked, or a collector not yet updated still reading it.
+            continue
         health = health_all.setdefault(search.id, {})
         if not part.get("ok"):
             report.searches_failed += 1
@@ -817,6 +827,13 @@ def ingest(cfg, state: State, batch: dict[str, Any], *,
         judged = judge(cfg, search, part.get("listings") or [], item, owned)
         on_sale, sold, pending = judged.on_sale, judged.sold, judged.pending
         report.listings_seen += len(on_sale)
+        for listing in on_sale:
+            entry = state.listings.get(listing.id)
+            if entry and entry.get("status") == "gone" \
+                    and entry.get("gone_reason") == SWITCHED_OFF:
+                entry["status"] = "active"
+                entry.pop("gone_reason", None)
+                entry.pop("removed_at", None)
 
         # The first batch for a search, or one read differently, is a starting
         # point: dozens of cars already for sale are not dozens of new ones.
@@ -836,6 +853,8 @@ def ingest(cfg, state: State, batch: dict[str, Any], *,
 
         if judged.other:
             report.not_this_car[search.name] = len(judged.other)
+            wrong.update(l.id for l, _ in judged.other
+                         if (state.listings.get(l.id) or {}).get("search_id") == search.id)
         kept, unpriced, dropped = judged.kept, judged.unpriced, judged.hidden
         owned.update(l.id for l in kept)
         owned.update(l.id for l in unpriced)
@@ -872,13 +891,31 @@ def ingest(cfg, state: State, batch: dict[str, Any], *,
     for health, judged in settled:
         health["breakdown"] = judged.breakdown(owned)
 
+    # A car stored for a search that no longer counts it as its model - an
+    # alias or a model taken off - is dropped, as a check drops AutoTrader's.
+    # Not when another search kept or hid it this batch.
+    wrong -= owned | set(rejected)
+    if wrong and not dry_run:
+        dropped = state.discard_wrong_cars(wrong)
+        if dropped:
+            report.discarded += len(dropped)
+            report.warnings.append(
+                f"dropped {len(dropped)} stored Marketplace "
+                f"{'car' if len(dropped) == 1 else 'cars'} that the "
+                f"{'search no longer counts' if len(dropped) == 1 else 'searches no longer count'}"
+                f" as the model it is for.")
+
     # A search switched off for Marketplace keeps no Marketplace cars as if
     # they were still watched: they are written off, quietly, with the reason.
+    # Its health goes too, so an old error does not stay on the Status tab
+    # and the first read after it is switched back on is a starting point.
     off = {s.id for s in cfg.active_searches if not s.marketplace}
+    for sid in off:
+        health_all.pop(sid, None)
     for lid, entry in list(state.listings.items()):
         if on_marketplace(lid) and entry.get("status") == "active" \
                 and entry.get("search_id") in off:
-            if state.mark_gone(lid, "Marketplace is switched off for this search"):
+            if state.mark_gone(lid, SWITCHED_OFF):
                 report.removed += 1
 
     # A car not seen for days while its search reads fine has gone. Absence
@@ -933,8 +970,10 @@ def _collector_settings(raw: Any) -> dict[str, Any]:
     out: dict[str, Any] = {}
     for key in ("every_minutes", "jitter_minutes", "details_per_cycle", "scrolls",
                 "takeover_after_minutes"):
-        if isinstance(raw.get(key), (int, float)) and not isinstance(raw.get(key), bool):
-            out[key] = max(0, min(int(raw[key]), 10_000))
+        value = raw.get(key)
+        if isinstance(value, (int, float)) and not isinstance(value, bool) \
+                and math.isfinite(value):
+            out[key] = max(0, min(int(value), 10_000))
     for key in ("quiet_start", "quiet_end"):
         if re.fullmatch(r"\d{1,2}:\d{2}", str(raw.get(key) or "")):
             out[key] = str(raw[key])

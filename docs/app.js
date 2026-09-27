@@ -334,6 +334,9 @@ function stamp(iso) {
   return t ? new Date(t).toLocaleString('en-CA',
     { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', hour12: false }) : '—';
 }
+// A time of day on the same 24-hour clock as stamp().
+const clockTime = t => new Date(t).toLocaleTimeString('en-CA',
+  { hour: '2-digit', minute: '2-digit', hour12: false });
 /* A placeholder that is a car, rather than a grey rectangle or the title
    printed a second time under the title. */
 const CAR_GLYPH = `<svg width="34" height="22" viewBox="0 0 34 22" fill="none" aria-hidden="true">
@@ -711,22 +714,34 @@ function clockState() {
 }
 
 /* When the Marketplace collector last sent, when it means to send next, and
-   whether it is late. Its own next_at when it sent one; otherwise the far
-   end of its interval. */
+   whether it is late. Each computer's own next_at when it sent one;
+   otherwise the far end of its interval.
+
+   With a second Mac on standby, every computer heard in the last two hours
+   counts: a standby checks in each pass while the primary stays in charge,
+   so the newest batch alone would hide a primary Facebook signed out. */
 function collectorTiming(m) {
   const last = m?.last_batch;
   if (!last || !last.received) return null;
-  const heard = Date.parse(last.received);
-  const s = last.settings || {};
-  const planned = Date.parse(last.next_at || '');
-  const due = Number.isFinite(planned) ? planned
-    : heard + ((s.every_minutes || 25) + (s.jitter_minutes ?? 5)) * 60000;
-  const over = Date.now() - due;
+  const dueOf = h => {
+    const planned = Date.parse(h.next_at || '');
+    const s = h.settings || {};
+    return Number.isFinite(planned) ? planned
+      : Date.parse(h.received) + ((s.every_minutes || 25) + (s.jitter_minutes ?? 5)) * 60000;
+  };
+  const heard = [[last.host || '', last], ...Object.entries(m.hosts || {}).filter(([, h]) =>
+    h && h.received && Date.now() - Date.parse(h.received) < 2 * 3.6e6)];
+  const due = Math.max(...heard.map(([, h]) => dueOf(h)).filter(Number.isFinite));
+  const out = heard.find(([, h]) => SESSION_SAYS[h.session]);
   return {
-    heard, due,
+    heard: Date.parse(last.received), due,
     // A pass takes a few minutes, and the bot's run after it a few more.
-    late: over > 15 * 60000,
-    signedOut: Boolean(SESSION_SAYS[last.session]),
+    late: Date.now() - due > 15 * 60000,
+    signedOut: Boolean(out),
+    // What Facebook said, and to which computer when it is not the one
+    // that sent last.
+    says: out ? SESSION_SAYS[out[1].session]
+      + (out[0] && out[0] !== (last.host || '') ? ` (${out[0]})` : '') : '',
   };
 }
 
@@ -743,10 +758,10 @@ function renderClock() {
       const last = app.data.marketplace.last_batch;
       dd.textContent = mt.signedOut ? 'signed out' : when(last.received);
       mpCell.dataset.state = mt.signedOut || mt.late ? 'late' : 'ok';
-      dd.title = mt.signedOut ? SESSION_SAYS[last.session]
+      dd.title = mt.signedOut ? mt.says
         : `Last batch from ${last.host || 'the collector'} ${stamp(last.received)}; `
           + (mt.late ? `the next was due ${when(new Date(mt.due).toISOString())}.`
-                     : `the next is due about ${new Date(mt.due).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}.`);
+                     : `the next is due about ${clockTime(mt.due)}.`);
     }
   }
   // The strip is in the markup from the first paint, showing dashes, so it
@@ -802,9 +817,11 @@ function startClock() {
   const tick = () => {
     if (document.hidden) return;
     renderClock();
-    // Only worth asking once the countdown is close to running out.
+    // Only worth asking once the countdown is close to running out, or once
+    // the collector's next batch is due: each one republishes the page.
     const c = clockState();
-    if (c && (c.state === 'due' || c.fill > 0.75)) refreshData();
+    const mt = collectorTiming(app.data?.marketplace);
+    if ((c && (c.state === 'due' || c.fill > 0.75)) || (mt && Date.now() > mt.due)) refreshData();
   };
   if (clockTimer) clearInterval(clockTimer);
   clockTimer = setInterval(tick, 1000);
@@ -2009,7 +2026,7 @@ function renderSearches() {
     const area = s.area?.text;
     // The model and area the bot enforces itself are shown, so every rule
     // applied is visible somewhere on the page.
-    const models = (s.rules?.filters?.models || []);
+    const models = [].concat(s.rules?.filters?.models ?? []);
     kv.innerHTML =
       `<dt>Watching</dt><dd>${esc(searchWords(s))}
          · <a href="${esc(s.url)}" rel="noopener" target="_blank">open on autotrader.ca</a></dd>` +
@@ -2046,9 +2063,10 @@ function renderSearches() {
 /* Other spellings that also count as a search's model: the owner's fix when
    a seller writes the model some way the matching does not catch. */
 function aliasesEditor(s) {
-  const models = s.rules?.filters?.models || [];
+  const models = [].concat(s.rules?.filters?.models ?? []);
   if (!models.length) return null;
-  const saved = s.rules?.filters?.aliases || [];
+  // A list, or one name when set by hand with `python -m autotrader set`.
+  const saved = [].concat(s.rules?.filters?.aliases ?? []);
   const id = s.id.replace(/[^a-z0-9]/gi, '');
   const box = el('div');
   box.style.marginTop = 'var(--s4)';
@@ -2099,7 +2117,7 @@ const MP_SETTINGS = [
   ['new_within_days', 'New within, days', 'number', '7',
    'A car Facebook dates further back is recorded, not announced, when it first shows up among the results read.'],
   ['gone_after_days', 'Gone after, days', 'number', '10',
-   'A car not seen for this long, while its search reads fine, is taken as sold.'],
+   'A car not seen for this long, while its search reads fine, counts as gone.'],
   ['exact', 'Match', 'bool', '',
    'Loose asks Marketplace for anything like the search and reads most cars of the make; '
    + 'exact reads fewer cars of other models, and may miss one titled some other way. '
@@ -2327,7 +2345,7 @@ function setupPanel(d) {
     const last = m.last_batch;
     add(mt.signedOut || mt.late ? 'todo' : 'ok',
       `Facebook Marketplace, read by ${esc(last.host || 'the collector')}: last batch ${when(last.received)}`,
-      mt.signedOut ? `${SESSION_SAYS[last.session]}.`
+      mt.signedOut ? `${esc(mt.says)}.`
       : mt.late ? 'It is late. On the Mac, <code class="mono">collector/run status</code> says why.'
       : '');
   } else {
@@ -2381,9 +2399,8 @@ function marketplaceSection(m) {
   s.innerHTML = `<div class="section__head"><h2>Facebook Marketplace</h2>
     <span class="count num">${num(m.cars ?? 0)} watched</span></div>`;
   const stats = el('dl', 'stats');
-  const session = SESSION_SAYS[last.session];
   const timing = collectorTiming(m);
-  const clockAt = ms => new Date(ms).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  const session = timing.says;
   // The latest thing that went wrong: a pass that failed before it could
   // send, or a search that did not read. Only within the last day.
   const recent = at => at && Date.now() - Date.parse(at) < 864e5;
@@ -2400,11 +2417,11 @@ function marketplaceSection(m) {
         last.role ? ` · ${esc(last.role)}` : ''}${
         last.polled ? '' : ` · ${esc(last.note || 'resting')}`}</dd></div>
     <div class="stat" data-tone="${timing.late ? 'warn' : ''}">
-      <dt>Next batch</dt><dd>${timing.late ? 'Late' : `about ${clockAt(timing.due)}`}</dd>
+      <dt>Next batch</dt><dd>${timing.late ? 'Late' : `about ${clockTime(timing.due)}`}</dd>
       <dd class="stat__note">${timing.late
         ? `was due ${when(new Date(timing.due).toISOString())} — on the Mac, `
           + '<code class="mono">collector/run status</code> says why'
-        : 'then every 20–30 minutes, and only a check-in overnight'}</dd></div>
+        : `then ${paceOf(last.settings)}`}</dd></div>
     <div class="stat" data-tone="${session ? 'bad' : 'good'}">
       <dt>Facebook</dt><dd>${session ? 'Not reading' : 'Signed in'}</dd>
       <dd class="stat__note">${esc(session || 'reading as the signed-in account')}</dd></div>
@@ -2461,16 +2478,22 @@ function marketplaceSection(m) {
   return s;
 }
 
+/* "every 20–30 minutes", from what the collector said of itself. */
+function paceOf(cs) {
+  const every = cs?.every_minutes ?? 25;
+  const jitter = cs?.jitter_minutes ?? 5;
+  return `every ${num(Math.max(1, every - jitter))}–${num(every + jitter)} minutes`
+    + (cs?.quiet_start && cs?.quiet_end ? ', and only a check-in overnight' : '');
+}
+
 /* How the collector is set up, as it reported itself. Shown, never
    editable: only the Mac decides how often it visits Facebook. */
 function collectorSettings(cs) {
   const frag = document.createDocumentFragment();
   if (!cs || !Object.keys(cs).length) return frag;
-  const every = cs.every_minutes ?? 25;
-  const jitter = cs.jitter_minutes ?? 5;
   const dl = el('dl', 'kv');
   dl.innerHTML =
-    `<dt>Pace</dt><dd>a pass every ${num(Math.max(1, every - jitter))}–${num(every + jitter)} minutes
+    `<dt>Pace</dt><dd>a pass ${paceOf({ ...cs, quiet_start: '' })}
        <span class="note" style="margin:0">— slow on purpose, and never on the minute: it reads
        the way a person browsing would, which keeps the account clear of Facebook's checks</span></dd>` +
     (cs.quiet_start && cs.quiet_end ? `<dt>Overnight</dt><dd>${esc(cs.quiet_start)}–${esc(cs.quiet_end)} on the Mac's clock

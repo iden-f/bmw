@@ -130,7 +130,9 @@ def primary_heard(cfg: S.Settings, state: dict[str, Any],
 
 def _wanted(rec: dict[str, Any], item: dict[str, Any], cfg: Config, search) -> bool:
     """Whether the bot will keep this car: worth opening its own page."""
-    car = M.to_listing(rec, search, make=item.get("make", ""), models=M.matching(item))
+    car = M.to_listing(rec, search, make=item.get("make", ""),
+                       models=item.get("models") or (),
+                       aliases=item.get("aliases") or ())
     return filters.check(car, cfg.rules_for(search)["filters"]).keep
 
 

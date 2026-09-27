@@ -233,6 +233,10 @@ def _coerce(text: str) -> Any:
     return text
 
 
+_NAME_LISTS = {"models", "aliases", "include_keywords", "exclude_keywords",
+               "exclude_sellers", "provinces"}
+
+
 def cmd_set(args: argparse.Namespace) -> int:
     """Change one setting, globally or for a single search."""
     cfg = Config.load(args.config)
@@ -255,6 +259,10 @@ def cmd_set(args: argparse.Namespace) -> int:
                 head, _, tail = args.key.partition(".")
                 raw.setdefault(head, {})[tail] = value
             else:
+                # A rule that holds names holds a list, even of one.
+                if args.key in _NAME_LISTS and value is not None \
+                        and not isinstance(value, list):
+                    value = [str(value)]
                 raw.setdefault("filters", {})[args.key] = value
         cfg.save()
         print(_ok(f"{target.name}: {args.key} = {value!r}"))
