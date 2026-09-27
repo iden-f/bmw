@@ -354,16 +354,21 @@ class TestTheRuleAPersonIsMostLikelyToChange:
         rule with a range this test knows nothing about still exercises it.
         """
         for name, kind in control.RULE_TYPES.items():
+            where = {}
             if kind is bool:
                 value = True
             elif kind is str:
                 value = "K1P 1J1"
+            elif kind is list:
+                # A list rule belongs to one search.
+                value = ["Example Model"]
+                where = {"search": cfg_with().searches[0].id}
             else:
                 low, high = control.RULE_BOUNDS[name]
                 value = kind((low + high) / 2)
             cfg, st = cfg_with(), state_with()
             out = control.apply(cfg, st, [{"action": "set-rule", "rule": name,
-                                           "value": value}])
+                                           "value": value, **where}])
             assert out.changed, f"{name}={value!r}: {out.rejected}"
 
     def test_every_numeric_rule_has_bounds(self):

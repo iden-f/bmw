@@ -199,6 +199,8 @@ def build_payload(cfg: Config, state: State, env: dict[str, str] | None = None
         searches.append({
             "id": search.id, "name": search.name, "url": search.url,
             "enabled": search.enabled, "notes": search.notes,
+            # Whether the Marketplace collector reads it too.
+            "marketplace": search.marketplace,
             "summary": summary.to_dict(),
             "health": {
                 "last_ok": health.get("last_ok"),
@@ -351,7 +353,8 @@ def build_payload(cfg: Config, state: State, env: dict[str, str] | None = None
         "coverage": dict(
             insight.coverage(
                 runs, int(cfg.get("health.expected_interval_minutes", 30) or 30),
-                since_change=state.schedule_changed_at),
+                since_change=state.schedule_changed_at,
+                started=state.watch_started),
             # The threshold the silence alarm uses, so the page and the alarm
             # agree on when a check is overdue.
             silent_after_hours=float(cfg.get("health.silent_after_hours") or 0)),
@@ -415,6 +418,7 @@ def _marketplace(cfg: Config, state: State) -> dict[str, Any] | None:
             {"id": sid, "name": names.get(sid, sid),
              "last_ok": h.get("last_ok"), "last_count": h.get("last_count", 0),
              "last_error": h.get("last_error"),
+             "last_error_at": h.get("last_error_at"),
              "consecutive_failures": h.get("consecutive_failures", 0),
              # Where the cars read went: another model, hidden by a rule,
              # or kept. Absent until the first batch after this was added.

@@ -393,7 +393,7 @@ def _is_a_schedule(how: str) -> bool:
 
 def coverage(runs: list[dict[str, Any]], expected_minutes: int = 30,
              window_hours: int = 24, now: datetime | None = None,
-             *, since_change: str | None) -> dict[str, Any]:
+             *, since_change: str | None, started: str | None = None) -> dict[str, Any]:
     """How much of the recent window was actually watched.
 
     The honest measure is not whether the last run worked but what fraction
@@ -416,6 +416,14 @@ def coverage(runs: list[dict[str, Any]], expected_minutes: int = 30,
     if changed is not None and changed > start:
         start = changed
         partial = True
+    # Nor over hours before the watch existed: a watch started this morning
+    # has not missed last night.
+    began = _dt(started)
+    new_install = False
+    if began is not None and began > start:
+        start = began
+        new_install = True
+        partial = False
     measured_hours = max(0.0, _hours_between(now, start))
     # Complete slots only: counting the slot in progress either flatters the
     # figure (a check has landed) or damns it (one is still due).
@@ -497,6 +505,9 @@ def coverage(runs: list[dict[str, Any]], expected_minutes: int = 30,
         # True when a schedule change cut the window short, so the page can
         # say the measurement is partial.
         "partial": partial,
+        # True when the watch itself is younger than the window.
+        "new_install": new_install,
+        "started": began.isoformat(timespec="seconds") if began else None,
         # Three slots is the fewest that can tell a schedule from an accident;
         # below that the page says how long it has been measuring instead.
         "too_short": complete < 3,

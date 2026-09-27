@@ -594,7 +594,7 @@ def judge(cfg, search, records: Iterable[dict[str, Any]],
     records = [r for r in records
                if isinstance(r, dict) and _ITEM_ID.match(str(r.get("id") or ""))]
     listings = [to_listing(r, search, make=item.get("make", ""),
-                           models=item.get("models", [])) for r in records]
+                           models=matching(item)) for r in records]
     out = Judged()
     out.sold = {MARKETPLACE_PREFIX + str(r["id"]) for r in records if r.get("sold")}
     out.pending = {MARKETPLACE_PREFIX + str(r["id"]) for r in records if r.get("pending")}
@@ -614,6 +614,18 @@ def _place(near: str) -> str:
     return re.sub(r"[^a-z0-9]", "", city)
 
 
+# What a search asks Marketplace. A change to any of these is a new starting
+# point; anything else on a plan entry (its name, its aliases) is not.
+SCOPE_KEYS = ("search", "make", "models", "min_year", "max_year", "min_price",
+              "max_price", "place", "latitude", "longitude", "radius_km", "queries")
+# "exact" changes the queries' addresses, so it moves the scope through them.
+
+
+def matching(item: dict[str, Any]) -> list[str]:
+    """The names a plan entry's cars may go by: its models, then their aliases."""
+    return list(item.get("models") or []) + list(item.get("aliases") or [])
+
+
 def plan(cfg) -> list[dict[str, Any]]:
     """What the collector should look for: one entry per active search.
 
@@ -623,6 +635,8 @@ def plan(cfg) -> list[dict[str, Any]]:
     conf = cfg.get("marketplace", {}) or {}
     out = []
     for search in cfg.active_searches:
+        if not search.marketplace:
+            continue          # switched off for this search on the dashboard
         rules = cfg.rules_for(search)["filters"]
         summary = describe_search(search.url)
         make = summary.make or ""
@@ -648,13 +662,20 @@ def plan(cfg) -> list[dict[str, Any]]:
             "latitude": point[0] if point else None,
             "longitude": point[1] if point else None,
             "radius_km": max(1, min(radius, MAX_RADIUS_KM)),
+            # Marketplace's own "exact match": fewer cars of other models
+            # read, at the risk of missing a car titled some other way.
+            "exact": bool(conf.get("exact")),
+            # Other spellings that count as the model. They change what is
+            # kept, not what is asked, so they are not part of the scope.
+            "aliases": [str(a).strip() for a in (rules.get("aliases") or [])
+                        if str(a).strip()] if models else [],
         }
         item["queries"] = [{"query": " ".join(p for p in (make, model) if p),
                             "url": search_url(item, " ".join(p for p in (make, model) if p))}
                            for model in (models or [""])]
         item["scope"] = hashlib.sha256(json.dumps(
-            {k: item[k] for k in sorted(item) if k != "name"},
-            sort_keys=True, default=str).encode()).hexdigest()[:16]
+            {k: item[k] for k in SCOPE_KEYS}, sort_keys=True,
+            default=str).encode()).hexdigest()[:16]
         out.append(item)
     return out
 
@@ -668,7 +689,8 @@ def search_url(item: dict[str, Any], query: str) -> str:
             params.append((name, int(item[key])))
     if item.get("radius_km"):
         params.append(("radius", int(item["radius_km"])))
-    params += [("sortBy", "creation_time_descend"), ("exact", "false")]
+    params += [("sortBy", "creation_time_descend"),
+               ("exact", "true" if item.get("exact") else "false")]
     place = item.get("place") or "search"
     base = SEARCH_URL.format(place=place) if place != "search" \
         else "https://www.facebook.com/marketplace/search/"
@@ -748,7 +770,12 @@ def ingest(cfg, state: State, batch: dict[str, Any], *,
     heard = {"at": str(batch.get("at") or now), "received": now, "host": host,
              "role": str(batch.get("role") or ""), "polled": bool(batch.get("polled")),
              "session": str(batch.get("session") or "ok")[:20],
-             "note": str(batch.get("note") or "")[:300]}
+             "note": str(batch.get("note") or "")[:300],
+             # How the collector is set up, and when it means to send next:
+             # shown on the dashboard, changed only on the Mac.
+             "settings": _collector_settings(batch.get("settings")),
+             "next_at": str(batch.get("next_at") or "")[:40] or None,
+             "last_failure": _failure(batch.get("last_failure"))}
     section.setdefault("hosts", {})[host] = heard
     section["last_batch"] = heard
     if not dry_run:
@@ -845,6 +872,15 @@ def ingest(cfg, state: State, batch: dict[str, Any], *,
     for health, judged in settled:
         health["breakdown"] = judged.breakdown(owned)
 
+    # A search switched off for Marketplace keeps no Marketplace cars as if
+    # they were still watched: they are written off, quietly, with the reason.
+    off = {s.id for s in cfg.active_searches if not s.marketplace}
+    for lid, entry in list(state.listings.items()):
+        if on_marketplace(lid) and entry.get("status") == "active" \
+                and entry.get("search_id") in off:
+            if state.mark_gone(lid, "Marketplace is switched off for this search"):
+                report.removed += 1
+
     # A car not seen for days while its search reads fine has gone. Absence
     # proves less here than on AutoTrader - results are capped and ranked -
     # so the wait is long and the removal is quiet unless asked for.
@@ -888,6 +924,27 @@ def ingest(cfg, state: State, batch: dict[str, Any], *,
                         "notified": bool(report.notified)})
         del runs[48:]
     return report
+
+
+def _collector_settings(raw: Any) -> dict[str, Any]:
+    """The collector's own settings as it reported them, bounded."""
+    if not isinstance(raw, dict):
+        return {}
+    out: dict[str, Any] = {}
+    for key in ("every_minutes", "jitter_minutes", "details_per_cycle", "scrolls",
+                "takeover_after_minutes"):
+        if isinstance(raw.get(key), (int, float)) and not isinstance(raw.get(key), bool):
+            out[key] = max(0, min(int(raw[key]), 10_000))
+    for key in ("quiet_start", "quiet_end"):
+        if re.fullmatch(r"\d{1,2}:\d{2}", str(raw.get(key) or "")):
+            out[key] = str(raw[key])
+    return out
+
+
+def _failure(raw: Any) -> dict[str, str] | None:
+    if not isinstance(raw, dict) or not raw.get("error"):
+        return None
+    return {"at": str(raw.get("at") or "")[:40], "error": str(raw["error"])[:300]}
 
 
 def _session_alarm(cfg, state: State, report, heard: dict[str, Any],

@@ -100,6 +100,8 @@ def check(listing: Listing, filters: dict[str, Any] | None) -> Verdict:
     wanted = [normalise_model(m) for m in _as_list(f.get("models"))]
     wanted = [m for m in wanted if m]
     if wanted:
+        # Other spellings the owner has said also count as the model.
+        wanted += [a for a in (normalise_model(x) for x in _as_list(f.get("aliases"))) if a]
         mine = normalise_model(listing.model)
         if mine not in wanted:
             names = ", ".join(str(m) for m in _as_list(f.get("models")) if str(m).strip())
@@ -196,6 +198,12 @@ def model_is_readable(listings: list[Listing]) -> bool:
     return any(str(getattr(l, "model", "") or "").strip() for l in listings)
 
 
+def model_rule(filters: dict[str, Any] | None) -> dict[str, Any]:
+    """The models rule alone, with the spellings that also count."""
+    return {"models": (filters or {}).get("models"),
+            "aliases": (filters or {}).get("aliases")}
+
+
 def not_this_car(listings: list[Listing], filters: dict[str, Any] | None
                  ) -> tuple[list[Listing], list[tuple[Listing, Verdict]]]:
     """Split off results that are not the model the search is for.
@@ -209,7 +217,7 @@ def not_this_car(listings: list[Listing], filters: dict[str, Any] | None
     if not any(wanted) or not model_is_readable(listings):
         return list(listings), theirs
     for listing in listings:
-        verdict = check(listing, {"models": (filters or {}).get("models")})
+        verdict = check(listing, model_rule(filters))
         if verdict.wrong_car:
             theirs.append((listing, verdict))
         else:

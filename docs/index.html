@@ -473,8 +473,25 @@ a{ color:var(--ev-new); text-underline-offset:2px; }
   display:flex; align-items:center; gap:var(--s2); flex-wrap:wrap;
   font-size:var(--t-micro); color:var(--text-3);
 }
-/* Where the car is listed, when it is not the usual site. */
-.card__foot .site{ color:var(--text-2); font-weight:600; }
+/* Where the car is listed, when it is not the usual site: on the photo at a
+   glance, and in words in the card's foot and the feed. */
+.card__foot .site, .ev__sub .site{ color:var(--text-2); font-weight:600; }
+.card--mp .card__shot::after{
+  content:'Marketplace'; position:absolute; left:8px; top:8px; z-index:2;
+  padding:2px 7px; border-radius:var(--r-sm); font-size:var(--t-micro);
+  font-weight:600; letter-spacing:.02em; background:var(--surface);
+  color:var(--text); box-shadow:0 0 0 1px var(--line);
+}
+/* What is set up, one line each, with the next step for anything missing. */
+.setup{ list-style:none; margin:0; padding:0; display:grid; gap:var(--s2); }
+.setup li{ display:grid; grid-template-columns:auto 1fr; gap:2px var(--s2);
+  align-items:baseline; }
+.setup li > i{ width:8px; height:8px; border-radius:50%; background:var(--good);
+  align-self:center; }
+.setup li[data-state="todo"] > i{ background:var(--warn); }
+.setup li[data-state="off"] > i{ background:var(--text-3); }
+.setup li > span{ min-width:0; overflow-wrap:anywhere; }
+.setup li > .note{ grid-column:2; margin:0; }
 .card--gone .card__shot img,.card--gone .card__title{ opacity:.5; }
 .card--gone .card__price b{ text-decoration:line-through; color:var(--text-3); }
 /* Your own marks. A shortlisted car earns the one piece of chrome on this
@@ -898,6 +915,9 @@ body[data-locked] .clock, body[data-locked] .tabs, body[data-locked] .trust{ dis
 .clock[data-state="due"] .clock__rail i{ background:var(--warn); }
 .clock[data-state="off"] .clock__cell--next dd{ color:var(--text-2); }
 .clock[data-state="off"] .clock__rail i{ background:var(--text-3); }
+/* The Marketplace collector's last batch, shown only once one is in use. */
+.clock__cell[hidden]{ display:none; }
+.clock__cell--mp[data-state="late"] dd{ color:var(--warn); }
 @media (max-width:560px){
   /* On a phone, three equal columns with the label over the value. A
      wrapping row would change height as the countdown ticks and shift the
@@ -907,6 +927,9 @@ body[data-locked] .clock, body[data-locked] .tabs, body[data-locked] .trust{ dis
   .clock__cell{ flex-direction:column; align-items:flex-start; gap:1px; }
   .clock__cell:nth-child(2){ align-items:center; }
   .clock__cell--next{ margin-left:0; align-items:flex-end; }
+  /* A row of its own under the three, so the countdown keeps its column. */
+  .clock__cell--mp{ order:4; grid-column:1 / -1; flex-direction:row;
+    align-items:baseline; gap:6px; }
   .clock__cell dt{ font-size:var(--t-micro); }
   .clock__cell dd{ font-size:var(--t-small); max-width:100%;
     overflow:hidden; text-overflow:ellipsis; }
@@ -948,6 +971,10 @@ body[data-locked] .clock, body[data-locked] .tabs, body[data-locked] .trust{ dis
     <div class="clock__cell">
       <dt>How often</dt>
       <dd id="clock-every">&mdash;</dd>
+    </div>
+    <div class="clock__cell clock__cell--mp" id="clock-mp-cell" hidden>
+      <dt>Marketplace</dt>
+      <dd id="clock-mp">&mdash;</dd>
     </div>
     <div class="clock__cell clock__cell--next">
       <dt>Next check</dt>

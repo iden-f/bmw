@@ -1648,7 +1648,8 @@ class TestMarketplaceOnThePage:
     def test_no_section_until_there_is_a_collector(self, browser, site, payload):
         ctx, page, _ = self.open(browser, site, payload, "#/status")
         page.wait_for_selector("text=Alerts")
-        assert "Facebook Marketplace" not in page.inner_text("main")
+        # No section of its own; the set-up list says it is not set up.
+        assert page.locator("h2", has_text="Facebook Marketplace").count() == 0
         ctx.close()
 
     def test_the_status_table_says_where_every_car_read_went(self, browser, site, payload):
@@ -1795,4 +1796,151 @@ class TestMarketplaceOnThePage:
         text = page.inner_text(".state")
         assert "Every car on your list right now is from Marketplace" not in text
         assert "hidden by a rule" in text
+        ctx.close()
+
+
+class TestTheCollectorOnThePage:
+    """What the Mac says of itself, where to change what, and what is set up."""
+
+    helper = TestMarketplaceOnThePage()
+
+    def payload_with(self, payload, *, minutes_ago=5, next_in=20, session="ok", failure=None):
+        from datetime import datetime, timedelta, timezone
+        d = self.helper.with_marketplace(payload, session)
+        now = datetime.now(timezone.utc)
+        last = d["marketplace"]["last_batch"]
+        last["received"] = (now - timedelta(minutes=minutes_ago)).isoformat(timespec="seconds")
+        last["next_at"] = (now + timedelta(minutes=next_in)).isoformat(timespec="seconds")
+        last["settings"] = {"every_minutes": 25, "jitter_minutes": 5, "quiet_start": "00:30",
+                            "quiet_end": "06:30", "details_per_cycle": 3, "scrolls": 2}
+        last["last_failure"] = failure
+        d["searches"][0]["marketplace"] = True
+        d["searches"][0]["rules"]["filters"]["models"] = ["Civic"]
+        d["config"]["marketplace"] = {"radius_km": None, "place": "", "new_within_days": 7,
+                                      "gone_after_days": 10}
+        return d
+
+    def open(self, browser, site, payload, route, width=1440):
+        ctx = browser.new_context(viewport={"width": width, "height": 900},
+                                  service_workers="block")
+        page = ctx.new_page()
+        errors: list[str] = []
+        page.on("pageerror", lambda e: errors.append(str(e)))
+        page.route("**/data.json", lambda r: r.fulfill(
+            status=200, content_type="application/json", body=json.dumps(payload)))
+        page.goto(site + route, wait_until="networkidle")
+        return ctx, page, errors
+
+    def test_the_clock_strip_names_the_last_batch_only_when_there_is_one(self, browser, site, payload):
+        ctx, page, _ = self.open(browser, site, payload, "#/feed")
+        page.wait_for_timeout(300)
+        assert page.is_hidden("#clock-mp-cell")
+        ctx.close()
+        ctx, page, errors = self.open(browser, site, self.payload_with(payload), "#/feed")
+        page.wait_for_selector("#clock-mp-cell:not([hidden])")
+        assert page.text_content("#clock-mp") == "5m ago"
+        assert page.get_attribute("#clock-mp-cell", "data-state") == "ok"
+        assert "Marketplace batch also wakes the bot" in page.get_attribute("#clock-last", "title")
+        assert not errors, errors
+        ctx.close()
+
+    def test_a_late_collector_shows_as_late(self, browser, site, payload):
+        ctx, page, _ = self.open(browser, site,
+                                 self.payload_with(payload, minutes_ago=70, next_in=-45), "#/status")
+        page.wait_for_selector("#clock-mp-cell:not([hidden])")
+        assert page.get_attribute("#clock-mp-cell", "data-state") == "late"
+        section = page.locator("section.section", has=page.locator("h2", has_text="Facebook Marketplace"))
+        assert "Late" in section.text_content() and "collector/run status" in section.text_content()
+        ctx.close()
+
+    def test_status_shows_the_collector_s_settings_as_set_on_the_mac(self, browser, site, payload):
+        failure = {"at": __import__("datetime").datetime.now(
+            __import__("datetime").timezone.utc).isoformat(timespec="seconds"),
+                   "error": "the page did not load"}
+        ctx, page, errors = self.open(browser, site, self.payload_with(payload, failure=failure),
+                                      "#/status")
+        section = page.locator("section.section", has=page.locator("h2", has_text="Facebook Marketplace"))
+        section.wait_for()
+        text = section.text_content()
+        assert "Next batch" in text and "about" in text
+        assert "a pass every 20–30 minutes" in text
+        assert "00:30–06:30 on the Mac's clock" in text
+        assert "settings.json" in text and "collector/run install" in text
+        assert "Last problem" in text and "the page did not load" in text
+        # Shown, never editable here.
+        assert section.locator("input").count() == 0
+        assert not errors, errors
+        ctx.close()
+
+    def test_what_is_set_up_says_it_in_one_place(self, browser, site, payload):
+        ctx, page, errors = self.open(browser, site, self.payload_with(payload), "#/status")
+        setup = page.locator("section.section", has=page.locator("h2", has_text="What is set up"))
+        setup.wait_for()
+        rows = setup.locator("li").all_inner_texts()
+        assert any(r.startswith("1 AutoTrader search") for r in rows)
+        assert any("Facebook Marketplace, read by collector-a" in r for r in rows)
+        assert any("No alert channel is switched on" in r for r in rows)
+        ctx.close()
+        ctx, page, _ = self.open(browser, site, payload, "#/status")
+        setup = page.locator("section.section", has=page.locator("h2", has_text="What is set up"))
+        setup.wait_for()
+        assert "Facebook Marketplace: not set up" in setup.text_content()
+        assert "collector/README.md" in setup.text_content()
+        assert not errors, errors
+        ctx.close()
+
+    def test_searches_offer_the_switch_the_spellings_and_the_settings(self, browser, site, payload):
+        ctx, page, errors = self.open(browser, site, self.payload_with(payload), "#/searches")
+        page.wait_for_selector("text=Read on Facebook Marketplace too.")
+        assert page.locator("text=Stop reading it on Marketplace").count() == 1
+        assert page.locator("text=Also counts as Civic").count() == 1
+        mp = page.locator("section.section", has=page.locator("h2", has_text="Facebook Marketplace"))
+        for label in ("Radius, km", "Place", "New within, days", "Gone after, days"):
+            assert label in mp.text_content()
+        assert "set on the Mac itself" in " ".join(mp.text_content().split())
+        # Typing a change offers to send it; an unchanged form offers nothing.
+        assert mp.locator("text=Save Marketplace settings").count() == 0
+        mp.locator("#mp-radius_km").fill("150")
+        mp.locator("text=Save Marketplace settings").wait_for()
+        assert not errors, errors
+        ctx.close()
+        ctx, page, _ = self.open(browser, site, payload, "#/searches")
+        page.wait_for_selector("text=Stop watching this search", state="attached", timeout=5000) \
+            if page.locator("text=Stop watching this search").count() else None
+        assert page.locator("text=Read on Facebook Marketplace too.").count() == 0
+        ctx.close()
+
+    def test_marketplace_cars_wear_it_on_the_photo_and_in_the_feed(self, browser, site, payload):
+        d = self.payload_with(payload)
+        d["events"] = [{"kind": "new", "at": d["marketplace"]["last_batch"]["received"],
+                        "listing_id": "fb-100000003", "title": "2020 Honda Civic Type R",
+                        "price": 60000}]
+        ctx, page, errors = self.open(browser, site, d, "#/listings")
+        page.wait_for_selector(".card--mp")
+        badge = page.eval_on_selector(".card--mp .card__shot",
+                                      "e => getComputedStyle(e, '::after').content")
+        assert "Marketplace" in badge
+        page.goto(site + "#/feed")
+        page.wait_for_selector(".ev")
+        assert "Marketplace" in page.locator(".ev").first.inner_text()
+        assert not errors, errors
+        ctx.close()
+
+    @pytest.mark.parametrize("route", ["#/feed", "#/listings", "#/searches", "#/status"])
+    def test_nothing_scrolls_sideways_on_a_phone(self, browser, site, payload, route):
+        ctx, page, errors = self.open(browser, site, self.payload_with(payload), route, width=375)
+        page.wait_for_timeout(400)
+        wide = page.evaluate("document.documentElement.scrollWidth")
+        assert wide <= 375, f"{route} is {wide}px wide"
+        assert not errors, errors
+        ctx.close()
+
+    def test_a_young_watch_says_it_is_young(self, browser, site, payload):
+        import copy
+        d = copy.deepcopy(payload)
+        d["coverage"].update(new_install=True, too_short=False, pct=25.0, window_hours=8.0,
+                             slots_covered=1, expected=4)
+        ctx, page, _ = self.open(browser, site, d, "#/feed")
+        page.wait_for_selector("#alarm:not([hidden])")
+        assert page.text_content("#alarm-text").startswith("This watch started 8 hours ago")
         ctx.close()

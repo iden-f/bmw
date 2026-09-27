@@ -616,7 +616,10 @@ function trustState() {
       alarm: {
         level: 'warn',
         // slots_covered, to agree with the Status card and the strip.
-        text: `Only ${pct}% of the last ${hours(cov.window_hours)} were watched — ${cov.slots_covered ?? cov.successful} of ${cov.expected} ${slotWord(cov)} had a check. A car can be listed and sold between checks at this rate.`,
+        text: (cov.new_install
+          ? `This watch started ${hours(cov.window_hours)} ago, and only ${pct}% of that was watched`
+          : `Only ${pct}% of the last ${hours(cov.window_hours)} were watched`)
+          + ` — ${cov.slots_covered ?? cov.successful} of ${cov.expected} ${slotWord(cov)} had a check. A car can be listed and sold between checks at this rate.`,
         detail: [
           cov.longest_gap_minutes
             ? `Longest gap: ${(cov.longest_gap_minutes / 60).toFixed(1)} hours.` : '',
@@ -707,10 +710,45 @@ function clockState() {
   };
 }
 
+/* When the Marketplace collector last sent, when it means to send next, and
+   whether it is late. Its own next_at when it sent one; otherwise the far
+   end of its interval. */
+function collectorTiming(m) {
+  const last = m?.last_batch;
+  if (!last || !last.received) return null;
+  const heard = Date.parse(last.received);
+  const s = last.settings || {};
+  const planned = Date.parse(last.next_at || '');
+  const due = Number.isFinite(planned) ? planned
+    : heard + ((s.every_minutes || 25) + (s.jitter_minutes ?? 5)) * 60000;
+  const over = Date.now() - due;
+  return {
+    heard, due,
+    // A pass takes a few minutes, and the bot's run after it a few more.
+    late: over > 15 * 60000,
+    signedOut: Boolean(SESSION_SAYS[last.session]),
+  };
+}
+
 function renderClock() {
   const c = clockState();
   const host = document.getElementById('clock');
   if (!host) return;
+  const mpCell = document.getElementById('clock-mp-cell');
+  const mt = collectorTiming(app.data?.marketplace);
+  if (mpCell) {
+    mpCell.hidden = !mt;
+    if (mt) {
+      const dd = document.getElementById('clock-mp');
+      const last = app.data.marketplace.last_batch;
+      dd.textContent = mt.signedOut ? 'signed out' : when(last.received);
+      mpCell.dataset.state = mt.signedOut || mt.late ? 'late' : 'ok';
+      dd.title = mt.signedOut ? SESSION_SAYS[last.session]
+        : `Last batch from ${last.host || 'the collector'} ${stamp(last.received)}; `
+          + (mt.late ? `the next was due ${when(new Date(mt.due).toISOString())}.`
+                     : `the next is due about ${new Date(mt.due).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}.`);
+    }
+  }
   // The strip is in the markup from the first paint, showing dashes, so it
   // never shifts the page when data lands. If data.json never loads, the
   // dashes stay.
@@ -718,8 +756,12 @@ function renderClock() {
   host.dataset.state = c.state;
   const last = document.getElementById('clock-last');
   last.textContent = c.last;
-  // The exact stamp on hover: "3h ago" suits a glance, not a quote.
-  last.title = c.iso ? stamp(c.iso) : '';
+  // The exact stamp on hover: "3h ago" suits a glance, not a quote. With a
+  // collector sending batches, checks also come off-schedule; say why.
+  last.title = (c.iso ? stamp(c.iso) : '') + (mt
+    ? ' - the last time AutoTrader was read. Each Marketplace batch also wakes '
+      + 'the bot, which reads AutoTrader too once 90 minutes have passed.'
+    : '');
   document.getElementById('clock-every').textContent = c.every;
   document.getElementById('clock-next').textContent = c.next;
   document.getElementById('clock-fill').style.width = `${Math.round(c.fill * 100)}%`;
@@ -1055,6 +1097,7 @@ function eventRow(e) {
   else if (e.delivery?.state === 'quiet') sub.push(`<span>${esc(e.delivery.text)}</span>`);
   else if (e.delivery?.state === 'none') sub.push('<span class="drop">no delivery record</span>');
 
+  if (String(e.listing_id || '').startsWith('fb-')) sub.unshift('<span class="site">Marketplace</span>');
   const name = carName(e);
   // Named by its own content, with the kind word in a visually hidden span
   // rather than an aria-label, so the accessible name matches the visible
@@ -1480,6 +1523,7 @@ function card(l) {
   b.type = 'button';
   if (l.status === 'gone') b.classList.add('card--gone');
   if (l.filtered) b.classList.add('card--hidden');
+  if (siteOf(l) === 'marketplace') b.classList.add('card--mp');
   if (app.freshIds.has(String(l.id))) b.classList.add('is-fresh');
 
   const move = priceMove(l);
@@ -1982,6 +2026,9 @@ function renderSearches() {
       (shutOut ? `<dt>Note</dt><dd class="warnt">Reads fine, keeps nothing: ${esc(shutOut)}</dd>` : '');
     sec.appendChild(kv);
     sec.appendChild(rulesEditor(s));
+    const alias = aliasesEditor(s);
+    if (alias) sec.appendChild(alias);
+    if (usesMarketplace()) sec.appendChild(marketplaceSwitch(s));
     if ((app.data.searches || []).length > 1) {
       const stop = el('div', 'bar');
       stop.style.marginTop = 'var(--s3)';
@@ -1992,7 +2039,109 @@ function renderSearches() {
     host.appendChild(sec);
   }
 
+  if (usesMarketplace()) host.appendChild(marketplaceSettings());
   host.appendChild(pasteALink());
+}
+
+/* Other spellings that also count as a search's model: the owner's fix when
+   a seller writes the model some way the matching does not catch. */
+function aliasesEditor(s) {
+  const models = s.rules?.filters?.models || [];
+  if (!models.length) return null;
+  const saved = s.rules?.filters?.aliases || [];
+  const id = s.id.replace(/[^a-z0-9]/gi, '');
+  const box = el('div');
+  box.style.marginTop = 'var(--s4)';
+  box.innerHTML = `
+    <label class="labelled"><span>Also counts as ${esc(models.join(', '))}</span>
+      <span class="field"><input type="text" id="al-${id}" autocomplete="off"
+        placeholder="other spellings, separated by commas" value="${esc(saved.join(', '))}"></span></label>
+    <p class="note">For a car whose title spells the model some other way. Written without
+      its spaces, or with a short trim run on after a number, it already counts.</p>`;
+  const ask = el('div', 'bar');
+  box.appendChild(ask);
+  const update = () => {
+    const list = box.querySelector('input').value.split(',').map(x => x.trim()).filter(Boolean);
+    ask.innerHTML = '';
+    if (JSON.stringify(list) === JSON.stringify(saved)) return;
+    ask.appendChild(askButton(list.length ? 'Save these spellings' : 'Clear the spellings',
+      `Other spellings for ${s.name}`,
+      [{ action: 'set-rule', search: s.id, rule: 'aliases', value: list.length ? list : null }]));
+    ask.appendChild(el('span', 'note', CHANGE_NOTE));
+  };
+  box.addEventListener('input', update);
+  update();
+  return box;
+}
+
+/* Whether the Marketplace collector reads this search too. */
+function marketplaceSwitch(s) {
+  const on = s.marketplace !== false;
+  const box = el('div', 'bar');
+  box.style.marginTop = 'var(--s3)';
+  box.appendChild(el('span', 'note',
+    on ? 'Read on Facebook Marketplace too.' : 'Not read on Facebook Marketplace.'));
+  box.appendChild(askButton(on ? 'Stop reading it on Marketplace' : 'Read it on Marketplace too',
+    `${on ? 'Stop reading' : 'Read'} ${s.name} on Marketplace`,
+    [{ action: 'set-marketplace', search: s.id, enabled: !on }]));
+  return box;
+}
+
+/* The Marketplace settings the watch keeps. The collector's own pace is set
+   on the Mac and shown on the Status tab. */
+const MP_SETTINGS = [
+  ['radius_km', 'Radius, km', 'number', "each search's own, up to 500",
+   'How far from each search\'s place Marketplace is asked to look. Each search\'s distance rule still applies.'],
+  ['place', 'Place', 'text', "from each search's “near”",
+   'The word for your area in Marketplace\'s own web addresses: what follows /marketplace/ when you browse it.'],
+  ['new_within_days', 'New within, days', 'number', '7',
+   'A car Facebook dates further back is recorded, not announced, when it first shows up among the results read.'],
+  ['gone_after_days', 'Gone after, days', 'number', '10',
+   'A car not seen for this long, while its search reads fine, is taken as sold.'],
+  ['exact', 'Match', 'bool', '',
+   'Loose asks Marketplace for anything like the search and reads most cars of the make; '
+   + 'exact reads fewer cars of other models, and may miss one titled some other way. '
+   + 'The same pages are read either way.'],
+];
+function marketplaceSettings() {
+  const conf = app.data.config?.marketplace || {};
+  const sec = el('section', 'section');
+  sec.innerHTML = `<div class="section__head"><h2>Facebook Marketplace</h2></div>
+    <div class="bar">${MP_SETTINGS.map(([k, label, type, hint]) => type === 'bool' ? `
+      <label class="labelled"><span>${label}</span>
+        <select id="mp-${k}">
+          <option value=""${conf[k] ? '' : ' selected'}>Loose</option>
+          <option value="true"${conf[k] ? ' selected' : ''}>Exact</option>
+        </select></label>` : `
+      <label class="labelled"><span>${label}</span>
+        <span class="field"><input type="${type}" id="mp-${k}" ${type === 'number' ? 'inputmode="numeric"' : ''}
+          placeholder="${esc(hint)}" value="${esc(conf[k] ?? '')}"></span></label>`).join('')}
+    </div>
+    <dl class="kv">${MP_SETTINGS.map(([, label, , , why]) =>
+      `<dt>${label}</dt><dd><span class="note" style="margin:0">${why}</span></dd>`).join('')}</dl>
+    <p class="note">How often the collector reads, and its overnight pause, are set on the
+      Mac itself; the Status tab shows them.</p>`;
+  const ask = el('div', 'bar');
+  sec.appendChild(ask);
+  const update = () => {
+    const changes = [];
+    for (const [k, , type] of MP_SETTINGS) {
+      const raw = sec.querySelector('#mp-' + k).value.trim();
+      const value = raw === '' ? null : type === 'number' ? Number(raw)
+        : type === 'bool' ? true : raw;
+      const now = type === 'bool' ? (conf[k] ? true : null) : (conf[k] ?? null);
+      if (now === value || (value === null && (now ?? '') === '')) continue;
+      changes.push({ action: 'set-marketplace', setting: k, value });
+    }
+    ask.innerHTML = '';
+    if (!changes.length) return;
+    ask.appendChild(askButton('Save Marketplace settings', 'Change the Marketplace settings', changes));
+    ask.appendChild(el('span', 'note', CHANGE_NOTE));
+  };
+  sec.addEventListener('input', update);
+  sec.addEventListener('change', update);
+  update();
+  return sec;
 }
 
 /* What became of the changes sent from this page. A refused change is
@@ -2157,6 +2306,64 @@ function pasteALink() {
 }
 
 /* ----------------------------------------------------------------- status */
+/* What is set up, in one place: each part with a dot, a line, and the next
+   step when something is missing or wrong. */
+function setupPanel(d) {
+  const rows = [];
+  const add = (state, text, next) => rows.push({ state, text, next });
+  const searches = d.searches || [];
+  const run = lastCheck(d);
+  if (searches.length) {
+    add('ok', `${num(searches.length)} AutoTrader search${searches.length === 1 ? '' : 'es'}, `
+      + (run.at ? `last read ${when(run.at)}` : 'not read yet'));
+  } else {
+    add('todo', 'No search yet', 'Paste an autotrader.ca search link on the Searches tab.');
+  }
+  const m = d.marketplace;
+  const mt = collectorTiming(m);
+  if (mt) {
+    const last = m.last_batch;
+    add(mt.signedOut || mt.late ? 'todo' : 'ok',
+      `Facebook Marketplace, read by ${esc(last.host || 'the collector')}: last batch ${when(last.received)}`,
+      mt.signedOut ? `${SESSION_SAYS[last.session]}.`
+      : mt.late ? 'It is late. On the Mac, <code class="mono">collector/run status</code> says why.'
+      : '');
+  } else {
+    add('off', 'Facebook Marketplace: not set up',
+      'Optional. A Mac at home can read your searches there too: '
+      + '<code class="mono">collector/README.md</code> in the repository.');
+  }
+  const channels = d.notify?.active || [];
+  if (channels.length) {
+    add('ok', `Alerts go to ${esc(andList(channels))}`,
+      'To send a test: <code class="mono">collector/run test-alert</code> on the Mac, '
+      + 'or <code class="mono">python -m autotrader test-notify</code> where the '
+      + "repository's secrets are set.");
+  } else {
+    add('todo', 'No alert channel is switched on', 'Alerts, further down this tab, sets up ntfy in a minute.');
+  }
+  const cov = d.coverage || {};
+  if (hasOutsideTimer(cov)) {
+    add('ok', `Checks kept on time by ${esc(triggerName(cov.timekeeper) || 'an outside timer')}`,
+      'A check is due every two hours. Each Marketplace batch also wakes the bot, which '
+      + 'reads AutoTrader too once 90 minutes have passed, so checks land 90 to 120 minutes apart.');
+  } else {
+    add('todo', "Only GitHub's schedule starts checks",
+      'It runs late or not at all. The Marketplace collector keeps time when it runs; '
+      + 'otherwise an outside timer does (README, Schedule).');
+  }
+  add('ok', vault.lock ? 'This dashboard is published and locked' : 'This is a local, unlocked copy of the dashboard');
+
+  const s = el('section', 'section');
+  s.innerHTML = '<div class="section__head"><h2>What is set up</h2></div>';
+  const list = el('ul', 'setup');
+  list.innerHTML = rows.map(r => `<li data-state="${r.state}"><i aria-hidden="true"></i>
+      <span>${r.text}${r.state === 'todo' ? ' <span class="sr">(needs attention)</span>' : ''}</span>
+      ${r.next ? `<p class="note">${r.next}</p>` : ''}</li>`).join('');
+  s.appendChild(list);
+  return s;
+}
+
 /* The computer reading Facebook Marketplace: when it last checked in,
    whether Facebook still lets it in, and what each search read. */
 const SESSION_SAYS = {
@@ -2173,16 +2380,42 @@ function marketplaceSection(m) {
     <span class="count num">${num(m.cars ?? 0)} watched</span></div>`;
   const stats = el('dl', 'stats');
   const session = SESSION_SAYS[last.session];
+  const timing = collectorTiming(m);
+  const clockAt = ms => new Date(ms).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  // The latest thing that went wrong: a pass that failed before it could
+  // send, or a search that did not read. Only within the last day.
+  const recent = at => at && Date.now() - Date.parse(at) < 864e5;
+  const problems = [
+    last.last_failure && recent(last.last_failure.at)
+      ? { at: last.last_failure.at, text: last.last_failure.error } : null,
+    ...(m.searches || []).filter(x => x.consecutive_failures && x.last_error)
+      .map(x => ({ at: x.last_error_at || last.received, text: `${x.name}: ${x.last_error}` })),
+  ].filter(Boolean);
   stats.innerHTML = `
     <div class="stat" data-tone="${quietHours > 2 ? 'bad' : 'good'}">
       <dt>Collector last heard</dt><dd>${when(last.received)}</dd>
       <dd class="stat__note">${esc(last.host || 'collector')}${
-        last.role ? ` \u00b7 ${esc(last.role)}` : ''}${
-        last.polled ? '' : ` \u00b7 ${esc(last.note || 'resting')}`}</dd></div>
+        last.role ? ` · ${esc(last.role)}` : ''}${
+        last.polled ? '' : ` · ${esc(last.note || 'resting')}`}</dd></div>
+    <div class="stat" data-tone="${timing.late ? 'warn' : ''}">
+      <dt>Next batch</dt><dd>${timing.late ? 'Late' : `about ${clockAt(timing.due)}`}</dd>
+      <dd class="stat__note">${timing.late
+        ? `was due ${when(new Date(timing.due).toISOString())} — on the Mac, `
+          + '<code class="mono">collector/run status</code> says why'
+        : 'then every 20–30 minutes, and only a check-in overnight'}</dd></div>
     <div class="stat" data-tone="${session ? 'bad' : 'good'}">
       <dt>Facebook</dt><dd>${session ? 'Not reading' : 'Signed in'}</dd>
-      <dd class="stat__note">${esc(session || 'reading as the signed-in account')}</dd></div>`;
+      <dd class="stat__note">${esc(session || 'reading as the signed-in account')}</dd></div>
+    ${problems.length ? `<div class="stat" data-tone="warn">
+      <dt>Last problem</dt><dd>${when(problems[0].at)}</dd>
+      <dd class="stat__note">${esc(problems[0].text)}</dd></div>` : ''}`;
   s.appendChild(stats);
+  // Every computer that has sent a batch, when there is more than one.
+  const hosts = Object.entries(m.hosts || {});
+  if (hosts.length > 1) {
+    s.appendChild(el('p', 'note', 'Collectors: ' + hosts.map(([name, h]) =>
+      `${esc(name)} (${esc(h.role || 'primary')}, last heard ${when(h.received)})`).join('; ') + '.'));
+  }
   if ((m.searches || []).length) {
     // Where every car read went. A Marketplace search is loose - it returns
     // most cars of the make - so "read 60, kept 3" is the normal shape, and
@@ -2218,7 +2451,36 @@ function marketplaceSection(m) {
     + 'are stored with the reason, and <b>On your list</b> are the ones you '
     + 'see and hear about. To see every car it read and where each went, run '
     + '<code class="mono">collector/run explain</code> on the Mac.'));
+  s.appendChild(collectorSettings(last.settings));
   return s;
+}
+
+/* How the collector is set up, as it reported itself. Shown, never
+   editable: only the Mac decides how often it visits Facebook. */
+function collectorSettings(cs) {
+  const frag = document.createDocumentFragment();
+  if (!cs || !Object.keys(cs).length) return frag;
+  const every = cs.every_minutes ?? 25;
+  const jitter = cs.jitter_minutes ?? 5;
+  const dl = el('dl', 'kv');
+  dl.innerHTML =
+    `<dt>Pace</dt><dd>a pass every ${num(Math.max(1, every - jitter))}–${num(every + jitter)} minutes
+       <span class="note" style="margin:0">— slow on purpose, and never on the minute: it reads
+       the way a person browsing would, which keeps the account clear of Facebook's checks</span></dd>` +
+    (cs.quiet_start && cs.quiet_end ? `<dt>Overnight</dt><dd>${esc(cs.quiet_start)}–${esc(cs.quiet_end)} on the Mac's clock
+       <span class="note" style="margin:0">— it only checks in: few cars are listed then, and
+       reading all night is the pattern that looks least like a person</span></dd>` : '') +
+    (cs.details_per_cycle !== undefined ? `<dt>Listing pages</dt><dd>up to ${num(cs.details_per_cycle)} a pass
+       <span class="note" style="margin:0">— opened once each, newest first, for cars that pass
+       your rules, to read the exact odometer and the title status</span></dd>` : '') +
+    (cs.scrolls !== undefined ? `<dt>Scrolls</dt><dd>${num(cs.scrolls)} per search
+       <span class="note" style="margin:0">— each brings another screenful of results</span></dd>` : '');
+  frag.appendChild(dl);
+  frag.appendChild(el('p', 'note',
+    'These are set on the Mac, not here. To change one, edit '
+    + '<code class="mono">~/Library/Application Support/AutoTrader Watch/settings.json</code> '
+    + 'on it, then run <code class="mono">collector/run install</code>.'));
+  return frag;
 }
 
 function renderStatus() {
@@ -2249,12 +2511,15 @@ function renderStatus() {
          data-tone="${covKept && covKept.level === 'none' ? 'warn' : covTone}">
       <dt>Coverage, ${hours(cov.window_hours || 24)}</dt>
       <dd class="num">${covPct === null ? '—' : `${covPct}%`}</dd>
-      <dd class="stat__note">${cov.too_short
+      <dd class="stat__note">${cov.too_short && cov.new_install
+        ? `a new watch: ${plural(cov.successful ?? 0, 'check')} in its first ${hours(cov.window_hours)}`
+        : cov.too_short
         ? `measuring for ${hours(cov.window_hours)} so far, since the schedule `
           + `changed to one check every ${every(cov.expected_interval_minutes)}. `
           + `${cov.successful ?? 0} check${cov.successful === 1 ? '' : 's'} in that time.`
         : `${cov.slots_covered ?? cov.successful ?? 0} of ${cov.expected ?? 0} ${slotWord(cov)}`
           + `${cov.partial ? ` in the ${hours(cov.window_hours)} since the schedule changed` : ''}`
+          + `${cov.new_install ? ' since it started' : ''}`
           // `> 0`, not truthy: a count of events is never negative, even if
           // a malformed payload says so.
           + `${cov.complained > 0 ? ` · ${cov.complained} of ${cov.successful} checks complained` : ''}`
@@ -2331,6 +2596,8 @@ function renderStatus() {
       <dd class="num">${h.accounted?.unexplained ?? 0}</dd>
       <dd class="stat__note">${h.accounted?.delivered ?? 0} told, ${h.accounted?.quiet ?? 0} deliberately quiet</dd></div>`;
   host.appendChild(stats);
+
+  host.appendChild(setupPanel(d));
 
   const mp = marketplaceSection(d.marketplace);
   if (mp) host.appendChild(mp);

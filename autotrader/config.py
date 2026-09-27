@@ -178,6 +178,28 @@ DEFAULTS: dict[str, Any] = {
         # repositories are not charged. Set true or false only to override.
         "charged": None,
     },
+    # Facebook Marketplace, read by the collector on a Mac at home (see
+    # collector/README.md). The collector's own pace and overnight pause are
+    # set on the Mac, not here.
+    "marketplace": {
+        # Overrides every search's distance for Marketplace; at most 500 km,
+        # the widest Marketplace offers. null uses each search's own.
+        "radius_km": None,
+        # The place in Marketplace's addresses ("ottawa"). Empty works it out
+        # from each search's "near".
+        "place": "",
+        # Ask Marketplace for exact matches only. Loose (false) reads more
+        # cars of other models; exact may miss a car titled another way.
+        "exact": False,
+        # A car Facebook dates further back than this is recorded, not
+        # announced, when it first appears among the results read.
+        "new_within_days": 7,
+        # A car unseen for this long while its search reads fine is gone.
+        "gone_after_days": 10,
+        # The watchdog: no word from the collector, or no successful read.
+        "silent_after_hours": 2,
+        "unread_after_hours": 6,
+    },
     "health": {
         "alert_after_failures": 3,
         "heartbeat_hours": 0,
@@ -237,6 +259,9 @@ class Search:
     notify_on: dict[str, Any] = field(default_factory=dict)
     price_drop_min_pct: float | None = None
     price_drop_min_abs: int | None = None
+    # Whether the Marketplace collector also reads this search. On unless
+    # switched off, so a new search is read on both sites.
+    marketplace: bool = True
 
     @classmethod
     def from_dict(cls, raw: dict[str, Any], index: int = 0) -> "Search":
@@ -259,6 +284,7 @@ class Search:
             notify_on=dict(raw.get("notify_on") or {}),
             price_drop_min_pct=float(drop_pct) if drop_pct is not None else None,
             price_drop_min_abs=int(drop_abs) if drop_abs is not None else None,
+            marketplace=raw.get("marketplace", True) is not False,
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -277,6 +303,8 @@ class Search:
             out["price_drop_min_pct"] = self.price_drop_min_pct
         if self.price_drop_min_abs is not None:
             out["price_drop_min_abs"] = self.price_drop_min_abs
+        if not self.marketplace:
+            out["marketplace"] = False
         return out
 
 

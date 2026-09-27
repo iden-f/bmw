@@ -25,7 +25,7 @@ ACTIONS = ("set-rule", "add-search", "remove-search", "mute-listing",
            "unmute-listing", "shortlist", "unshortlist", "dismiss",
            # undismiss is the only undo for dismiss: unshortlist leaves a
            # dismissal in place.
-           "undismiss", "set-channel", "note")
+           "undismiss", "set-channel", "note", "set-marketplace")
 
 # Rules the dashboard may change, and the type of each value. Anything else is
 # refused by name rather than ignored: a silent no-op hides a failed change.
@@ -35,6 +35,9 @@ RULE_TYPES: dict[str, type] = {
     "max_mileage_km": int, "max_distance_km": int,
     "near": str, "require_price": bool,
     "price_drop_min_pct": float, "price_drop_min_abs": int,
+    # Other spellings of the watched model, for a car whose seller wrote it
+    # some way the matching does not catch.
+    "aliases": list,
 }
 RULE_BOUNDS: dict[str, tuple[float, float]] = {
     "max_price": (1, 10_000_000), "min_price": (0, 10_000_000),
@@ -43,6 +46,18 @@ RULE_BOUNDS: dict[str, tuple[float, float]] = {
     "price_drop_min_pct": (0, 100), "price_drop_min_abs": (0, 1_000_000),
 }
 LISTING_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{5,63}$")
+_ALIAS = re.compile(r"^[A-Za-z0-9][A-Za-z0-9 .+/-]{0,39}$")
+MAX_ALIASES = 12
+
+# Marketplace settings the dashboard may change, with their bounds. The
+# collector's own pace and overnight pause are not here: they live on the
+# Mac, because only the Mac should decide how often it visits Facebook.
+MARKETPLACE_SETTINGS: dict[str, tuple[type, float, float]] = {
+    "radius_km": (int, 1, 500),
+    "new_within_days": (int, 1, 60),
+    "gone_after_days": (int, 2, 90),
+}
+_PLACE_SLUG = re.compile(r"^[a-z0-9][a-z0-9-]{1,40}$")
 # A place the distance rule can measure from: a Canadian postcode (full, or
 # the forward sortation area alone) or a place name.
 _PLACE = re.compile(r"^(?:[A-Za-z]\d[A-Za-z](?:\s?\d[A-Za-z]\d)?"
@@ -151,6 +166,16 @@ def _rule_value(name: str, value: Any) -> Any:
             f"{', '.join(sorted(RULE_TYPES))}.")
     if value is None:
         return None                      # clearing a rule is a real request
+    if kind is list:
+        items = value if isinstance(value, list) else str(value).split(",")
+        names = [str(v).strip() for v in items if str(v).strip()]
+        if len(names) > MAX_ALIASES:
+            raise Rejected(f"{name} takes at most {MAX_ALIASES}; got {len(names)}.")
+        for alias in names:
+            if not _ALIAS.match(alias):
+                raise Rejected(f"{alias[:40]!r} is not a model name: letters, digits, "
+                               f"spaces and - . + / only, up to 40 characters.")
+        return names or None
     if kind is bool:
         if isinstance(value, bool):
             return value
@@ -225,6 +250,8 @@ def _plan(cfg, state, item: dict[str, Any]):
             raise Rejected(f"there is no search called {item['search']!r}.")
         name = str(item.get("rule") or "")
         value = _rule_value(name, item.get("value"))
+        if name == "aliases" and not search:
+            raise Rejected("aliases belong to one search: say which.")
         where = f"searches.{search.id}.filters.{name}" if search else f"filters.{name}"
         label = f"{name} = {value!r}" + (f" on {search.name}" if search else " everywhere")
 
@@ -325,4 +352,63 @@ def _plan(cfg, state, item: dict[str, Any]):
             return f"turned {channel} {'on' if on else 'off'}"
         return do
 
+    if action == "set-marketplace":
+        return _plan_marketplace(cfg, item)
+
     raise Rejected("I do not know how to do that.")   # unreachable via parse()
+
+
+def _plan_marketplace(cfg, item: dict[str, Any]):
+    """Marketplace on or off for one search, or one of its shared settings."""
+    if item.get("search") is not None or "enabled" in item:
+        search = _find_search(cfg, item.get("search"))
+        if not search:
+            raise Rejected(f"there is no search called {item.get('search')!r}.")
+        on = item.get("enabled")
+        if not isinstance(on, bool):
+            raise Rejected("enabled has to be true or false.")
+
+        def do():
+            for row in cfg.data.setdefault("searches", []):
+                if row.get("id") == search.id:
+                    if on:
+                        row.pop("marketplace", None)
+                    else:
+                        row["marketplace"] = False
+            return (f"{'reading' if on else 'no longer reading'} {search.name!r} "
+                    f"on Marketplace")
+        return do
+
+    setting = str(item.get("setting") or "")
+    value = item.get("value")
+    if setting == "exact":
+        if value is not None and not isinstance(value, bool):
+            raise Rejected("exact has to be true or false.")
+        value = value or None             # off is the default
+    elif setting == "place":
+        if value in (None, ""):
+            value = ""
+        else:
+            value = str(value).strip().lower()
+            if not _PLACE_SLUG.match(value):
+                raise Rejected(f"{value[:40]!r} is not a Marketplace place: the "
+                               f"word in its address, like 'ottawa'.")
+    elif setting in MARKETPLACE_SETTINGS:
+        kind, low, high = MARKETPLACE_SETTINGS[setting]
+        if value is not None:
+            value = _number(value, setting, kind)
+            if not low <= value <= high:
+                raise Rejected(f"{setting} has to be between {low:g} and {high:g}.")
+    else:
+        raise Rejected(f"{setting or '(none)'} is not a Marketplace setting I can "
+                       f"change. I can change: "
+                       f"{', '.join(sorted([*MARKETPLACE_SETTINGS, 'place', 'exact']))}.")
+
+    def do():
+        conf = cfg.data.setdefault("marketplace", {})
+        if value in (None, ""):
+            conf.pop(setting, None)
+            return f"Marketplace {setting} back to its default"
+        conf[setting] = value
+        return f"Marketplace {setting} = {value!r}"
+    return do

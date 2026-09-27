@@ -117,12 +117,21 @@ cars it has opened) is in that folder, never in the clone.
 | `show_browser` | `false` | Show the browser while it reads |
 | `channel` | `chrome` | Use Google Chrome; empty for Playwright's Chromium |
 
-On the watch's side, `marketplace.radius_km` in the config overrides every
-search's radius, and `marketplace.gone_after_days` (10) is how long a car can
-go unseen before it counts as gone. A car Facebook marks sold is gone at once.
-A car Facebook dates more than `marketplace.new_within_days` (7) back is
-recorded but not announced when it first appears: results are capped, so
-older cars drift into view as newer ones sell.
+These live on the Mac because only the Mac should decide how often it
+visits Facebook. Each batch reports them, and the dashboard's **Status** tab
+shows them, read-only, with when the next batch is due.
+
+On the watch's side, from the dashboard's **Searches** tab:
+
+| Setting | Default | Meaning |
+|---|---|---|
+| Marketplace, per search | on | Whether the search is also read on Marketplace. Switched off, its Marketplace cars are written off quietly. |
+| Also counts as | none | Other spellings of the search's model |
+| `marketplace.radius_km` | each search's own | How far Marketplace is asked to look, at most 500 km |
+| `marketplace.place` | from `near` | The word for your area in Marketplace's own addresses |
+| `marketplace.exact` | loose | Exact matching reads fewer cars of other models, and may miss one titled another way. The same pages are read either way. |
+| `marketplace.new_within_days` | 7 | A car Facebook dates further back is recorded, not announced, when it first appears: results are capped, so older cars drift into view as newer ones sell |
+| `marketplace.gone_after_days` | 10 | A car unseen this long, while its search reads fine, is gone. A car Facebook marks sold is gone at once. |
 
 ## Why most cars read are not on your list
 

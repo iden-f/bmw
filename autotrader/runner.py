@@ -1215,7 +1215,7 @@ def run(cfg: Config | None = None, state: State | None = None, *,
                 if on_marketplace(lid):
                     continue      # judged when its own batch arrives
                 stored = Listing(id=lid, model=str(entry.get("model") or ""))
-                if filters.check(stored, {"models": rules_now["models"]}).wrong_car:
+                if filters.check(stored, filters.model_rule(rules_now)).wrong_car:
                     wrong_car_ids.add(lid)
 
         # Every search has now been read and every car recorded, so the rows

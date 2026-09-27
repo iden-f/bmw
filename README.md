@@ -182,6 +182,7 @@ falls through to the global value.
 | `near`, `max_distance_km` | Where you are and how far you would drive. AutoTrader does not reliably apply the distance in a link, so the bot measures it from each listing's city. A car it cannot place is never hidden. |
 | `provinces` | A region list, when a radius is the wrong shape. |
 | `models` | The model the search is for, e.g. `["Civic"]`. A result that is a different model is discarded, not hidden. |
+| `aliases` | Other spellings that also count as the model, e.g. `["Civik"]`, for a seller who writes it some way the matching does not catch. Set it on the Searches tab under **Also counts as**. |
 | `include_keywords`, `exclude_keywords`, `exclude_sellers` | Words and sellers. |
 | `require_price` | Do not alert on call-for-price cars. They are still tracked. |
 
@@ -251,6 +252,14 @@ model and are set aside. The **Status** tab says, per search, how many were
 read, set aside, hidden by a rule and kept, and `collector/run explain` on
 the Mac lists every car with the reason. The **Listings** tab can show one
 site at a time.
+
+What can be changed from the dashboard is on the **Searches** tab: whether
+each search is also read on Marketplace, other spellings of its model, and
+the Marketplace settings (radius, place, loose or exact matching, how new a
+car must be to be announced, how long an unseen car counts as for sale). How
+often the Mac reads, and its overnight pause, are the Mac's own; the
+**Status** tab shows them, with when its next batch is due, and the header
+shows when the last one came.
 
 Setting it up takes about fifteen minutes: [collector/README.md](collector/README.md).
 A second Mac can stand by and take over if the first goes quiet. While it

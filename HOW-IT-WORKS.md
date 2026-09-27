@@ -209,7 +209,9 @@ the bot stays the only writer of the watch's data.
    the Keychain. `marketplace.plan` turns each active search into a query:
    make and model from its link and `models` rule, years and prices from its
    rules, and the place and radius (at most 500 km) from `near` and
-   `max_distance_km`, newest first.
+   `max_distance_km`, newest first. A search switched off for Marketplace
+   (`"marketplace": false` on it) is left out, and `aliases` join `models`
+   in deciding which car is which.
 2. **The read.** A persistent Chrome profile, signed in by hand once, opens
    each query and scrolls. It keeps the page's own JSON and the API replies
    the page fetched; nothing is replayed, so Facebook changing its internal
@@ -217,7 +219,7 @@ the bot stays the only writer of the watch's data.
    shaped like a listing. A car that passes the search's rules has its own
    page opened once, for the odometer, trim and title status.
 3. **The batch.** `{"v", "id", "at", "host", "role", "polled", "session",
-   "searches": [...]}`, sealed like everything else with the name
+   "settings", "next_at", "searches": [...]}`, sealed like everything else with the name
    `marketplace` and padded to 4 KiB, sent as `repository_dispatch` of type
    `marketplace` with the sealed text in `client_payload.batch`. GitHub
    carries at most 65,535 characters there, so the oldest cars are left out
@@ -263,7 +265,7 @@ token. So a change is a file:
 
 Valid actions: `set-rule`, `add-search`, `remove-search`, `mute-listing`,
 `unmute-listing`, `shortlist`, `unshortlist`, `dismiss`, `undismiss`,
-`set-channel`, `note`.
+`set-channel`, `note`, `set-marketplace`.
 
 ## The dashboard
 

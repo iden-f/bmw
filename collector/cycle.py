@@ -130,7 +130,7 @@ def primary_heard(cfg: S.Settings, state: dict[str, Any],
 
 def _wanted(rec: dict[str, Any], item: dict[str, Any], cfg: Config, search) -> bool:
     """Whether the bot will keep this car: worth opening its own page."""
-    car = M.to_listing(rec, search, make=item.get("make", ""), models=item.get("models", []))
+    car = M.to_listing(rec, search, make=item.get("make", ""), models=M.matching(item))
     return filters.check(car, cfg.rules_for(search)["filters"]).keep
 
 
@@ -212,11 +212,27 @@ def read(cfg: Config, plan: list[dict[str, Any]], browser: Browser,
 
 
 def build(settings: S.Settings, parts: list[dict], *, polled: bool, session: str,
-          note: str = "") -> dict[str, Any]:
-    return {"v": M.BATCH_VERSION, "id": secrets.token_hex(16), "at": clock.stamp(),
-            "host": settings.host, "role": settings.role, "polled": polled,
-            "session": session, "note": note, "collector": VERSION,
-            "searches": parts}
+          note: str = "", wait: float | None = None,
+          failure: dict[str, Any] | None = None) -> dict[str, Any]:
+    """The batch as sent. Besides what was read, it says how this collector
+    is set up and when to expect the next one, so the dashboard can show
+    both without being able to change either."""
+    out = {"v": M.BATCH_VERSION, "id": secrets.token_hex(16), "at": clock.stamp(),
+           "host": settings.host, "role": settings.role, "polled": polled,
+           "session": session, "note": note, "collector": VERSION,
+           "settings": {"every_minutes": settings.every_minutes,
+                        "jitter_minutes": settings.jitter_minutes,
+                        "quiet_start": settings.quiet_start,
+                        "quiet_end": settings.quiet_end,
+                        "details_per_cycle": settings.details_per_cycle,
+                        "scrolls": settings.scrolls,
+                        "takeover_after_minutes": settings.takeover_after_minutes},
+           "searches": parts}
+    if wait is not None:
+        out["next_at"] = (clock.now() + timedelta(seconds=wait)).isoformat(timespec="seconds")
+    if failure:
+        out["last_failure"] = failure
+    return out
 
 
 def fit(key: bytes, batch: dict[str, Any], memory: dict[str, Any]) -> str:
@@ -248,8 +264,13 @@ def fit(key: bytes, batch: dict[str, Any], memory: dict[str, Any]) -> str:
 
 def once(settings: S.Settings, *, github: GitHub | None = None,
          browser_factory: Callable[[S.Settings], Browser] = Browser,
-         now: datetime | None = None, force: bool = False) -> dict[str, Any]:
-    """One pass, start to finish. Returns what happened, for the log."""
+         now: datetime | None = None, force: bool = False,
+         wait: float | None = None) -> dict[str, Any]:
+    """One pass, start to finish. Returns what happened, for the log.
+
+    ``wait`` is how long until the next pass, when one is scheduled; the
+    batch carries it so the dashboard can say when to expect the next.
+    """
     github = github or GitHub(settings.repo, S.secret(S.TOKEN))
     keyring = Keyring(github, S.secret(S.PASSPHRASE))
     key, cfg = keyring.config()
@@ -274,9 +295,13 @@ def once(settings: S.Settings, *, github: GitHub | None = None,
         if settings.role == "standby":
             note = "the primary has gone quiet, so this one is reading"
 
-    batch = build(settings, parts, polled=polled, session=session, note=note)
+    # A pass that failed before it could send says so in the next one.
+    failure = memory.get("last_error")
+    batch = build(settings, parts, polled=polled, session=session, note=note,
+                  wait=wait, failure=failure)
     sealed = fit(key, batch, memory)
     github.send(sealed)
+    memory.pop("last_error", None)
     summary = {"at": batch["at"], "polled": polled, "session": session, "note": note,
                "searches": [{"search": p["search"], "ok": p["ok"], "cars": len(p["listings"]),
                              "error": p["error"]} for p in parts],
@@ -290,15 +315,16 @@ def forever(settings: S.Settings) -> None:
     """Pass after pass, until stopped. A failed pass waits and tries again."""
     while True:
         started = time.monotonic()
+        planned = next_wait(settings)
         try:
-            summary = once(settings)
+            summary = once(settings, wait=planned)
             log.info("%s", _line(summary))
         except Exception as exc:          # noqa: BLE001 - the loop must survive
             log.error("pass failed: %s", exc)
             memory = load_memory()
             memory["last_error"] = {"at": clock.stamp(), "error": str(exc)[:300]}
             save_memory(memory)
-        wait = next_wait(settings) - (time.monotonic() - started)
+        wait = planned - (time.monotonic() - started)
         time.sleep(max(60.0, wait))
 
 
