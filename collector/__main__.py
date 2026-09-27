@@ -84,6 +84,25 @@ def cmd_once(args) -> int:
     return 0
 
 
+def cmd_explain(args) -> int:
+    from .explain import explain, explain_text
+    print("Reading every search once. Nothing is sent and no listing page is opened.")
+    print(explain_text(explain(S.Settings.load(), capture=args.capture)))
+    return 0
+
+
+def cmd_test_alert(args) -> int:
+    from .explain import test_alert
+    said = test_alert(S.Settings.load())
+    if not said:
+        print("No channel is reachable from this Mac. ntfy is the only one that "
+              "needs no secret, and the watch has it switched off or has no topic.")
+        return 1
+    for line in said:
+        print(line)
+    return 0 if any(" sent" in line for line in said) else 1
+
+
 def cmd_daemon(args) -> int:
     from .cycle import forever
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s",
@@ -152,6 +171,14 @@ def main(argv: list[str] | None = None) -> int:
     o.add_argument("--now", action="store_true",
                    help="read even overnight or on standby")
     o.set_defaults(func=cmd_once)
+    e = sub.add_parser("explain", help="read every search now, send nothing, "
+                                       "and say where each car went and why")
+    e.add_argument("--capture", action="store_true",
+                   help="also keep what the pages received, on this Mac only, "
+                        "and print a masked outline of it")
+    e.set_defaults(func=cmd_explain)
+    sub.add_parser("test-alert", help="send one test alert to your phone"
+                   ).set_defaults(func=cmd_test_alert)
     sub.add_parser("daemon", help="pass after pass (what the service runs)"
                    ).set_defaults(func=cmd_daemon)
     sub.add_parser("status", help="what is set up and what the last pass did"

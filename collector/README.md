@@ -89,6 +89,8 @@ signs in to Facebook separately (`collector/run login` on it too).
 | `collector/run once` | One pass now (`--now` reads even overnight or on standby) |
 | `collector/run login` | Sign in again, after Facebook signs the collector out |
 | `collector/run check` | Try the token and passphrase, and list the searches |
+| `collector/run explain` | Read every search now and say where each car went and why; sends nothing |
+| `collector/run test-alert` | Send one test alert to your phone |
 | `collector/run setup --secrets` | Replace the token or passphrase |
 | `collector/run uninstall` | Stop it, and stop it starting at login |
 | `collector/run forget` | Remove the service, the Keychain items and the browser profile |
@@ -122,6 +124,36 @@ A car Facebook dates more than `marketplace.new_within_days` (7) back is
 recorded but not announced when it first appears: results are capped, so
 older cars drift into view as newer ones sell.
 
+## Why most cars read are not on your list
+
+Marketplace has no model filter. A search for one model returns most cars of
+that make nearby, so "read 60, on your list 3" is normal. The dashboard's
+**Status** tab shows, per search, how many were read, how many were another
+model (and which models), how many a rule hid, and how many are on your
+list. To see every car and the reason for each:
+
+```sh
+collector/run explain
+```
+
+It reads each search once, the way a pass does, opens no listing page and
+sends nothing. Each car is one line: its title, the model Facebook's own
+fields give (when they give one), the model the bot read, price, kilometres
+(`~` when Marketplace rounded them, as in "45K km"), place, seller, photo and
+age, followed by the rule that hid it, if one did. It sorts cars with the
+bot's own code, so what it prints is what the bot does.
+
+If a car of yours is set aside as another model, look at how its title and
+Facebook's fields spell the model: that is what to report, or to add as an
+alternative spelling.
+
+`collector/run explain --capture` also keeps what each page received, in
+`~/Library/Application Support/AutoTrader Watch/captures/`, and prints an
+outline of it: where the listings sit in Facebook's data, which fields they
+carry, and a few example values, with names, ids and addresses masked. Share
+the outline when a field comes out empty or wrong; the raw files stay on the
+Mac. Delete the folder whenever you like.
+
 ## When something goes wrong
 
 The bot alerts you when the collector has not checked in for two hours, when
@@ -136,5 +168,8 @@ log says why.
 - **The passphrase does not open the vault**: it was changed; run
   `collector/run setup --secrets` with the new one.
 - **Searches read nothing**: Facebook may have changed its pages. Run
-  `collector/run once --now` and look at the log; the reading itself is in
-  `autotrader/marketplace.py`.
+  `collector/run explain --capture` and share the outline it prints; the
+  reading itself is in `autotrader/marketplace.py`.
+- **No alerts arrive**: `collector/run test-alert` sends one through ntfy,
+  the channel a Mac can reach without the repository's secrets, and prints
+  what the server answered.

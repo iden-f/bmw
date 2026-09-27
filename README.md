@@ -246,6 +246,12 @@ Facebook's terms do not allow automated collection, and an account it
 suspects can be asked to confirm who it is or restricted. The collector reads
 slowly and only reads, but use an account you can afford to have challenged.
 
+Marketplace has no model filter, so most cars a search reads are another
+model and are set aside. The **Status** tab says, per search, how many were
+read, set aside, hidden by a rule and kept, and `collector/run explain` on
+the Mac lists every car with the reason. The **Listings** tab can show one
+site at a time.
+
 Setting it up takes about fifteen minutes: [collector/README.md](collector/README.md).
 A second Mac can stand by and take over if the first goes quiet. While it
 runs, the collector also asks for a check every half hour, so it keeps the

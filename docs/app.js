@@ -115,6 +115,9 @@ const app = {
   sort: 'newest',
   chip: 'all',
   search: 'all',
+  // Which site's cars: 'all', 'autotrader' or 'marketplace'. Only offered
+  // once a Marketplace collector is in use.
+  site: 'all',
   showHidden: false,
   // Feed slice: everything that happened, or only what reached a phone. Not
   // persisted, like every filter here, so each visit starts unfiltered.
@@ -1074,6 +1077,7 @@ function eventRow(e) {
 function listingPool() {
   let rows = (app.data?.listings || []);
   if (app.search !== 'all') rows = rows.filter(l => l.search_id === app.search);
+  if (app.site !== 'all') rows = rows.filter(l => siteOf(l) === app.site);
 
   const chip = app.chip;
   if (chip === 'all') rows = rows.filter(l => l.status === 'active' && (app.showHidden || !l.filtered));
@@ -1127,12 +1131,45 @@ function renderListings() {
       <option value="all">All searches</option>
       ${(app.data.searches || []).map(s =>
         `<option value="${esc(s.id)}"${s.id === app.search ? ' selected' : ''}>${esc(s.name)}</option>`).join('')}
+    </select>` + (usesMarketplace() ? (() => {
+      const n = site => live().filter(l => !l.filtered && (site === 'all' || siteOf(l) === site)).length;
+      return `
+    <label class="sr" for="site-pick">Site</label>
+    <select id="site-pick">${[['all', 'AutoTrader + Marketplace'], ['autotrader', 'AutoTrader only'],
+        ['marketplace', 'Marketplace only']].map(([id, label]) =>
+        `<option value="${id}"${id === app.site ? ' selected' : ''}>${label} (${num(n(id))})</option>`).join('')}
     </select>`;
+    })() : '');
   host.appendChild(bar);
+  // Before any early return below: a filter that empties the list must not
+  // leave the controls that could undo it dead.
+  bar.querySelector('#q').addEventListener('input', e => {
+    app.q = e.target.value;
+    const keep = document.activeElement === e.target;
+    renderListings();
+    if (keep) { const i = document.getElementById('q'); i.focus(); i.setSelectionRange(i.value.length, i.value.length); }
+  });
+  bar.querySelector('#sort').addEventListener('change', e => { app.sort = e.target.value; renderListings(); });
+  bar.querySelector('#search-pick').addEventListener('change', e => { app.search = e.target.value; renderListings(); });
+  bar.querySelector('#site-pick')?.addEventListener('change', e => { app.site = e.target.value; renderListings(); });
+
+  const mp = app.data.marketplace;
+  if (mp?.last_batch) {
+    const fromMp = live().filter(l => !l.filtered && siteOf(l) === 'marketplace').length;
+    const line = el('p', 'note');
+    line.innerHTML = `${num(fromMp)} of these cars ${fromMp === 1 ? 'is' : 'are'} from `
+      + `Facebook Marketplace. Its collector (${esc(mp.last_batch.host || 'the Mac')}) last `
+      + `sent a batch ${when(mp.last_batch.received)}. `
+      + `<a href="#/status" data-go="status">What it read</a>`;
+    line.querySelector('[data-go]').addEventListener('click', e => { e.preventDefault(); go('status'); });
+    host.appendChild(line);
+  }
 
   const kept = l => !marks.of(l.id).dismissed;
-  // Counts are within the selected search, so each chip matches its grid.
-  const mine = l => app.search === 'all' || l.search_id === app.search;
+  // Counts are within the selected search and site, so each chip matches
+  // its grid.
+  const mine = l => (app.search === 'all' || l.search_id === app.search)
+    && (app.site === 'all' || siteOf(l) === app.site);
   const counts = {
     // Whatever the Live chip will actually show, "Include hidden" included.
     all: live().filter(l => mine(l) && (app.showHidden || !l.filtered)
@@ -1204,14 +1241,6 @@ function renderListings() {
   if (total > drawn) {
     host.appendChild(el('p', 'note', `Showing the first ${num(drawn)} of ${num(total)}.`));
   }
-  bar.querySelector('#q').addEventListener('input', e => {
-    app.q = e.target.value;
-    const keep = document.activeElement === e.target;
-    renderListings();
-    if (keep) { const i = document.getElementById('q'); i.focus(); i.setSelectionRange(i.value.length, i.value.length); }
-  });
-  bar.querySelector('#sort').addEventListener('change', e => { app.sort = e.target.value; renderListings(); });
-  bar.querySelector('#search-pick').addEventListener('change', e => { app.search = e.target.value; renderListings(); });
 }
 
 /* The states a car can be in, in the order they are offered. The chip row and
@@ -1247,6 +1276,13 @@ function noResults() {
       what: esc(search?.name || 'one search'),
       label: 'Show all searches',
       clear: () => { app.search = 'all'; },
+    });
+  }
+  if (app.site !== 'all') {
+    narrowing.push({
+      what: app.site === 'marketplace' ? 'Marketplace only' : 'AutoTrader only',
+      label: 'Show both sites',
+      clear: () => { app.site = 'all'; },
     });
   }
 
@@ -1311,6 +1347,12 @@ function noResults() {
       s.innerHTML = `<h2>Nothing is hidden right now</h2>
         <p>Every car the searches found passed your rules.</p>`;
       return s;
+    } else if (app.site !== 'all') {
+      s.innerHTML = `<h2>No ${app.site === 'marketplace' ? 'Marketplace' : 'AutoTrader'}
+        car is on your list right now</h2>
+        <p>${app.site === 'marketplace'
+          ? 'The Status tab says what the Marketplace collector read, and where each car went.'
+          : 'Every car on your list right now is from Marketplace.'}</p>`;
     } else if (app.chip !== 'all') {
       s.innerHTML = `<h2>No car is ${esc(chipLabel(app.chip).toLowerCase())}</h2>
         <p>Every other car the searches hold is still on the Live chip.</p>`;
@@ -1406,6 +1448,11 @@ function shot(l, cls) {
 
 const sellerWord = kind => kind === 'private' ? 'private seller'
                         : kind === 'dealer' ? 'dealer' : '';
+
+/* Which site a car is from, and whether this watch uses more than one. */
+const siteOf = l => l.site || 'autotrader';
+const usesMarketplace = () => Boolean(app.data?.marketplace?.last_batch)
+  || (app.data?.listings || []).some(l => siteOf(l) === 'marketplace');
 
 /* Where a car is listed, as its link names it. */
 function siteName(l) {
@@ -2121,20 +2168,38 @@ function marketplaceSection(m) {
       <dd class="stat__note">${esc(session || 'reading as the signed-in account')}</dd></div>`;
   s.appendChild(stats);
   if ((m.searches || []).length) {
-    s.appendChild(table(`<thead><tr><th>Search</th><th>Last read</th><th class="r">Cars</th></tr></thead><tbody>` +
-      m.searches.map(x => `<tr><td>${esc(x.name)}</td>
-        <td>${x.last_error && x.consecutive_failures
-          ? `<span class="err">${esc(x.last_error)}</span>` : when(x.last_ok)}</td>
-        <td class="r num">${num(x.last_count ?? 0)}</td></tr>`).join('') + `</tbody>`));
+    // Where every car read went. A Marketplace search is loose - it returns
+    // most cars of the make - so "read 60, kept 3" is the normal shape, and
+    // the columns say where the other 57 went rather than let it look lost.
+    const cell = n => `<td class="r num">${n === undefined || n === null ? '\u2014' : num(n)}</td>`;
+    s.appendChild(table(`<thead><tr><th>Search</th><th>Last read</th>
+        <th class="r">Read</th><th class="r">Other models</th>
+        <th class="r">Hidden by a rule</th><th class="r">On your list</th></tr></thead><tbody>` +
+      m.searches.map(x => {
+        const b = x.breakdown || {};
+        const aside = (x.other_examples || [])
+          .map(([name, n]) => `${esc(name)}${n > 1 ? ` \u00d7${num(n)}` : ''}`).join(', ');
+        return `<tr><td>${esc(x.name)}${aside
+            ? `<br><span class="note" style="margin:0">set aside: ${aside}</span>` : ''}</td>
+          <td>${x.last_error && x.consecutive_failures
+            ? `<span class="err">${esc(x.last_error)}</span>` : when(x.last_ok)}</td>
+          ${cell(x.breakdown ? b.read : x.last_count)}${cell(b.other_models)}
+          ${cell(b.hidden)}${cell(b.kept)}</tr>`;
+      }).join('') + `</tbody>`));
   }
   if (m.refused && Date.now() - Date.parse(m.refused.at) < 864e5) {
     s.appendChild(el('p', 'note warnt',
       `A batch was refused ${when(m.refused.at)}: ${esc(m.refused.why)}`));
   }
   s.appendChild(el('p', 'note',
-    'A computer at home reads Marketplace while signed in to Facebook and '
-    + 'sends what it saw here, sealed. Cars from it go through the same rules '
-    + 'and alerts as the rest.'));
+    'A Mac at home reads each search on Marketplace while signed in to '
+    + 'Facebook and sends what the page showed it here, sealed. Marketplace '
+    + 'has no model filter, so a search for one model returns most cars of the '
+    + 'make: those are counted under <b>Other models</b> and not kept. The rest '
+    + 'go through the same rules as AutoTrader cars: <b>Hidden by a rule</b> '
+    + 'are stored with the reason, and <b>On your list</b> are the ones you '
+    + 'see and hear about. To see every car it read and where each went, run '
+    + '<code class="mono">collector/run explain</code> on the Mac.'));
   return s;
 }
 
@@ -2807,6 +2872,9 @@ function skeleton() {
 function render() {
   if (!app.data) return;
   eagerSlots = 6;
+  // The masthead names every site being watched.
+  const sites = document.querySelector('.brand span');
+  if (sites) sites.textContent = usesMarketplace() ? 'autotrader.ca + Marketplace' : 'autotrader.ca';
   renderTrust();
   renderClock();
   if (app.view === 'feed') renderFeed();

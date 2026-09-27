@@ -135,8 +135,13 @@ def _wanted(rec: dict[str, Any], item: dict[str, Any], cfg: Config, search) -> b
 
 
 def read(cfg: Config, plan: list[dict[str, Any]], browser: Browser,
-         settings: S.Settings, memory: dict[str, Any]) -> tuple[list[dict], str]:
-    """Every search in the plan, as batch parts, and the session's state."""
+         settings: S.Settings, memory: dict[str, Any], *, details: bool = True,
+         pages: list[dict[str, Any]] | None = None) -> tuple[list[dict], str]:
+    """Every search in the plan, as batch parts, and the session's state.
+
+    Without ``details`` no listing page is opened. ``pages``, when given,
+    collects what each search page received, for a local capture.
+    """
     by_id = {s.id: s for s in cfg.active_searches}
     cars = memory.setdefault("cars", {})
     parts: list[dict[str, Any]] = []
@@ -152,6 +157,9 @@ def read(cfg: Config, plan: list[dict[str, Any]], browser: Browser,
         for q in item["queries"]:
             page = browser.visit(q["url"], scrolls=settings.scrolls)
             texts += page.texts
+            if pages is not None:
+                pages.append({"search": item["name"], "query": q["query"],
+                              "landed": page.landed, "texts": list(page.texts)})
             landed.append(page.landed)
             if page.error:
                 errors.append(page.error)
@@ -183,6 +191,8 @@ def read(cfg: Config, plan: list[dict[str, Any]], browser: Browser,
             if _wanted(rec, item, cfg, search):
                 worth.append((not fresh, rec, item, search))
 
+    if not details:
+        return parts, session
     # A car worth hearing about gets its own page read once, for the exact
     # odometer and the details the results leave out.
     worth.sort(key=lambda w: w[0])

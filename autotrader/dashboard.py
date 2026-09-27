@@ -415,7 +415,11 @@ def _marketplace(cfg: Config, state: State) -> dict[str, Any] | None:
             {"id": sid, "name": names.get(sid, sid),
              "last_ok": h.get("last_ok"), "last_count": h.get("last_count", 0),
              "last_error": h.get("last_error"),
-             "consecutive_failures": h.get("consecutive_failures", 0)}
+             "consecutive_failures": h.get("consecutive_failures", 0),
+             # Where the cars read went: another model, hidden by a rule,
+             # or kept. Absent until the first batch after this was added.
+             "breakdown": h.get("breakdown"),
+             "other_examples": h.get("other_examples") or []}
             for sid, h in (section.get("searches") or {}).items() if sid in names],
         "batches": (section.get("batches") or [])[:12],
         "refused": section.get("refused"),

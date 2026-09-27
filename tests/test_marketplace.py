@@ -595,3 +595,67 @@ class TestPageOrder:
         ids = [str(100000010 + i) for i in range(8)]
         found = M.collect([search_page(*(node(i, "2018 Honda civic") for i in ids))])
         assert list(found) == ids
+
+
+class TestWhichFieldNamesTheModel:
+    """Facebook's model field holds whatever the seller picked from its list,
+    which is often the parent model. The trim and the title get a say."""
+
+    search = type("S", (), {"id": "s1", "name": "Example search"})()
+
+    def model(self, **rec):
+        rec.setdefault("id", "100000001")
+        return M.to_listing(rec, self.search, make="Audi", models=["RS 5"]).model
+
+    def test_the_trim_names_it_when_the_field_names_the_parent(self):
+        assert self.model(model="A5", trim="RS 5 Sportback 4D",
+                          title="2019 Audi a5") == "RS 5"
+
+    def test_the_title_names_it_when_neither_field_does(self):
+        assert self.model(model="A5", trim="Sportback", title="2019 Audi RS5") == "RS 5"
+
+    def test_the_field_stands_when_nothing_names_a_watched_model(self):
+        assert self.model(model="Q5", title="2019 Audi q5 suv 4d") == "Q5"
+
+    def test_a_run_together_name_counts(self):
+        assert self.model(title="2019 Audi RS5 Sportback") == "RS 5"
+        assert M.model_in("2021 X5M", ["X5 M"]) == "X5 M"
+        assert M.model_in("2021 X5 M50i", ["X5 M"]) == ""
+
+    def test_a_trim_fused_onto_a_numbered_model_counts(self):
+        assert M.model_in("2020 Audi RS5CS", ["RS 5"]) == "RS 5"
+        assert M.model_in("2020 X5 M40i", ["X5 M"]) == ""
+
+
+class TestWhereEveryCarWent:
+
+    def test_the_breakdown_adds_up(self, cfg):
+        search = cfg.searches[0]
+        [item] = M.plan(cfg)
+        records = [rec("100000001"),                                   # kept
+                   rec("100000002", title="2018 Honda accord ex"),     # another model
+                   rec("100000003", title="2018 Honda accord lx"),     # another model
+                   rec("100000004", title="2012 Honda civic lx"),      # too old
+                   rec("100000005", sold=True)]                        # sold
+        judged = M.judge(cfg, search, records, item)
+        b = judged.breakdown()
+        assert b == {"read": 4, "sold": 1, "other_models": 2, "elsewhere": 0,
+                     "hidden": 1, "hidden_by": {"min_year": 1}, "kept": 1}
+        assert b["read"] == b["other_models"] + b["hidden"] + b["kept"] + b["elsewhere"]
+        assert judged.other_examples() == [["ACCORD", 2]]
+
+    def test_a_car_an_earlier_search_kept_is_counted_as_such(self, cfg):
+        search = cfg.searches[0]
+        [item] = M.plan(cfg)
+        judged = M.judge(cfg, search, [rec("100000001")], item, {"fb-100000001"})
+        assert judged.breakdown()["elsewhere"] == 1 and not judged.kept
+
+    def test_the_bot_keeps_it_for_the_status_tab(self, watch):
+        watch.send(part(watch.sid, rec("100000001"),
+                        rec("100000002", title="2018 Honda accord ex")))
+        health = watch.state.data["marketplace"]["searches"][watch.sid]
+        assert health["breakdown"]["read"] == 2
+        assert health["breakdown"]["other_models"] == 1
+        assert health["other_examples"] == [["ACCORD", 1]]
+        [row] = build_payload(watch.cfg, watch.state, {})["marketplace"]["searches"]
+        assert row["breakdown"]["kept"] == 1 and row["other_examples"] == [["ACCORD", 1]]

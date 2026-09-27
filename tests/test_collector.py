@@ -420,3 +420,85 @@ class TestWhichPagesItOpens:
         # 200000002 has waited a pass, but the car that just appeared goes first.
         assert [v for v in FakeFacebook.visited if "/item/" in v] == \
             ["/marketplace/item/200000009/"]
+
+
+class TestExplain:
+
+    def test_says_where_every_car_went_and_sends_nothing(self, world):
+        from collector.explain import explain, explain_text
+        sign_in(world)
+        FakeFacebook.visited = []
+        result = explain(world.settings, github=world.github)
+        text = explain_text(result)
+        assert FakeGitHub.sent == []
+        assert not [v for v in FakeFacebook.visited if "/item/" in v]
+        assert "asked Marketplace for: Honda Civic" in text
+        assert ("read 3 for sale (+0 sold): 1 another model, 0 hidden by a rule, "
+                "2 on your list") in text
+        assert "another model (1): ACCORD x1" in text
+        assert "2017 Honda Accord Ex" in text and "model read as ACCORD" in text
+        assert "on your list (2):" in text and "~45,000 km" in text
+
+    def test_leaves_the_next_pass_to_see_cars_as_new(self, world):
+        from collector.cycle import load_memory
+        from collector.explain import explain
+        sign_in(world)
+        explain(world.settings, github=world.github)
+        assert load_memory().get("cars", {}) == {}
+
+    def test_a_rule_that_hides_a_car_is_named(self, world):
+        from collector.explain import explain, explain_text
+        sign_in(world)
+        before = list(FakeFacebook.first)
+        FakeFacebook.first = [node("200000007", "2012 Honda civic lx", price="9000.00")]
+        try:
+            text = explain_text(explain(world.settings, github=world.github))
+        finally:
+            FakeFacebook.first = before
+        assert "hidden by a rule (1):" in text
+        assert "-> year 2012 below minimum 2015" in text
+
+    def test_signed_out_says_what_to_do(self, world):
+        from collector.explain import explain, explain_text
+        text = explain_text(explain(world.settings, github=world.github))
+        assert "collector/run login" in text
+
+    def test_a_capture_stays_on_the_mac_and_its_outline_masks_people(self, world):
+        from collector import settings as S
+        from collector.explain import explain
+        sign_in(world)
+        result = explain(world.settings, github=world.github, capture=True)
+        folder = Path(result["capture"]["folder"])
+        assert S.home() in folder.parents
+        assert list(folder.glob("*.html")) and (folder / "outline.txt").is_file()
+        outline = result["capture"]["outline"]
+        assert "listing_price.amount" in outline and "24000.00" in outline
+        assert "custom_sub_titles_with_rendering_flags[].subtitle" in outline
+        assert "45K km" in outline
+        # The seller's name and the photo address are never shown.
+        assert "A Seller" not in outline and "cdn.example" not in outline
+        assert "marketplace_listing_seller.name" in outline
+
+
+class TestTestAlert:
+
+    def test_goes_out_through_the_watch_s_own_channels(self, world, monkeypatch):
+        from autotrader import notifiers
+        from autotrader.notifiers import Result
+        from collector.explain import test_alert
+        said = []
+        monkeypatch.setattr(notifiers, "alert", lambda cfg, subject, body, env=None,
+                            notifiers=None: said.append((subject, body, env))
+                            or [Result("ntfy", True)])
+        assert test_alert(world.settings, github=world.github) == ["ntfy: sent"]
+        [(subject, body, env)] = said
+        assert "test alert" in subject and "collector-a" in body
+        assert env == {}          # nothing from this Mac's environment
+
+    def test_with_no_channel_it_says_so(self, world, monkeypatch):
+        from collector.__main__ import main
+        from collector import explain as E
+        monkeypatch.setattr(E, "test_alert", lambda settings, github=None: [])
+        from collector import settings as S
+        monkeypatch.setattr(S.Settings, "load", classmethod(lambda cls: world.settings))
+        assert main(["test-alert"]) == 1

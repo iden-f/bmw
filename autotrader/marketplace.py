@@ -17,6 +17,7 @@ import hashlib
 import json
 import logging
 import re
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Any, Iterable, Iterator
 from urllib.parse import urlencode
@@ -396,16 +397,28 @@ def _words(text: str) -> list[str]:
 def model_in(title: str, models: Iterable[str]) -> str:
     """The first of ``models`` the title names, word for word.
 
-    "x5 m" is in "2021 X5 M Competition" but not in "2021 X5 M50i".
+    "x5 m" is in "2021 X5 M Competition", and in "2021 X5M" with the space
+    left out, but not in "2021 X5 M50i": every word the model spans must end
+    where the model does. A model ending in a digit also counts with a short
+    trim fused on ("2019 RS5CS" is an RS 5), since sellers write it that way.
     """
     words = _words(title)
     for model in models:
-        want = _words(model)
+        want = "".join(_words(model))
         if not want:
             continue
-        for i in range(len(words) - len(want) + 1):
-            if words[i:i + len(want)] == want:
-                return str(model)
+        for i in range(len(words)):
+            joined = ""
+            for word in words[i:]:
+                joined += word
+                if joined == want:
+                    return str(model)
+                if len(joined) >= len(want):
+                    rest = joined[len(want):]
+                    if (joined.startswith(want) and want[-1].isdigit()
+                            and rest.isalpha() and 2 <= len(rest) <= 4):
+                        return str(model)
+                    break
     return ""
 
 
@@ -420,8 +433,16 @@ def to_listing(rec: dict[str, Any], search, *, make: str = "",
         # only see what is in the name.
         title = f"{title} · {status} title" if title else f"{status} title"
 
+    # Facebook's own model field is only as good as the seller's choice from
+    # its list, and a seller often picks the parent model ("A5" for an
+    # RS 5) and puts the real one in the trim or the title. So each is asked
+    # in turn, and the field is trusted as it stands only when none of them
+    # names a watched model.
     named = str(rec.get("model") or "")
-    model = model_in(named, models) or (named if named else model_in(title, models))
+    model = (model_in(named, models)
+             or model_in(f"{named} {rec.get('trim') or ''}", models)
+             or model_in(title, models)
+             or named)
     if not model and make:
         # Not a model the search wants, so name whatever follows the make:
         # the models rule then says which car it is instead of "unnamed".
@@ -461,6 +482,66 @@ def to_listing(rec: dict[str, Any], search, *, make: str = "",
         enriched=bool(rec.get("make") or rec.get("model")),
     )
     return listing
+
+
+@dataclass
+class Judged:
+    """Where every car one search read went, as the bot decides it."""
+    on_sale: list[Listing] = field(default_factory=list)
+    sold: set[str] = field(default_factory=set)
+    pending: set[str] = field(default_factory=set)
+    # Another model than the search is for: set aside, not stored.
+    other: list[tuple[Listing, "filters.Verdict"]] = field(default_factory=list)
+    # Already claimed by an earlier search this batch.
+    elsewhere: list[Listing] = field(default_factory=list)
+    kept: list[Listing] = field(default_factory=list)
+    unpriced: list[Listing] = field(default_factory=list)
+    # Stored, but hidden by one of the search's rules, with the reason.
+    hidden: list[tuple[Listing, "filters.Verdict"]] = field(default_factory=list)
+
+    def breakdown(self) -> dict[str, Any]:
+        """The counts, which always add up to ``read``."""
+        hidden_by: dict[str, int] = {}
+        for _, verdict in self.hidden:
+            hidden_by[verdict.rule or "rule"] = hidden_by.get(verdict.rule or "rule", 0) + 1
+        return {"read": len(self.on_sale), "sold": len(self.sold),
+                "other_models": len(self.other), "elsewhere": len(self.elsewhere),
+                "hidden": len(self.hidden), "hidden_by": hidden_by,
+                "kept": len(self.kept) + len(self.unpriced)}
+
+    def other_examples(self, limit: int = 8) -> list[list[Any]]:
+        """The models set aside, most common first: [name, count]."""
+        counts: dict[str, int] = {}
+        for listing, _ in self.other:
+            name = listing.model or "no model named"
+            counts[name] = counts.get(name, 0) + 1
+        return [[name, n] for name, n in
+                sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))[:limit]]
+
+
+def judge(cfg, search, records: Iterable[dict[str, Any]],
+          item: dict[str, Any] | None = None, owned: set[str] | None = None) -> Judged:
+    """Sort one search's cars by the search's own rules, without storing any.
+
+    The bot takes a batch in with this, and the collector's ``explain``
+    prints it, so the two can never disagree about why a car went where.
+    """
+    item = item or {}
+    owned = owned if owned is not None else set()
+    search_filters = dict(cfg.rules_for(search)["filters"])
+    records = [r for r in records
+               if isinstance(r, dict) and _ITEM_ID.match(str(r.get("id") or ""))]
+    listings = [to_listing(r, search, make=item.get("make", ""),
+                           models=item.get("models", [])) for r in records]
+    out = Judged()
+    out.sold = {MARKETPLACE_PREFIX + str(r["id"]) for r in records if r.get("sold")}
+    out.pending = {MARKETPLACE_PREFIX + str(r["id"]) for r in records if r.get("pending")}
+    out.on_sale = [l for l in listings if l.id not in out.sold]
+    for_me, out.other = filters.not_this_car(out.on_sale, search_filters)
+    out.elsewhere = [l for l in for_me if l.id in owned]
+    mine = [l for l in for_me if l.id not in owned]
+    out.kept, out.unpriced, out.hidden, _wrong = filters.apply(mine, search_filters)
+    return out
 
 
 # ------------------------------------------------------- what to search for
@@ -643,13 +724,8 @@ def ingest(cfg, state: State, batch: dict[str, Any], *,
         search_filters = dict(rules["filters"])
         search_notify = rules["notify_on"]
 
-        records = [r for r in (part.get("listings") or [])
-                   if isinstance(r, dict) and _ITEM_ID.match(str(r.get("id") or ""))]
-        listings = [to_listing(r, search, make=item.get("make", ""),
-                               models=item.get("models", [])) for r in records]
-        sold = {MARKETPLACE_PREFIX + str(r["id"]) for r in records if r.get("sold")}
-        pending = {MARKETPLACE_PREFIX + str(r["id"]) for r in records if r.get("pending")}
-        on_sale = [l for l in listings if l.id not in sold]
+        judged = judge(cfg, search, part.get("listings") or [], item, owned)
+        on_sale, sold, pending = judged.on_sale, judged.sold, judged.pending
         report.listings_seen += len(on_sale)
 
         # The first batch for a search, or one read differently, is a starting
@@ -657,16 +733,20 @@ def ingest(cfg, state: State, batch: dict[str, Any], *,
         scope = str(part.get("scope") or "")
         baseline = health.get("scope") != scope
         health.update({"scope": scope, "last_ok": now, "last_count": len(on_sale),
-                       "consecutive_failures": 0, "landed": str(part.get("landed") or "")[:400]})
+                       "consecutive_failures": 0,
+                       "landed": str(part.get("landed") or "")[:400],
+                       # Where every car read went, for the Status tab: most
+                       # of what a loose Marketplace search returns is not the
+                       # model asked for, and that should read as expected.
+                       "breakdown": judged.breakdown(),
+                       "other_examples": judged.other_examples()})
         health.pop("last_error", None)
         if baseline and on_sale:
             report.baselines.append(search.name)
 
-        for_me, not_mine = filters.not_this_car(on_sale, search_filters)
-        if not_mine:
-            report.not_this_car[search.name] = len(not_mine)
-        mine = [l for l in for_me if l.id not in owned]
-        kept, unpriced, dropped, _wrong = filters.apply(mine, search_filters)
+        if judged.other:
+            report.not_this_car[search.name] = len(judged.other)
+        kept, unpriced, dropped = judged.kept, judged.unpriced, judged.hidden
         owned.update(l.id for l in kept)
         owned.update(l.id for l in unpriced)
         report.unpriced += len(unpriced)

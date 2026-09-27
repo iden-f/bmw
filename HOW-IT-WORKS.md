@@ -225,7 +225,10 @@ the bot stays the only writer of the watch's data.
 4. **The ingest.** `marketplace ingest` reads the batch from the event file,
    never from the workflow's own text, and refuses one that does not open,
    is over 12 hours old, or whose id it has already taken in. Each search's
-   cars then go through the same `filters` and change handling as a check.
+   cars then go through `marketplace.judge` - the same `filters` as a check,
+   sorting each car into another model, hidden by a rule, or kept - and the
+   same change handling. The counts are kept per search for the Status tab,
+   and `collector/run explain` prints the same sorting car by car.
    Ids are `fb-<item number>`. A search's first batch records what is for
    sale as a starting point; a car Facebook marks sold is gone at once, one
    unseen for 10 days is gone quietly, and AutoTrader's absence rules never

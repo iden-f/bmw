@@ -1608,7 +1608,11 @@ class TestMarketplaceOnThePage:
             "hosts": {}, "cars": 1, "batches": [], "refused": None,
             "searches": [{"id": d["searches"][0]["id"], "name": "Honda Civic 2014-2021",
                           "last_ok": now, "last_count": 7, "last_error": None,
-                          "consecutive_failures": 0}]}
+                          "consecutive_failures": 0,
+                          "breakdown": {"read": 60, "sold": 1, "other_models": 55,
+                                        "elsewhere": 0, "hidden": 4,
+                                        "hidden_by": {"min_year": 4}, "kept": 1},
+                          "other_examples": [["Accord", 30], ["CR-V", 25]]}]}
         return d
 
     def test_the_card_and_the_sheet_say_marketplace(self, browser, site, payload):
@@ -1645,4 +1649,88 @@ class TestMarketplaceOnThePage:
         ctx, page, _ = self.open(browser, site, payload, "#/status")
         page.wait_for_selector("text=Alerts")
         assert "Facebook Marketplace" not in page.inner_text("main")
+        ctx.close()
+
+    def test_the_status_table_says_where_every_car_read_went(self, browser, site, payload):
+        ctx, page, errors = self.open(browser, site, self.with_marketplace(payload),
+                                      "#/status")
+        page.wait_for_selector("text=Facebook Marketplace")
+        section = page.locator("section.section",
+                               has=page.locator("h2", has_text="Facebook Marketplace"))
+        heads = section.locator("th").evaluate_all("ts => ts.map(t => t.textContent.trim())")
+        assert heads[2:] == ["Read", "Other models", "Hidden by a rule", "On your list"]
+        row = section.locator("tbody tr").first.inner_text()
+        assert "set aside: Accord \u00d730, CR-V \u00d725" in row
+        for n in ("60", "55", "4", "1"):
+            assert n in row
+        assert "collector/run explain" in section.inner_text()
+        assert not errors, errors
+        ctx.close()
+
+    def test_the_site_picker_appears_only_with_marketplace(self, browser, site, payload):
+        ctx, page, _ = self.open(browser, site, payload, "#/listings")
+        page.wait_for_selector(".card")
+        assert page.locator("#site-pick").count() == 0
+        assert page.text_content(".brand span") == "autotrader.ca"
+        ctx.close()
+        ctx, page, errors = self.open(browser, site, self.with_marketplace(payload),
+                                      "#/listings")
+        page.wait_for_selector("#site-pick")
+        options = page.locator("#site-pick option").all_inner_texts()
+        assert [o.split(" (")[0] for o in options] == [
+            "AutoTrader + Marketplace", "AutoTrader only", "Marketplace only"]
+        assert page.text_content(".brand span") == "autotrader.ca + Marketplace"
+        page.select_option("#site-pick", "marketplace")
+        page.wait_for_timeout(200)
+        labels = page.locator(".card").evaluate_all("cs => cs.map(c => c.getAttribute('aria-label'))")
+        assert labels and all("on Facebook Marketplace" in l for l in labels)
+        page.select_option("#site-pick", "autotrader")
+        page.wait_for_timeout(200)
+        labels = page.locator(".card").evaluate_all("cs => cs.map(c => c.getAttribute('aria-label'))")
+        assert labels and not any("on Facebook Marketplace" in l for l in labels)
+        assert not errors, errors
+        ctx.close()
+
+    def test_the_listings_say_how_many_came_from_marketplace(self, browser, site, payload):
+        ctx, page, _ = self.open(browser, site, self.with_marketplace(payload), "#/listings")
+        page.wait_for_selector("text=from Facebook Marketplace")
+        line = page.locator("p", has_text="from Facebook Marketplace").first.inner_text()
+        assert line.startswith("1 of these cars is from Facebook Marketplace")
+        assert "collector-a" in line
+        page.click("text=What it read")
+        page.wait_for_selector("text=Other models")
+        ctx.close()
+
+    def test_an_emptied_list_still_answers_its_own_controls(self, browser, site, payload):
+        ctx, page, _ = self.open(browser, site, payload, "#/listings")
+        page.wait_for_selector(".card")
+        page.fill("#q", "nothing is called this")
+        page.wait_for_selector(".state")
+        assert page.locator(".card").count() == 0
+        # Once the list is empty the box must still work, not just the
+        # buttons in the empty state.
+        page.fill("#q", "")
+        page.wait_for_selector(".card")
+        page.fill("#q", "nothing is called this")
+        page.wait_for_selector(".state")
+        page.select_option("#sort", index=1)
+        page.fill("#q", "")
+        page.wait_for_selector(".card")
+        ctx.close()
+
+    def test_one_site_with_nothing_on_it_offers_both(self, browser, site, payload):
+        ctx, page, _ = self.open(browser, site, self.with_marketplace(payload), "#/listings")
+        page.wait_for_selector("#site-pick")
+        page.select_option("#site-pick", "marketplace")
+        page.fill("#q", "nothing is called this")
+        page.wait_for_selector("text=Show both sites")
+        page.fill("#q", "")
+        page.wait_for_selector(".card")
+        # Only an AutoTrader car is a 6-speed: nothing here until both sites show.
+        page.fill("#q", "6-speed")
+        page.wait_for_selector("text=Show both sites")
+        page.click("text=Show both sites")
+        page.wait_for_selector(".card")
+        assert page.locator(".card").count() == 1
+        assert page.eval_on_selector("#site-pick", "s => s.value") == "all"
         ctx.close()
