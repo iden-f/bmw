@@ -659,3 +659,61 @@ class TestWhereEveryCarWent:
         assert health["other_examples"] == [["ACCORD", 1]]
         [row] = build_payload(watch.cfg, watch.state, {})["marketplace"]["searches"]
         assert row["breakdown"]["kept"] == 1 and row["other_examples"] == [["ACCORD", 1]]
+
+
+class TestWhatIsNotTheModel:
+    """Found in review: an option package, a look, or a model rebuilt from a
+    stray letter and a number must not pass for the car watched."""
+
+    @pytest.mark.parametrize("title, models", [
+        ("2021 BMW X5 M Sport Package", ["X5 M"]),
+        ("2021 BMW X5 M-Sport", ["X5 M"]),
+        ("2019 Audi A5 with RS5 grille and rims", ["RS 5"]),
+        ("2016 Audi A4 S4 look", ["S4"]),
+        ("2009 Audi A4 S 3.0T quattro", ["S3"]),
+        ("2010 Audi A4 Avant, a 6-speed manual", ["A6"]),
+        ("2010 Audi A4 Avant a 6spd", ["A6"]),
+        ("2014 Audi A4 quattro S 4dr", ["S4"]),
+        ("2012 Ford Mustang GT 500hp", ["GT500"]),
+        ("2020 BMW X5M", ["X5"]),
+        ("2017 BMW X5 M40i", ["X5 M"]),
+    ])
+    def test_is_not_read_as_it(self, title, models):
+        assert M.model_in(title, models) == ""
+
+    @pytest.mark.parametrize("title, models, model", [
+        ("2020 BMW x5 m sport utility 4d", ["X5 M"], "X5 M"),
+        ("2020 BMW X5 M Sport Activity Vehicle", ["X5 M"], "X5 M"),
+        ("2017 Mercedes-Benz C63S AMG Coupe", ["C 63"], "C 63"),
+        ("2019 Mercedes-Benz E63S 4MATIC", ["E 63"], "E 63"),
+        ("2019 Ford GT350R", ["GT350"], "GT350"),
+        ("2018 Audi RS5 RS Performance exhaust", ["RS 5"], "RS 5"),
+    ])
+    def test_the_real_car_still_is(self, title, models, model):
+        assert M.model_in(title, models) == model
+
+    def test_the_field_stands_when_the_title_names_an_option(self):
+        search = type("S", (), {"id": "s1", "name": "Example search"})()
+        car = M.to_listing({"id": "100000001", "model": "X5", "trim": "xDrive40i",
+                            "title": "2021 BMW X5 M Sport Package"},
+                           search, make="BMW", models=["X5 M"])
+        assert car.model == "X5"
+
+
+class TestACarTwoSearchesSee:
+
+    def test_hidden_by_one_and_kept_by_another_is_not_hidden(self, cfg):
+        cfg.add_search("https://www.autotrader.ca/cars/honda/civic/?prx=-1", "Second")
+        cfg.data["searches"][1]["filters"] = {"models": ["Civic"]}
+        first, second = cfg.searches
+        plan = {i["search"]: i for i in M.plan(cfg)}
+        old = rec("100000004", title="2012 Honda civic lx")       # too old for the first
+        one = M.judge(cfg, first, [old], plan[first.id])
+        kept = {l.id for l in one.kept}
+        two = M.judge(cfg, second, [old], plan[second.id], kept)
+        kept |= {l.id for l in two.kept}
+        assert one.breakdown()["hidden"] == 1
+        settled = one.breakdown(kept)
+        assert settled["hidden"] == 0 and settled["elsewhere"] == 1
+        assert settled["read"] == settled["other_models"] + settled["hidden"] \
+            + settled["kept"] + settled["elsewhere"]

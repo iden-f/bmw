@@ -137,6 +137,8 @@ a{ color:var(--ev-new); text-underline-offset:2px; }
   text-transform:uppercase; color:var(--text-3);
 }
 @media (max-width:459px){ .brand span{ display:none; } }
+/* Two sites make a longer label; it gives way before the trust line does. */
+@media (max-width:899px){ .brand--two span{ display:none; } }
 
 /* The trust line. Always present, because "is this current" is the first
    question and it should never need a click. */

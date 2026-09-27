@@ -26,6 +26,52 @@ _SIGNED_OUT = ("/login", "login.php")
 _CHECKPOINT = ("/checkpoint",)
 
 
+class Busy(RuntimeError):
+    """The browser profile is in use by another pass, explain or login."""
+
+
+# How long to wait for the profile. A pass takes a few minutes; explain and
+# login take as long as the owner does.
+LOCK_WAIT_SECONDS = 15 * 60
+
+
+@contextmanager
+def profile_lock(wait: float | None = None) -> Iterator[None]:
+    """One browser on the profile at a time.
+
+    Chrome refuses a second instance on the same profile, so the service's
+    pass, ``explain`` and ``login`` take turns rather than one of them dying
+    halfway through.
+    """
+    try:
+        import fcntl
+    except ImportError:              # not a Mac or Linux: nothing to share with
+        yield
+        return
+    path = S.home() / "browser.lock"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    wait = LOCK_WAIT_SECONDS if wait is None else wait
+    with open(path, "w") as handle:
+        deadline = time.monotonic() + wait
+        said = False
+        while True:
+            try:
+                fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except OSError:
+                if time.monotonic() >= deadline:
+                    raise Busy("the collector's browser is busy with another pass; "
+                               "try again in a few minutes") from None
+                if not said:
+                    print("Another pass is using the browser; waiting for it to finish.")
+                    said = True
+                time.sleep(2)
+        try:
+            yield
+        finally:
+            fcntl.flock(handle, fcntl.LOCK_UN)
+
+
 class Page:
     """What one visit produced."""
 
@@ -53,7 +99,7 @@ class Browser:
     def open(self) -> Iterator["Browser"]:
         from playwright.sync_api import sync_playwright
         self.profile.mkdir(parents=True, exist_ok=True)
-        with sync_playwright() as pw:
+        with profile_lock(), sync_playwright() as pw:
             kwargs = dict(headless=not self.visible, locale="en-CA",
                           viewport={"width": 1280, "height": 900},
                           args=["--disable-blink-features=AutomationControlled"])

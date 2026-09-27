@@ -87,16 +87,18 @@ def cmd_once(args) -> int:
 def cmd_explain(args) -> int:
     from .explain import explain, explain_text
     print("Reading every search once. Nothing is sent and no listing page is opened.")
-    print(explain_text(explain(S.Settings.load(), capture=args.capture)))
-    return 0
+    result = explain(S.Settings.load(), capture=args.capture)
+    print(explain_text(result))
+    read_any = any(s["ok"] for s in result["searches"])
+    return 0 if result["session"] == "ok" and (read_any or result.get("note")) else 1
 
 
 def cmd_test_alert(args) -> int:
     from .explain import test_alert
     said = test_alert(S.Settings.load())
     if not said:
-        print("No channel is reachable from this Mac. ntfy is the only one that "
-              "needs no secret, and the watch has it switched off or has no topic.")
+        print("ntfy is switched off in the watch's settings, or has no topic, so "
+              "there is nothing this Mac can send a test through.")
         return 1
     for line in said:
         print(line)

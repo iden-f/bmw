@@ -394,31 +394,85 @@ def _words(text: str) -> list[str]:
     return re.findall(r"[a-z0-9]+", str(text or "").lower())
 
 
+# A word right after a model that makes it an option, a look or a part
+# rather than the car: "X5 M Sport" is an X5 with the M Sport package, an
+# "RS5 grille" is on an A5.
+_NOT_THE_MODEL = {
+    "sport", "sports", "package", "packages", "pkg", "pack", "performance",
+    "look", "looks", "style", "styling", "appearance", "line", "badge",
+    "badges", "badging", "badged", "wheel", "wheels", "rim", "rims", "kit",
+    "bodykit", "bumper", "bumpers", "grille", "grill", "replica", "tribute",
+    "clone", "conversion", "exhaust", "seats", "steering",
+}
+# ...except where the word is a body style: "Sport Utility 4D" is how
+# Marketplace names an SUV.
+_BODY_AFTER_SPORT = {"utility", "activity"}
+
+
+def _fused(word: str, want: str) -> bool:
+    """ "rs5cs" is an RS 5 with a trim run on; "x5m" is not an X5.
+
+    Only after a number, and one letter only after two digits or more
+    ("c63s"), since one letter after one digit is usually a model of its own.
+    """
+    rest = word[len(want):]
+    if not (word.startswith(want) and want[-1:].isdigit() and rest.isalpha()):
+        return False
+    digits = len(want) - len(want.rstrip("0123456789"))
+    return 2 <= len(rest) <= 4 or (len(rest) == 1 and digits >= 2)
+
+
+def _spelled_at(words: list[str], i: int, want: list[str]) -> int:
+    """Where the model ends if the title spells it from word ``i``, else -1.
+
+    A title word may join several of the model's words ("x5m" for "X5 M") but
+    never split one ("s 3.0t" is not an S3). A short trim may be run onto the
+    last one.
+    """
+    j = 0
+    while j < len(want):
+        if i >= len(words):
+            return -1
+        word = words[i]
+        joined = ""
+        for k in range(j, len(want)):
+            joined += want[k]
+            if joined == word:
+                j, i = k + 1, i + 1
+                break
+            if len(joined) >= len(word):
+                break
+        else:
+            joined = None
+        if joined == word:
+            continue
+        if _fused(word, "".join(want[j:])):
+            return i + 1
+        return -1
+    return i
+
+
 def model_in(title: str, models: Iterable[str]) -> str:
     """The first of ``models`` the title names, word for word.
 
-    "x5 m" is in "2021 X5 M Competition", and in "2021 X5M" with the space
-    left out, but not in "2021 X5 M50i": every word the model spans must end
-    where the model does. A model ending in a digit also counts with a short
-    trim fused on ("2019 RS5CS" is an RS 5), since sellers write it that way.
+    "x5 m" is in "2021 X5 M Competition" and in "2021 X5M", but not in
+    "2021 X5 M50i", nor in "2021 X5 M Sport Package".
     """
     words = _words(title)
     for model in models:
-        want = "".join(_words(model))
+        want = _words(model)
         if not want:
             continue
         for i in range(len(words)):
-            joined = ""
-            for word in words[i:]:
-                joined += word
-                if joined == want:
-                    return str(model)
-                if len(joined) >= len(want):
-                    rest = joined[len(want):]
-                    if (joined.startswith(want) and want[-1].isdigit()
-                            and rest.isalpha() and 2 <= len(rest) <= 4):
-                        return str(model)
-                    break
+            end = _spelled_at(words, i, want)
+            if end < 0:
+                continue
+            after = words[end] if end < len(words) else ""
+            if after in _NOT_THE_MODEL and not (
+                    after in ("sport", "sports")
+                    and end + 1 < len(words) and words[end + 1] in _BODY_AFTER_SPORT):
+                continue
+            return str(model)
     return ""
 
 
@@ -499,14 +553,22 @@ class Judged:
     # Stored, but hidden by one of the search's rules, with the reason.
     hidden: list[tuple[Listing, "filters.Verdict"]] = field(default_factory=list)
 
-    def breakdown(self) -> dict[str, Any]:
-        """The counts, which always add up to ``read``."""
+    def breakdown(self, kept_anywhere: set[str] | None = None) -> dict[str, Any]:
+        """The counts, which always add up to ``read``.
+
+        ``kept_anywhere`` is every id some search kept: a car this search's
+        rules would hide but a later search keeps is not hidden, and counts
+        with the cars kept by another search.
+        """
+        kept_anywhere = kept_anywhere or set()
+        hidden = [(l, v) for l, v in self.hidden if l.id not in kept_anywhere]
         hidden_by: dict[str, int] = {}
-        for _, verdict in self.hidden:
+        for _, verdict in hidden:
             hidden_by[verdict.rule or "rule"] = hidden_by.get(verdict.rule or "rule", 0) + 1
         return {"read": len(self.on_sale), "sold": len(self.sold),
-                "other_models": len(self.other), "elsewhere": len(self.elsewhere),
-                "hidden": len(self.hidden), "hidden_by": hidden_by,
+                "other_models": len(self.other),
+                "elsewhere": len(self.elsewhere) + len(self.hidden) - len(hidden),
+                "hidden": len(hidden), "hidden_by": hidden_by,
                 "kept": len(self.kept) + len(self.unpriced)}
 
     def other_examples(self, limit: int = 8) -> list[list[Any]]:
@@ -702,6 +764,7 @@ def ingest(cfg, state: State, batch: dict[str, Any], *,
     owned: set[str] = set()
     rejected: dict[str, tuple[Listing, filters.Verdict]] = {}
     read_ok: set[str] = set()
+    settled: list[tuple[dict[str, Any], Judged]] = []
     health_all = section.setdefault("searches", {})
 
     for part in batch.get("searches") or []:
@@ -735,11 +798,11 @@ def ingest(cfg, state: State, batch: dict[str, Any], *,
         health.update({"scope": scope, "last_ok": now, "last_count": len(on_sale),
                        "consecutive_failures": 0,
                        "landed": str(part.get("landed") or "")[:400],
-                       # Where every car read went, for the Status tab: most
-                       # of what a loose Marketplace search returns is not the
-                       # model asked for, and that should read as expected.
-                       "breakdown": judged.breakdown(),
                        "other_examples": judged.other_examples()})
+        # Where every car read went, for the Status tab: most of what a loose
+        # Marketplace search returns is not the model asked for, and that
+        # should read as expected. Counted once every search has had its say.
+        settled.append((health, judged))
         health.pop("last_error", None)
         if baseline and on_sale:
             report.baselines.append(search.name)
@@ -779,6 +842,8 @@ def ingest(cfg, state: State, batch: dict[str, Any], *,
 
     _hide(rejected, owned, state=state, report=report, silence=silence)
     report.filtered_out = sum(1 for lid in rejected if lid not in owned)
+    for health, judged in settled:
+        health["breakdown"] = judged.breakdown(owned)
 
     # A car not seen for days while its search reads fine has gone. Absence
     # proves less here than on AutoTrader - results are capped and ranked -

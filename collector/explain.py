@@ -59,6 +59,7 @@ def explain(settings: S.Settings, *, github: GitHub | None = None,
             continue
         judged = M.judge(cfg, search, part["listings"], item, owned)
         owned.update(l.id for l in judged.kept + judged.unpriced)
+        out["kept_anywhere"] = owned
         out["searches"].append({
             "name": search.name, "queries": [q["query"] for q in item["queries"]],
             "landed": part.get("landed", ""), "ok": part["ok"], "error": part["error"],
@@ -104,11 +105,16 @@ def explain_text(result: dict[str, Any]) -> str:
     if result.get("note"):
         return result["note"]
     if result["session"] != "ok":
-        return (f"Facebook: {result['session']}. Run collector/run login, sign in, "
-                f"close the window, and try again.")
+        lines += [f"Facebook: {result['session']}. Run collector/run login, sign in, "
+                  f"close the window, and try again.", ""]
+    if result["searches"]:
+        lines += ["Each car is judged from the search results alone. A real pass also",
+                  "opens the page of a car on your list once, and what it finds there",
+                  "(the exact kilometres, a rebuilt title) can still hide it.", ""]
+    kept_anywhere = result.get("kept_anywhere") or set()
     for s in result["searches"]:
         j: M.Judged = s["judged"]
-        b = j.breakdown()
+        b = j.breakdown(kept_anywhere)
         recs = s["records"]
         lines.append(f"{s['name']}")
         lines.append(f"  asked Marketplace for: {', '.join(s['queries'])}"
@@ -119,20 +125,29 @@ def explain_text(result: dict[str, Any]) -> str:
             continue
         lines.append(f"  read {b['read']} for sale (+{b['sold']} sold): "
                      f"{b['other_models']} another model, {b['hidden']} hidden by a rule, "
-                     f"{b['kept']} on your list, {b['elsewhere']} kept by an earlier search")
+                     f"{b['kept']} on your list, {b['elsewhere']} kept by another search")
         if j.other:
             lines.append(f"  another model ({len(j.other)}): "
                          + ", ".join(f"{n} x{c}" for n, c in j.other_examples(20)))
             for listing, _ in j.other:
                 lines.append(_car(listing, recs.get(listing.id, {})))
-        if j.hidden:
-            lines.append(f"  hidden by a rule ({len(j.hidden)}):")
-            for listing, verdict in j.hidden:
+        elsewhere = j.elsewhere + [l for l, _ in j.hidden if l.id in kept_anywhere]
+        if elsewhere:
+            lines.append(f"  kept by another search ({len(elsewhere)}):")
+            for listing in elsewhere:
+                lines.append(_car(listing, recs.get(listing.id, {})))
+        hidden = [(l, v) for l, v in j.hidden if l.id not in kept_anywhere]
+        if hidden:
+            lines.append(f"  hidden by a rule ({len(hidden)}):")
+            for listing, verdict in hidden:
                 lines.append(_car(listing, recs.get(listing.id, {}), verdict.reason))
         kept = j.kept + j.unpriced
         lines.append(f"  on your list ({len(kept)}):")
         for listing in kept:
             lines.append(_car(listing, recs.get(listing.id, {})))
+        if j.sold:
+            lines.append(f"  marked sold ({len(j.sold)}): "
+                         + ", ".join(sorted(recs.get(i, {}).get("title") or i for i in j.sold)))
         lines.append("")
     if result.get("capture"):
         lines.append(f"Captured to {result['capture']['folder']}")
@@ -143,20 +158,32 @@ def explain_text(result: dict[str, Any]) -> str:
 
 # --------------------------------------------------------------- capture
 
-# Fields worth showing a value for: what the parser reads, and what it might.
+# The only paths whose values the outline shows: what the parser reads, and
+# what it might. Everything else - names, ids, addresses, free text anywhere
+# in Facebook's data - is shown as its type only, so a shape nobody has seen
+# yet cannot leak a person into what the owner shares.
 _SHOW = {
-    "__typename", "marketplace_listing_title", "custom_title", "amount",
-    "formatted_amount", "amount_with_offset", "amount_with_offset_in_currency",
-    "currency", "subtitle", "city", "state", "display_name", "text",
+    "__typename", "marketplace_listing_title", "custom_title",
+    "listing_price.amount", "listing_price.formatted_amount",
+    "listing_price.amount_with_offset", "listing_price.amount_with_offset_in_currency",
+    "listing_price.currency", "formatted_price.text",
+    "strikethrough_price.amount", "strikethrough_price.formatted_amount",
+    "custom_sub_titles_with_rendering_flags[].subtitle",
+    "location.reverse_geocode.city", "location.reverse_geocode.state",
+    "location.reverse_geocode.city_page.display_name", "location_text.text",
     "creation_time", "is_sold", "is_pending", "is_live", "is_hidden",
+    "delivery_types[]", "condition", "story_type",
     "vehicle_make_display_name", "vehicle_model_display_name",
-    "vehicle_trim_display_name", "unit", "value", "vehicle_transmission_type",
-    "vehicle_exterior_color", "vehicle_fuel_type", "vehicle_seller_type",
-    "vehicle_title_status", "delivery_types", "condition", "story_type",
+    "vehicle_trim_display_name", "vehicle_odometer_data.unit",
+    "vehicle_odometer_data.value", "vehicle_transmission_type",
+    "vehicle_exterior_color", "vehicle_interior_color", "vehicle_fuel_type",
+    "vehicle_seller_type", "vehicle_title_status", "vehicle_condition",
+    "marketplace_listing_seller.__typename",
 }
-# Never shown, wherever they sit: they name or point at a person.
-_MASK = {"name", "uri", "url", "id", "user_id", "vehicle_identification_number",
-         "short_name", "profile_picture"}
+
+
+def _shown(path: str) -> bool:
+    return path in _SHOW or path.endswith(".__typename")
 
 
 def _kind(value: Any) -> str:
@@ -173,22 +200,23 @@ def _kind(value: Any) -> str:
     return "object"
 
 
-def _leaves(node: Any, path: str = "", depth: int = 0,
-            seller: bool = False) -> Iterator[tuple[str, Any, bool]]:
-    """(path, value, masked) for each leaf under one listing, a few levels deep."""
+def _leaves(node: Any, path: str = "", depth: int = 0) -> Iterator[tuple[str, Any]]:
+    """(path, value) for each leaf under one listing, a few levels deep."""
     if depth > 4:
         return
     if isinstance(node, dict):
         for key, value in node.items():
             inner = f"{path}.{key}" if path else key
-            hide = seller or key == "marketplace_listing_seller"
             if isinstance(value, (dict, list)):
-                yield from _leaves(value, inner, depth + 1, hide)
+                yield from _leaves(value, inner, depth + 1)
             else:
-                yield inner, value, hide and key != "__typename" or key in _MASK
+                yield inner, value
     elif isinstance(node, list):
         for item in node[:3]:
-            yield from _leaves(item, f"{path}[]", depth + 1, seller)
+            if isinstance(item, (dict, list)):
+                yield from _leaves(item, f"{path}[]", depth + 1)
+            else:
+                yield f"{path}[]", item
 
 
 def _paths_to_listings(document: Any) -> Iterator[str]:
@@ -223,13 +251,11 @@ def outline(pages: list[dict[str, Any]]) -> str:
                 for node in M._nodes(document):
                     nodes += 1
                     found += 1
-                    for path, value, masked in _leaves(node):
+                    for path, value in _leaves(node):
                         f = fields.setdefault(path, {"n": 0, "kinds": set(), "eg": []})
                         f["n"] += 1
                         f["kinds"].add(_kind(value))
-                        leaf = path.rsplit(".", 1)[-1].rstrip("[]")
-                        if not masked and leaf in _SHOW and value not in (None, "") \
-                                and len(f["eg"]) < 3:
+                        if _shown(path) and value not in (None, "") and len(f["eg"]) < 3:
                             shown = str(value)[:60]
                             if shown not in f["eg"]:
                                 f["eg"].append(shown)
@@ -286,12 +312,22 @@ def save_capture(pages: list[dict[str, Any]]) -> dict[str, str]:
 # ------------------------------------------------------------ test alert
 
 def test_alert(settings: S.Settings, *, github: GitHub | None = None) -> list[str]:
-    """One alert through every channel this Mac can reach, and what came back."""
+    """One alert through the watch's ntfy topic, and whether it went.
+
+    ntfy only: it is the channel a Mac can reach without the repository's
+    secrets. A topic protected with NTFY_TOKEN needs that token in this
+    shell's environment, and nothing else from it is used.
+    """
+    import os
     from autotrader import notifiers
     github = github or GitHub(settings.repo, S.secret(S.TOKEN))
     _, cfg = Keyring(github, S.secret(S.PASSPHRASE)).config()
+    env = {k: os.environ[k] for k in ("NTFY_TOKEN",) if os.environ.get(k)}
+    ntfy = [c for c in notifiers.build(cfg, env) if c.name == "ntfy"]
+    if not ntfy:
+        return []
     results = notifiers.alert(
         cfg, "AutoTrader Watch: a test alert",
         f"Sent from {settings.host} with collector/run test-alert. If this "
-        f"reached your phone, alerts reach you.", {})
+        f"reached your phone, alerts reach you.", env, notifiers=ntfy)
     return [str(r) for r in results]

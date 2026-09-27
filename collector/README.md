@@ -90,7 +90,7 @@ signs in to Facebook separately (`collector/run login` on it too).
 | `collector/run login` | Sign in again, after Facebook signs the collector out |
 | `collector/run check` | Try the token and passphrase, and list the searches |
 | `collector/run explain` | Read every search now and say where each car went and why; sends nothing |
-| `collector/run test-alert` | Send one test alert to your phone |
+| `collector/run test-alert` | Send one test alert to your phone through ntfy |
 | `collector/run setup --secrets` | Replace the token or passphrase |
 | `collector/run uninstall` | Stop it, and stop it starting at login |
 | `collector/run forget` | Remove the service, the Keychain items and the browser profile |
@@ -141,7 +141,12 @@ sends nothing. Each car is one line: its title, the model Facebook's own
 fields give (when they give one), the model the bot read, price, kilometres
 (`~` when Marketplace rounded them, as in "45K km"), place, seller, photo and
 age, followed by the rule that hid it, if one did. It sorts cars with the
-bot's own code, so what it prints is what the bot does.
+bot's own code, from the search results alone: a real pass also opens the
+page of a car on your list once, and what it finds there (the exact
+kilometres, a rebuilt title) can still hide it.
+
+It waits while a pass is using the browser, and a pass waits for it, since
+only one browser can use the collector's profile at a time.
 
 If a car of yours is set aside as another model, look at how its title and
 Facebook's fields spell the model: that is what to report, or to add as an
@@ -170,6 +175,9 @@ log says why.
 - **Searches read nothing**: Facebook may have changed its pages. Run
   `collector/run explain --capture` and share the outline it prints; the
   reading itself is in `autotrader/marketplace.py`.
-- **No alerts arrive**: `collector/run test-alert` sends one through ntfy,
-  the channel a Mac can reach without the repository's secrets, and prints
-  what the server answered.
+- **No alerts arrive**: `collector/run test-alert` sends one through the
+  watch's ntfy topic, the channel a Mac can reach without the repository's
+  secrets, and says whether ntfy took it. If you protected the topic with
+  the `NTFY_TOKEN` secret, run it as `NTFY_TOKEN=... collector/run test-alert`.
+  Other channels need secrets only the repository has; test those with
+  **Check AutoTrader**.

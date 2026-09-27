@@ -1734,3 +1734,65 @@ class TestMarketplaceOnThePage:
         assert page.locator(".card").count() == 1
         assert page.eval_on_selector("#site-pick", "s => s.value") == "all"
         ctx.close()
+
+    def test_the_counts_follow_what_the_grid_shows(self, browser, site, payload):
+        d = self.with_marketplace(payload)
+        ctx, page, errors = self.open(browser, site, d, "#/listings")
+        page.wait_for_selector("#site-pick")
+        page.click("text=Include hidden")
+        page.wait_for_timeout(200)
+        live = int(page.locator(".chip[aria-pressed='true'] .n").first.text_content())
+        first = page.locator("#site-pick option").first.text_content()
+        assert first.endswith(f"({live})"), (first, live)
+        page.select_option("#site-pick", "autotrader")
+        page.wait_for_timeout(200)
+        assert page.locator("text=from Facebook Marketplace").count() == 0
+        assert not errors, errors
+        ctx.close()
+
+    def test_a_picked_option_keeps_the_keyboard_on_the_picker(self, browser, site, payload):
+        ctx, page, _ = self.open(browser, site, self.with_marketplace(payload), "#/listings")
+        page.wait_for_selector("#site-pick")
+        page.focus("#site-pick")
+        page.keyboard.press("ArrowDown")
+        page.wait_for_timeout(200)
+        assert page.evaluate("document.activeElement.id") == "site-pick"
+        page.focus("#sort")
+        page.keyboard.press("ArrowDown")
+        page.wait_for_timeout(200)
+        assert page.evaluate("document.activeElement.id") == "sort"
+        ctx.close()
+
+    def test_the_two_site_label_never_squeezes_the_trust_line(self, browser, site, payload):
+        d = self.with_marketplace(payload)
+        for width in (460, 505, 700, 735, 900, 1000):
+            ctx = browser.new_context(viewport={"width": width, "height": 800},
+                                      service_workers="block")
+            page = ctx.new_page()
+            page.route("**/data.json", lambda r: r.fulfill(
+                status=200, content_type="application/json", body=json.dumps(d)))
+            page.goto(site + "#/feed", wait_until="networkidle")
+            page.wait_for_timeout(200)
+            cut = page.eval_on_selector("#trust-text", "e => e.scrollWidth > e.clientWidth + 1")
+            assert not cut, f"the trust line is cut at {width}px"
+            ctx.close()
+
+    def test_an_autotrader_only_list_with_nothing_live_says_so_truthfully(
+            self, browser, site, payload):
+        d = self.with_marketplace(payload)
+        for l in d["listings"]:
+            if l.get("site") == "marketplace":
+                l["status"] = "gone"
+        ctx, page, _ = self.open(browser, site, d, "#/listings")
+        page.wait_for_selector("#site-pick")
+        page.select_option("#site-pick", "autotrader")
+        page.evaluate("app.showHidden = false")
+        # Every AutoTrader car hidden: the page must not claim Marketplace has them.
+        page.evaluate("""() => { for (const l of app.data.listings)
+            if (l.site !== 'marketplace' && l.status === 'active') l.filtered = true;
+          renderListings(); }""")
+        page.wait_for_selector(".state")
+        text = page.inner_text(".state")
+        assert "Every car on your list right now is from Marketplace" not in text
+        assert "hidden by a rule" in text
+        ctx.close()

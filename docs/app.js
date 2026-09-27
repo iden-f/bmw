@@ -1132,7 +1132,7 @@ function renderListings() {
       ${(app.data.searches || []).map(s =>
         `<option value="${esc(s.id)}"${s.id === app.search ? ' selected' : ''}>${esc(s.name)}</option>`).join('')}
     </select>` + (usesMarketplace() ? (() => {
-      const n = site => live().filter(l => !l.filtered && (site === 'all' || siteOf(l) === site)).length;
+      const n = site => live().filter(l => inView(l) && (site === 'all' || siteOf(l) === site)).length;
       return `
     <label class="sr" for="site-pick">Site</label>
     <select id="site-pick">${[['all', 'AutoTrader + Marketplace'], ['autotrader', 'AutoTrader only'],
@@ -1149,13 +1149,22 @@ function renderListings() {
     renderListings();
     if (keep) { const i = document.getElementById('q'); i.focus(); i.setSelectionRange(i.value.length, i.value.length); }
   });
-  bar.querySelector('#sort').addEventListener('change', e => { app.sort = e.target.value; renderListings(); });
-  bar.querySelector('#search-pick').addEventListener('change', e => { app.search = e.target.value; renderListings(); });
-  bar.querySelector('#site-pick')?.addEventListener('change', e => { app.site = e.target.value; renderListings(); });
+  // A select re-renders the bar it sits in, so it hands focus back to its
+  // new self: arrowing through the options from the keyboard keeps working.
+  const onPick = (id, set) => bar.querySelector('#' + id)?.addEventListener('change', e => {
+    set(e.target.value);
+    renderListings();
+    document.getElementById(id)?.focus();
+  });
+  onPick('sort', v => { app.sort = v; });
+  onPick('search-pick', v => { app.search = v; });
+  onPick('site-pick', v => { app.site = v; });
 
   const mp = app.data.marketplace;
-  if (mp?.last_batch) {
-    const fromMp = live().filter(l => !l.filtered && siteOf(l) === 'marketplace').length;
+  if (mp?.last_batch && app.site !== 'autotrader') {
+    // Counted as the grid is: this search, hidden cars only when included,
+    // and never a car marked not interested.
+    const fromMp = live().filter(l => inView(l) && siteOf(l) === 'marketplace').length;
     const line = el('p', 'note');
     line.innerHTML = `${num(fromMp)} of these cars ${fromMp === 1 ? 'is' : 'are'} from `
       + `Facebook Marketplace. Its collector (${esc(mp.last_batch.host || 'the Mac')}) last `
@@ -1352,7 +1361,9 @@ function noResults() {
         car is on your list right now</h2>
         <p>${app.site === 'marketplace'
           ? 'The Status tab says what the Marketplace collector read, and where each car went.'
-          : 'Every car on your list right now is from Marketplace.'}</p>`;
+          : live().some(l => inView(l) && siteOf(l) === 'marketplace')
+            ? 'Every car on your list right now is from Marketplace.'
+            : 'Nor is a Marketplace car: every car found is hidden by a rule, gone, or marked not interested.'}</p>`;
     } else if (app.chip !== 'all') {
       s.innerHTML = `<h2>No car is ${esc(chipLabel(app.chip).toLowerCase())}</h2>
         <p>Every other car the searches hold is still on the Live chip.</p>`;
@@ -1448,6 +1459,11 @@ function shot(l, cls) {
 
 const sellerWord = kind => kind === 'private' ? 'private seller'
                         : kind === 'dealer' ? 'dealer' : '';
+
+/* Whether a live car belongs in the Listings grid as it is filtered now,
+   leaving the site aside: the picker and the Marketplace line count by it. */
+const inView = l => (app.search === 'all' || l.search_id === app.search)
+  && (app.showHidden || !l.filtered) && !marks.of(l.id).dismissed;
 
 /* Which site a car is from, and whether this watch uses more than one. */
 const siteOf = l => l.site || 'autotrader';
@@ -2179,8 +2195,10 @@ function marketplaceSection(m) {
         const b = x.breakdown || {};
         const aside = (x.other_examples || [])
           .map(([name, n]) => `${esc(name)}${n > 1 ? ` \u00d7${num(n)}` : ''}`).join(', ');
+        const also = b.elsewhere
+          ? `<br><span class="note" style="margin:0">${num(b.elsewhere)} also found, and kept, by another search</span>` : '';
         return `<tr><td>${esc(x.name)}${aside
-            ? `<br><span class="note" style="margin:0">set aside: ${aside}</span>` : ''}</td>
+            ? `<br><span class="note" style="margin:0">set aside: ${aside}</span>` : ''}${also}</td>
           <td>${x.last_error && x.consecutive_failures
             ? `<span class="err">${esc(x.last_error)}</span>` : when(x.last_ok)}</td>
           ${cell(x.breakdown ? b.read : x.last_count)}${cell(b.other_models)}
@@ -2875,6 +2893,7 @@ function render() {
   // The masthead names every site being watched.
   const sites = document.querySelector('.brand span');
   if (sites) sites.textContent = usesMarketplace() ? 'autotrader.ca + Marketplace' : 'autotrader.ca';
+  document.querySelector('.brand')?.classList.toggle('brand--two', usesMarketplace());
   renderTrust();
   renderClock();
   if (app.view === 'feed') renderFeed();

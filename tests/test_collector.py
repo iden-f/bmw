@@ -482,18 +482,30 @@ class TestExplain:
 
 class TestTestAlert:
 
-    def test_goes_out_through_the_watch_s_own_channels(self, world, monkeypatch):
+    def test_goes_out_through_the_watch_s_ntfy_topic_only(self, world, monkeypatch):
         from autotrader import notifiers
         from autotrader.notifiers import Result
         from collector.explain import test_alert
         said = []
+        ntfy = type("Ntfy", (), {"name": "ntfy"})()
+        hook = type("Hook", (), {"name": "webhook"})()
+        monkeypatch.setattr(notifiers, "build", lambda cfg, env=None: [hook, ntfy])
         monkeypatch.setattr(notifiers, "alert", lambda cfg, subject, body, env=None,
-                            notifiers=None: said.append((subject, body, env))
+                            notifiers=None: said.append((subject, body, env, notifiers))
                             or [Result("ntfy", True)])
+        monkeypatch.setenv("NTFY_TOKEN", "tk_example")
+        monkeypatch.setenv("SLACK_WEBHOOK_URL", "https://example.invalid/hook")
         assert test_alert(world.settings, github=world.github) == ["ntfy: sent"]
-        [(subject, body, env)] = said
+        [(subject, body, env, channels)] = said
         assert "test alert" in subject and "collector-a" in body
-        assert env == {}          # nothing from this Mac's environment
+        assert channels == [ntfy]                   # never the webhook
+        assert env == {"NTFY_TOKEN": "tk_example"}  # and nothing else from here
+
+    def test_ntfy_off_sends_nothing(self, world, monkeypatch):
+        from autotrader import notifiers
+        from collector.explain import test_alert
+        monkeypatch.setattr(notifiers, "build", lambda cfg, env=None: [])
+        assert test_alert(world.settings, github=world.github) == []
 
     def test_with_no_channel_it_says_so(self, world, monkeypatch):
         from collector.__main__ import main
@@ -502,3 +514,71 @@ class TestTestAlert:
         from collector import settings as S
         monkeypatch.setattr(S.Settings, "load", classmethod(lambda cls: world.settings))
         assert main(["test-alert"]) == 1
+
+
+class TestTheOutlineAfterReview:
+
+    def test_shows_values_only_on_known_safe_paths(self):
+        from collector.explain import outline
+        page = {"search": "s", "query": "q", "landed": "/", "texts": [json.dumps({
+            "listing": {"id": "123456789", "marketplace_listing_title": "2019 Honda civic",
+                        "listing_price": {"amount": "20000.00"},
+                        "seller": {"display_name": "A Person"},
+                        "story": {"actors": [{"display_name": "Another Person"}]},
+                        "redacted_description": {"text": "Call 613-555-0100"},
+                        "delivery_types": ["IN_PERSON", "SHIPPING"]}})]}
+        text = outline([page])
+        assert "A Person" not in text and "Another Person" not in text
+        assert "613-555-0100" not in text
+        assert "seller.display_name" in text and "redacted_description.text" in text
+        assert "delivery_types[]" in text and "IN_PERSON" in text
+        assert "2019 Honda civic" in text and "20000.00" in text
+
+
+class TestTakingTurnsOnTheBrowser:
+
+    def test_a_second_browser_waits_and_then_gives_up_clearly(self, tmp_path, monkeypatch):
+        from collector.browser import Busy, profile_lock
+        monkeypatch.setenv("COLLECTOR_HOME", str(tmp_path))
+        with profile_lock():
+            with pytest.raises(Busy, match="busy"):
+                with profile_lock(wait=0.5):
+                    pass
+        with profile_lock(wait=0.5):
+            pass                    # free again once the first let go
+
+
+class TestExplainWhenFacebookSignsOut:
+
+    def test_still_says_what_it_read_and_where_the_capture_is(self, world, monkeypatch):
+        from collector import explain as E
+        sign_in(world)
+        FakeFacebook.mode = "signed_out"
+        result = E.explain(world.settings, github=world.github, capture=True)
+        text = E.explain_text(result)
+        assert text.startswith("Facebook: signed_out")
+        assert "Captured to" in text
+
+    def test_exits_non_zero(self, world, monkeypatch):
+        from collector import settings as S
+        from collector.__main__ import main
+        monkeypatch.setattr(S.Settings, "load", classmethod(lambda cls: world.settings))
+        monkeypatch.setattr("collector.explain.GitHub", lambda *a, **k: world.github)
+        assert main(["explain"]) == 1          # never signed in
+
+
+class TestExplainListsEveryCar:
+
+    def test_including_ones_another_search_keeps_and_sold_ones(self):
+        from collector.explain import explain_text
+        from autotrader.listing import Listing
+        from autotrader import marketplace as M
+        j = M.Judged()
+        car = Listing(id="fb-300000001", title="2019 Honda Civic", price=20000)
+        j.on_sale, j.elsewhere, j.sold = [car], [car], {"fb-300000002"}
+        text = explain_text({"session": "ok", "searches": [{
+            "name": "Example", "queries": ["Honda Civic"], "landed": "/", "ok": True,
+            "error": "", "judged": j,
+            "records": {"fb-300000002": {"title": "2017 Honda Civic LX"}}}]})
+        assert "kept by another search (1):" in text and "2019 Honda Civic" in text
+        assert "marked sold (1): 2017 Honda Civic LX" in text
