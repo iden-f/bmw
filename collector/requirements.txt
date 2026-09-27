@@ -1,0 +1,4 @@
+# The collector only, on the computer that reads Marketplace. The bot itself
+# never installs this: a browser has no business on a runner that checks a
+# public website.
+playwright==1.62.0

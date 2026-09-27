@@ -21,7 +21,9 @@ reliable, private, and easy to read. Setup and everyday use are in the
    random ntfy topic when no channel is configured) and that alerts link to
    `https://<owner>.github.io/<repo>`.
 4. **Apply changes.** `control control` applies any change files the
-   dashboard sent.
+   dashboard sent. When the run was started by the Marketplace collector,
+   `marketplace ingest` then takes in the batch it sent; see
+   [Facebook Marketplace](#facebook-marketplace).
 5. **Check.** `run` reads every search: fetch, parse, filter, compare with
    state, alert, copy photos, audit, and write `docs/data.json`. A scheduled
    firing within 90 minutes of the last check stands down here without
@@ -63,6 +65,9 @@ All in `autotrader/`, in the order the data moves.
 - **`geo`**: how far a car is from you, from its city and province.
 - **`diagnose`**: describes a page that parsed to nothing, under
   `diagnostics/`.
+- **`marketplace`**: reads listings out of the JSON a Marketplace page
+  carries, turns each search into a Marketplace query, and takes in a
+  collector's sealed batch.
 
 **Deciding**
 
@@ -179,7 +184,7 @@ overwrite a check that saved in the meantime.
 
 | File | Name | Runs | What it does |
 |---|---|---|---|
-| `watch.yml` | Check AutoTrader | Fires every 30 minutes (`7,37 * * * *`); on a push to `control/`; on `repository_dispatch` of type `check`; by hand, optionally as a dry run | The check, as above. A push only counts when the repository owner made it. |
+| `watch.yml` | Check AutoTrader | Fires every 30 minutes (`7,37 * * * *`); on a push to `control/`; on `repository_dispatch` of type `check` or `marketplace`; by hand, optionally as a dry run | The check, as above, taking in a Marketplace batch first when one came with it. A push only counts when the repository owner made it. |
 | `events.yml` | Watchdog | Four times a day (`41 1,7,13,19 * * *`), and Mondays (`20 14 * * 1`) | Alerts when no check has succeeded for six hours, and sends the weekly digest. |
 | `pages.yml` | Publish dashboard | A push to `docs/` or the dashboard code; by hand | Rebuilds and publishes the site from the vault. |
 | `coldstart.yml` | Cold start | Weekly (`23 6 * * 0`); a push to `autotrader/` | Sets up from nothing, watches a generic public search, and checks it once. Never pushes, never touches the vault. |
@@ -192,6 +197,47 @@ month, and past 85% of `budget.included_minutes` (a 3,000-minute allowance
 unless you set your plan's) it commits `BUDGET-STOP`, alerts you, and stops
 checking until you delete the file. Every firing is billed, including one
 that stands down, so the schedule in `watch.yml` sets the cost.
+
+## Facebook Marketplace
+
+Marketplace answers only a signed-in browser on a home connection, so the
+reading happens on a computer at home ([collector/](collector/README.md)) and
+the bot stays the only writer of the watch's data.
+
+1. **The plan.** The collector fetches `meta.json` and `config.enc` from the
+   `vault` branch through GitHub's API and opens them with the passphrase from
+   the Keychain. `marketplace.plan` turns each active search into a query:
+   make and model from its link and `models` rule, years and prices from its
+   rules, and the place and radius (at most 500 km) from `near` and
+   `max_distance_km`, newest first.
+2. **The read.** A persistent Chrome profile, signed in by hand once, opens
+   each query and scrolls. It keeps the page's own JSON and the API replies
+   the page fetched; nothing is replayed, so Facebook changing its internal
+   calls changes nothing. `marketplace.collect` walks that JSON for anything
+   shaped like a listing. A car that passes the search's rules has its own
+   page opened once, for the odometer, trim and title status.
+3. **The batch.** `{"v", "id", "at", "host", "role", "polled", "session",
+   "searches": [...]}`, sealed like everything else with the name
+   `marketplace` and padded to 4 KiB, sent as `repository_dispatch` of type
+   `marketplace` with the sealed text in `client_payload.batch`. GitHub
+   carries at most 65,535 characters there, so the oldest cars are left out
+   of an oversized batch; the next one carries them.
+4. **The ingest.** `marketplace ingest` reads the batch from the event file,
+   never from the workflow's own text, and refuses one that does not open,
+   is over 12 hours old, or whose id it has already taken in. Each search's
+   cars then go through the same `filters` and change handling as a check.
+   Ids are `fb-<item number>`. A search's first batch records what is for
+   sale as a starting point; a car Facebook marks sold is gone at once, one
+   unseen for 10 days is gone quietly, and AutoTrader's absence rules never
+   touch them.
+5. **Health.** Every batch says whether it read, and whether Facebook still
+   lets the collector in. A collector not heard from for two hours, or heard
+   but not reading for six, raises the watchdog; a signed-out session, and a
+   standby taking over, are each said once.
+
+Overnight, and on a standby while the primary is heard from, the collector
+still sends an empty batch every half hour. That keeps the watchdog quiet and
+serves as the check's outside timer.
 
 ## Changes from the dashboard
 
@@ -255,6 +301,11 @@ Besides the alerts about cars, these are all of them.
 | **Switched off <channel> notifications** | A channel rejected the bot's credentials twice. | Fix the secret, then switch the channel back on locally with `set notifications.channels.<name>.enabled true`. |
 | **AutoTrader watcher: your alerts moved** | The ntfy topic changed. | Subscribe again from the QR code on the **Status** tab. |
 | **AutoTrader: your last N days** | The weekly digest. | Read it, or not. |
+| **Marketplace needs you to sign in again** | Facebook signed the collector out, asked the account to confirm who it is, or refused its searches. Marketplace is not being read; AutoTrader is. | `collector/run login` on the Mac named in the message. |
+| **Marketplace is being watched again** | The collector is signed in and reading after the message above. | Nothing. |
+| **Marketplace collector has gone quiet** | Nothing from the collector for two hours, though it checks in every half hour even overnight. | `collector/run status` on that Mac: asleep, off, offline or an expired token. |
+| **Marketplace is not being read** | The collector checks in, but no search has read for six hours. It quotes the error. | `collector/run once --now` on the Mac, then its log. |
+| **Marketplace: the standby computer has taken over** | The primary collector went quiet and the standby is reading instead. Nothing is missed. | Look at the primary when convenient. |
 
 ## Testing
 

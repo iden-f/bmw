@@ -15,7 +15,7 @@ from pathlib import Path
 
 import pytest
 
-from autotrader import clock, events, notifiers
+from autotrader import clock, events
 from autotrader import marketplace as M
 from autotrader import runner as runner_mod
 from autotrader import vault as V
@@ -560,3 +560,38 @@ class TestTheWorkflow:
         assert "types: [check, marketplace]" in text
         assert "marketplace ingest" in text
         assert "client_payload" not in text
+
+
+class TestAStandbyTakingOver:
+
+    def test_said_once_while_it_lasts(self, watch):
+        b = batch(part(watch.sid, rec("100000001")), host="collector-b")
+        b["role"] = "standby"
+        M.ingest(watch.cfg, watch.state, b, env={})
+        b2 = dict(b, id=secrets.token_hex(16))
+        M.ingest(watch.cfg, watch.state, b2, env={})
+        assert len(watch.sink.alerts_matching("standby computer has taken over")) == 1
+        watch.send(part(watch.sid, rec("100000001")))       # the primary is back
+        assert "standby_told" not in watch.state.data["marketplace"]
+
+
+class TestAnOldCarDriftingIntoView:
+
+    def test_is_recorded_but_not_announced_as_new(self, watch):
+        watch.send(part(watch.sid, rec("100000001")))
+        long_ago = int((clock.now() - timedelta(days=30)).timestamp())
+        just_now = int(clock.now().timestamp())
+        watch.send(part(watch.sid, rec("100000001"),
+                        rec("100000002", created=long_ago),
+                        rec("100000003", created=just_now)))
+        assert [c.listing.id for c in watch.sent()] == ["fb-100000003"]
+        quiet = watch.state.listings["fb-100000002"]["quiet_reason"]
+        assert quiet.startswith("listed on Marketplace 30 days ago")
+
+
+class TestPageOrder:
+
+    def test_results_come_out_in_the_order_the_page_lists_them(self):
+        ids = [str(100000010 + i) for i in range(8)]
+        found = M.collect([search_page(*(node(i, "2018 Honda civic") for i in ids))])
+        assert list(found) == ids

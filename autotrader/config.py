@@ -303,7 +303,14 @@ class Config:
                 raise ConfigError(f"{path} is not valid JSON: {exc}") from exc
             if not isinstance(raw, dict):
                 raise ConfigError(f"{path} must contain a JSON object.")
-            cfg = cls(_merge(copy.deepcopy(DEFAULTS), raw), path)
+            return cls.from_data(raw, path)
+        cfg.normalise()
+        return cfg
+
+    @classmethod
+    def from_data(cls, raw: dict[str, Any], path: Path = CONFIG_PATH) -> "Config":
+        """Settings held in memory, read exactly as a config.json would be."""
+        cfg = cls(_merge(copy.deepcopy(DEFAULTS), raw), path)
         cfg.normalise()
         return cfg
 

@@ -1,0 +1,5 @@
+#!/bin/sh
+# The Marketplace collector, run from this clone. See collector/README.md.
+here=$(cd "$(dirname "$0")/.." && pwd)
+cd "$here" || exit 1
+exec "$here/.venv/bin/python" -m collector "$@"

@@ -1577,3 +1577,72 @@ class TestTheStatusTabSaysOnlyWhatCanBeActedOn:
         assert page.evaluate(
             "hasOutsideTimer({by_trigger: {schedule: 1, 'repository_dispatch:cron-job': 3}})") is True
         ctx.close()
+
+
+class TestMarketplaceOnThePage:
+    """A car from Marketplace says so, links there, and the collector that
+    found it has its own place on the Status tab."""
+
+    def open(self, browser, site, payload, route):
+        ctx = browser.new_context(viewport={"width": 1440, "height": 900},
+                                  service_workers="block")
+        page = ctx.new_page()
+        errors: list[str] = []
+        page.on("pageerror", lambda e: errors.append(str(e)))
+        page.route("**/data.json", lambda r: r.fulfill(
+            status=200, content_type="application/json", body=json.dumps(payload)))
+        page.goto(site + route, wait_until="networkidle")
+        return ctx, page, errors
+
+    def with_marketplace(self, payload, session="ok"):
+        import copy
+        from datetime import datetime, timezone
+        d = copy.deepcopy(payload)
+        car = next(l for l in d["listings"] if l["id"] == "3")
+        car.update(id="fb-100000003", site="marketplace",
+                   url="https://www.facebook.com/marketplace/item/100000003/")
+        now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        d["marketplace"] = {
+            "last_batch": {"received": now, "at": now, "host": "collector-a",
+                           "role": "primary", "polled": True, "session": session},
+            "hosts": {}, "cars": 1, "batches": [], "refused": None,
+            "searches": [{"id": d["searches"][0]["id"], "name": "Honda Civic 2014-2021",
+                          "last_ok": now, "last_count": 7, "last_error": None,
+                          "consecutive_failures": 0}]}
+        return d
+
+    def test_the_card_and_the_sheet_say_marketplace(self, browser, site, payload):
+        ctx, page, errors = self.open(browser, site, self.with_marketplace(payload),
+                                      "#/listings")
+        card = page.locator(".card", has_text="Marketplace").first
+        card.wait_for()
+        assert "on Facebook Marketplace" in card.get_attribute("aria-label")
+        card.click()
+        page.wait_for_selector("text=Open on Facebook Marketplace")
+        link = page.locator("a", has_text="Open on Facebook Marketplace")
+        assert link.get_attribute("href").startswith("https://www.facebook.com/marketplace/")
+        assert not errors, errors
+        ctx.close()
+
+    def test_the_status_tab_shows_the_collector(self, browser, site, payload):
+        ctx, page, errors = self.open(browser, site, self.with_marketplace(payload),
+                                      "#/status")
+        page.wait_for_selector("text=Facebook Marketplace")
+        text = page.inner_text("main")
+        assert "collector-a" in text and "Signed in" in text
+        assert "Honda Civic 2014-2021" in text
+        assert not errors, errors
+        ctx.close()
+
+    def test_signed_out_says_what_to_run(self, browser, site, payload):
+        ctx, page, _ = self.open(browser, site,
+                                 self.with_marketplace(payload, "signed_out"), "#/status")
+        page.wait_for_selector("text=Facebook Marketplace")
+        assert "collector/run login" in page.inner_text("main")
+        ctx.close()
+
+    def test_no_section_until_there_is_a_collector(self, browser, site, payload):
+        ctx, page, _ = self.open(browser, site, payload, "#/status")
+        page.wait_for_selector("text=Alerts")
+        assert "Facebook Marketplace" not in page.inner_text("main")
+        ctx.close()

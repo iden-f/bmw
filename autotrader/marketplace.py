@@ -17,7 +17,7 @@ import hashlib
 import json
 import logging
 import re
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any, Iterable, Iterator
 from urllib.parse import urlencode
 
@@ -151,15 +151,16 @@ def _looks_like_listing(node: dict[str, Any]) -> bool:
 
 
 def _nodes(document: Any) -> Iterator[dict[str, Any]]:
+    """Listing-shaped nodes in document order: newest first on a sorted page."""
     stack = [document]
     while stack:
         node = stack.pop()
         if isinstance(node, dict):
             if _looks_like_listing(node):
                 yield node
-            stack.extend(node.values())
+            stack.extend(reversed(list(node.values())))
         elif isinstance(node, list):
-            stack.extend(node)
+            stack.extend(reversed(node))
 
 
 def _text(value: Any) -> str:
@@ -534,6 +535,10 @@ def search_url(item: dict[str, Any], query: str) -> str:
 # ------------------------------------------------------- taking a batch in
 
 GONE_AFTER_DAYS = 10
+# A car Facebook dates further back than this is not announced as new when it
+# first scrolls into view: results are capped, so older cars drift in as
+# newer ones sell.
+NEW_WITHIN_DAYS = 7
 STARTING_POINT = ("already for sale when Marketplace was first read for this "
                   "search, so recorded as a starting point")
 SESSION_WORDS = {
@@ -563,12 +568,28 @@ def ingest(cfg, state: State, batch: dict[str, Any], *,
     host = str(batch.get("host") or "collector")[:40]
 
     changes: list[Change] = []
+    new_within = int((cfg.get("marketplace", {}) or {}).get("new_within_days")
+                     or NEW_WITHIN_DAYS)
+    # When Facebook says each car was listed, where the batch carries it.
+    listed_on = {
+        MARKETPLACE_PREFIX + str(r.get("id")):
+            datetime.fromtimestamp(int(r["created"]), tz=timezone.utc)
+        for part in batch.get("searches") or [] for r in part.get("listings") or []
+        if isinstance(r, dict) and isinstance(r.get("created"), int)
+        and r["created"] > 1_000_000_000}
 
     def silence(listing_id: str, reason: str) -> None:
         if not dry_run:
             state.silence(listing_id, reason)
 
     def queue(change: Change) -> None:
+        listed = listed_on.get(change.listing.id)
+        if change.kind == Change.NEW and listed is not None \
+                and clock.now() - listed > timedelta(days=new_within):
+            silence(change.listing.id,
+                    f"listed on Marketplace {(clock.now() - listed).days} days "
+                    f"ago, and only now among the results read")
+            return
         entry = state.listings.get(change.listing.id) or {}
         yours = entry.get("you") or {}
         if yours.get("muted") or yours.get("dismissed"):
@@ -593,6 +614,7 @@ def ingest(cfg, state: State, batch: dict[str, Any], *,
         del ids[:-BATCH_IDS_KEPT]
 
     _session_alarm(cfg, state, report, heard, env, notify and not dry_run)
+    _standby_note(cfg, state, report, heard, env, notify and not dry_run)
 
     by_id = {s.id: s for s in cfg.active_searches}
     wanted = {item["search"]: item for item in plan(cfg)}
@@ -749,3 +771,24 @@ def _session_alarm(cfg, state: State, report, heard: dict[str, Any],
             report.channel_results.extend(notifiers.alert(
                 cfg, "Marketplace is being watched again",
                 "The collector is signed in and reading Marketplace again.", env))
+
+
+def _standby_note(cfg, state: State, report, heard: dict[str, Any],
+                  env: dict[str, str], notify: bool) -> None:
+    """Say once when a standby computer starts reading in the primary's place."""
+    from . import notifiers
+    section = _section(state)
+    if not heard["polled"]:
+        return
+    if heard["role"] == "standby":
+        if section.get("standby_told") != heard["host"]:
+            section["standby_told"] = heard["host"]
+            report.warnings.append(f"Marketplace: {heard['host']} has taken over.")
+            if notify:
+                report.channel_results.extend(notifiers.alert(
+                    cfg, "Marketplace: the standby computer has taken over",
+                    f"The primary collector went quiet, so {heard['host']} is "
+                    f"reading Marketplace now. Nothing is missed; check the "
+                    f"primary when you can (collector/run status on it).", env))
+    elif heard["role"] == "primary":
+        section.pop("standby_told", None)

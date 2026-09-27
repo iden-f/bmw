@@ -29,6 +29,9 @@ locked dashboard on GitHub Pages. No server, no other accounts, no cost.
   stays unreadable for six hours, raises an alert. A separate watchdog raises
   one when no check has succeeded for six hours, because a watch cannot
   report its own absence.
+- **Facebook Marketplace too, if you like.** A Mac at home can read your
+  searches on Marketplace and send what it finds here, where the same rules,
+  alerts and dashboard apply; see [Facebook Marketplace](#facebook-marketplace).
 - **A weekly digest** of what the market did, every Monday.
 - **A dashboard** with every car, its photo and price history, the market as
   a whole, and the bot's own health. It installs to a phone's home screen and
@@ -228,6 +231,25 @@ With [cron-job.org](https://cron-job.org) (free), create a job with:
 
 A test run answers `204` when it works. The Status tab then shows checks kept
 by "cron-job (an outside timer)".
+
+## Facebook Marketplace
+
+Marketplace shows its listings only to a browser signed in to Facebook on a
+home connection, which GitHub's runners are not. So a Mac that stays on does
+the reading: every 20 to 30 minutes it opens your searches in a browser
+signed in to Facebook, seals what the page received with your vault key, and
+sends it here. The bot does the rest, so a Marketplace car is filtered,
+announced and shown like any other, tagged *Marketplace*. Your searches are
+read from the watch itself; nothing is set up twice.
+
+Facebook's terms do not allow automated collection, and an account it
+suspects can be asked to confirm who it is or restricted. The collector reads
+slowly and only reads, but use an account you can afford to have challenged.
+
+Setting it up takes about fifteen minutes: [collector/README.md](collector/README.md).
+A second Mac can stand by and take over if the first goes quiet. While it
+runs, the collector also asks for a check every half hour, so it keeps the
+schedule below as well as any outside timer would.
 
 ## Stopping it
 
