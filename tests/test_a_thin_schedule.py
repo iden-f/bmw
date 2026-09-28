@@ -296,3 +296,47 @@ class TestTheLedgerAcrossAMidnightNobodyWasAwakeFor:
         assert "cannot tell you" in said["body"], said["body"]
         assert "dropping windows" not in said["body"], \
             "it does not know that, and must not say it"
+
+
+class TestChecksThatFailAreNotAThinSchedule:
+    """GitHub started the bot every half hour for a day, and for the last
+    eighteen hours the site refused every check.
+
+    The thin-coverage alarm said "covered only 25% of yesterday ... This is
+    GitHub's scheduler", in the same watchdog run in which the silence alarm
+    said "running and failing". The schedule had fired every time. Only the
+    second alarm was true, and the first sent the reader to the wrong fix.
+    """
+
+    def check(self, w, *, after_minutes, blocked):
+        from datetime import timedelta
+        from autotrader.http import BlockedError
+        clock.advance(timedelta(minutes=after_minutes))
+        fail = BlockedError("anti-bot page") if blocked else None
+        return run(w.cfg, State.load(w.path / "state.json"),
+                   fetcher=FakeFetcher(page(TWO), fail=fail),
+                   env={"AUTOTRADER_SCHEDULED": "1", "RUN_TRIGGER": "schedule"},
+                   force=True)
+
+    def test_a_schedule_that_fired_every_time_is_not_blamed(self, watcher):
+        w = watcher(health__expected_interval_minutes=30,
+                    health__coverage_floor_pct=50)
+        for n in range(48):
+            self.check(w, after_minutes=30 if n else 0, blocked=n >= 12)
+        state = w.state()
+        cover = insight.coverage(state.data["runs"], 30, since_change=None)
+        assert cover["pct"] < 50, "most checks did fail"
+        assert cover["slots_attempted"] >= cover["expected"] - 1, cover
+        assert events.thin_coverage(w.cfg, state, {}) is None
+
+    def test_a_schedule_that_did_not_fire_still_is(self, watcher):
+        w = watcher(health__expected_interval_minutes=30,
+                    health__coverage_floor_pct=50)
+        for n in range(8):
+            self.check(w, after_minutes=180 if n else 0, blocked=False)
+        said = events.thin_coverage(w.cfg, w.state(), {})
+        assert said, "a check every three hours against one asked each half hour"
+        assert "GitHub's scheduler" in said["body"]
+        assert "yesterday" not in said["subject"], \
+            "the window is the last so many hours, not a calendar day"
+        assert f"of the last {said['window_hours']:g} hours" in said["subject"]

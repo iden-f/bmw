@@ -227,6 +227,30 @@ class TestStoppingRatherThanSpending:
         [(_, body)] = [(s, b) for s, b in watcher.sink.alerts if "minutes are spent" in s]
         assert "billed" in body and "Actions tab" in body
 
+    def test_the_stop_alert_says_how_to_resume(self, watcher):
+        """It said "It has stopped checking" and nothing about the file, and
+        the code claimed a new month would lift it. The workflow stops
+        before the bot runs while the file is there, so nothing lifts it but
+        deleting it."""
+        self.spend_the_month(watcher, 400.0)
+        watcher.run()
+        [(_, body)] = [(s, b) for s, b in watcher.sink.alerts if "minutes are spent" in s]
+        assert "Delete BUDGET-STOP on main" in body, body
+        assert "does not lift by itself when the month turns" in body, body
+
+    def test_a_stop_alert_nobody_received_is_sent_again(self, watcher):
+        """Marked as told only once a channel took it."""
+        from autotrader.notifiers import Result
+        self.spend_the_month(watcher, 400.0)
+        watcher.sink._send_text = lambda subject, body: Result("capture", False, "down")
+        watcher.run()
+        assert watcher.state().data.get("budget_told") is None
+        watcher.sink._send_text = lambda subject, body: (
+            watcher.sink.alerts.append((subject, body)) or Result("capture", True))
+        watcher.run()
+        assert any("minutes are spent" in s for s, _ in watcher.sink.alerts)
+        assert watcher.state().data.get("budget_told")
+
     def test_it_says_so_out_loud_once(self, watcher):
         """Silently stopping is the same failure as silently spending."""
         self.spend_the_month(watcher, 400.0)

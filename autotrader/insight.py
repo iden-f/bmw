@@ -13,8 +13,9 @@ from datetime import datetime, timedelta
 from typing import Any, Iterable
 
 from . import clock, words
-from .events import delivery_state
+from .events import delivery_state, told_about
 from .listing import name_of
+from .state import MAX_RUN_HISTORY, STARTING_POINT_REASONS, retired_by_owner
 
 # Below this many comparables a car is not scored, and the page says why.
 MIN_COMPARABLES = 6
@@ -62,8 +63,10 @@ def comparables(entries: Iterable[dict[str, Any]]) -> dict[str, dict[str, Any]]:
 
     A rank is a true statement about the sample in hand; a percentage is a
     claim about a market, and on a small cohort it swings with whichever few
-    cars happen to be listed. Each cohort has one median, quoted identically
-    on every car in it. Cars that never reach the pool get a row saying why.
+    cars happen to be listed. A car's median is taken over the cars in its
+    cohort that are close to it on the odometer (see _similar_wear), so two
+    cars in one cohort can be quoted different medians. Cars that never reach
+    the pool get a row saying why.
     """
     # Read once: the second pass below would see nothing if a caller passed
     # a generator.
@@ -74,8 +77,8 @@ def comparables(entries: Iterable[dict[str, Any]]) -> dict[str, dict[str, Any]]:
             if e.get("price") and e.get("year") and _group_key(e)
             and e.get("status") == "active" and not e.get("filtered")]
 
-    # One cohort per (make, model, year band), so every car in it is quoted
-    # the same median.
+    # One cohort per (make, model, year band). Each car is then judged
+    # against the cohort-mates close to it on the odometer.
     cohorts: dict[tuple, list[dict[str, Any]]] = {}
     for entry in pool:
         key = (_group_key(entry), year_band(entry["year"]))
@@ -149,6 +152,10 @@ def _never_compared(entry: dict[str, Any]) -> str:
 def _similar_wear(mine: Any, theirs: Any, tolerance: float = 0.35) -> bool:
     """Close enough on the odometer to be the same kind of car.
 
+    The difference may be up to ``tolerance`` of the larger reading, which
+    lets in a peer with from about two-thirds to one and a half times this
+    car's kilometres; the page says it that way.
+
     A car with no reading is never excluded: dropping a peer for a missing
     field shrinks the sample that decides whether there is a sample at all.
     """
@@ -165,8 +172,8 @@ def year_band(year: Any) -> tuple[int, int] | None:
     """The fixed band of years a car is compared inside, as (first, last).
 
     Fixed bands rather than a window around each car, so every car in a band
-    is quoted the same median. The cost is that two cars a year apart can
-    fall in different bands.
+    is judged against the same cars, bar those far from it on the odometer.
+    The cost is that two cars a year apart can fall in different bands.
     """
     try:
         value = int(year)
@@ -283,6 +290,28 @@ def _delivery(entry: dict[str, Any]) -> dict[str, Any]:
             "text": "no record of telling you - which is itself a fault"}
 
 
+def _place_deliveries(rows: list[dict[str, Any]], entry: dict[str, Any]) -> None:
+    """Say for each of a car's events whether it was sent, where it can.
+
+    _delivery reads the car as it is now, which is the answer for its newest
+    event only: a $2,000 drop you were told about read as quiet once a later
+    $100 drop was. An earlier event is placed against the car's record of
+    alert times; one that record cannot place keeps the car's answer.
+    """
+    if not entry.get("told") or len(rows) < 2:
+        return
+    times = sorted({row["at"] for row in rows})
+    for row in rows:
+        later = [t for t in times if t > row["at"]]
+        if not later:
+            continue            # the newest: the car as it is now answers it
+        when = told_about(entry, row["at"], later[0])
+        if when:
+            row["delivery"] = {"state": "sent", "at": when, "text": f"sent {when}"}
+        elif when == "":
+            row["delivery"] = {"state": "quiet", "text": "not sent at the time"}
+
+
 def events(entries: Iterable[dict[str, Any]], limit: int = 400
            ) -> list[dict[str, Any]]:
     """Everything that happened to a car, newest first.
@@ -315,6 +344,7 @@ def events(entries: Iterable[dict[str, Any]], limit: int = 400
         })
 
     for entry in entries:
+        mine = len(out)
         add("new", entry.get("first_seen"), entry)
 
         history = entry.get("price_history") or []
@@ -340,8 +370,12 @@ def events(entries: Iterable[dict[str, Any]], limit: int = 400
         if entry.get("photos_at"):
             add("photos", entry["photos_at"], entry,
                 photos=len(entry.get("images") or []))
-        if entry.get("removed_at") and entry.get("status") == "gone":
+        # A car you stopped watching did not leave the market, so it is not
+        # shown as gone from the site.
+        if entry.get("removed_at") and entry.get("status") == "gone" \
+                and not retired_by_owner(entry):
             add("removed", entry["removed_at"], entry)
+        _place_deliveries(out[mine:], entry)
 
     out.sort(key=lambda e: e["at"], reverse=True)
     if len(out) <= limit:
@@ -365,13 +399,19 @@ def _read_the_site(run: dict[str, Any]) -> bool:
     That, not the exit code, decides whether a slot was covered. A skipped
     run (another held the lock, or it was too soon) never looked, nor did one
     whose searches all failed to load; every other run did.
+
+    The runner counts a search in ``searches_run`` only when it was read and
+    in ``searches_failed`` only when it was not, so the two never overlap: one
+    of two searches down is 1 and 1, and that run still read the site.
     """
     if run.get("skipped"):
         return False
     ran = int(run.get("searches_run") or 0)
     failed = int(run.get("searches_failed") or 0)
     if ran:
-        return failed < ran
+        return True
+    if failed:
+        return False
     # No search counters on this record: fall back to the exit code rather
     # than crediting a slot nothing is known about.
     return bool(run.get("ok"))
@@ -424,6 +464,14 @@ def coverage(runs: list[dict[str, Any]], expected_minutes: int = 30,
         start = began
         new_install = True
         partial = False
+    # Nor over hours the run log no longer reaches. It keeps the newest
+    # MAX_RUN_HISTORY runs, stand-downs included, which on a busy schedule is
+    # less than a day, and before its oldest run nothing is known either way.
+    # Counting those hours as unwatched reported missed checks that happened.
+    reach = _log_reaches(runs)
+    truncated = reach is not None and reach > start
+    if truncated:
+        start = reach
     measured_hours = max(0.0, _hours_between(now, start))
     # Complete slots only: counting the slot in progress either flatters the
     # figure (a check has landed) or damns it (one is still due).
@@ -469,6 +517,10 @@ def coverage(runs: list[dict[str, Any]], expected_minutes: int = 30,
     # One that stood down after a recent push still proves the cron is alive,
     # which slots_scheduled cannot see.
     fired = 0
+    # Slots in which anything ran at all, stand-downs and failed checks
+    # included: whether the bot was being started, as against whether its
+    # checks got through.
+    attempted: set[int] = set()
     # Which timer filled each slot first, so the page can name the one that is
     # actually keeping time rather than reporting that something is.
     filled: dict[int, str] = {}
@@ -478,6 +530,9 @@ def coverage(runs: list[dict[str, Any]], expected_minutes: int = 30,
             continue
         if _is_a_schedule(str(run.get("trigger") or "")):
             fired += 1
+        slot_of = int((when - start).total_seconds() // slot)
+        if 0 <= slot_of < expected:
+            attempted.add(slot_of)
         if not _read_the_site(run):
             continue
         how = str(run.get("trigger") or "") or "unattributed"
@@ -492,12 +547,6 @@ def coverage(runs: list[dict[str, Any]], expected_minutes: int = 30,
     edge = [start] + read_stamps + [now]
     for before, after in zip(edge, edge[1:]):
         gaps.append(_hours_between(after, before) * 60.0)
-
-    # The run history is capped, so a window that reaches past the oldest run
-    # kept would report a coverage of zero for hours nobody has a record of.
-    # Measuring from the first run in the window keeps the figure about what
-    # happened rather than about how much history is retained.
-    truncated = bool(runs) and (_dt(runs[-1].get("at")) or start) > start
 
     return {
         "window_hours": round(measured_hours, 1),
@@ -526,6 +575,8 @@ def coverage(runs: list[dict[str, Any]], expected_minutes: int = 30,
         "pct": round(min(100.0, len(covered) / expected * 100.0), 1),
         "longest_gap_minutes": round(max(gaps), 1) if gaps else None,
         "expected_interval_minutes": expected_minutes,
+        # True when the window was cut to where the run log begins, so the
+        # figure covers fewer hours than were asked for.
         "truncated": truncated,
         "since": start.isoformat(timespec="seconds"),
         # One entry per expected slot, oldest first: 0 for no check, 1 for a
@@ -544,6 +595,9 @@ def coverage(runs: list[dict[str, Any]], expected_minutes: int = 30,
         # cron is alive. Compare with `expected` to see whether the schedule
         # is being served at all.
         "schedule_fired": fired,
+        # Slots in which the bot was started at all. Well above slots_covered,
+        # the schedule is fine and the checks are failing.
+        "slots_attempted": len(attempted),
         # The timer that filled the most slots, by name, so there is something
         # specific to check when it stops.
         "timekeeper": _timekeeper(filled),
@@ -551,6 +605,18 @@ def coverage(runs: list[dict[str, Any]], expected_minutes: int = 30,
         # in one slot kept time once.
         "slots_by_trigger": _slots_by_trigger(filled),
     }
+
+
+def _log_reaches(runs: list[dict[str, Any]]) -> datetime | None:
+    """Where a full run log begins, or None while it still holds every run.
+
+    Only a full log has lost anything: one with room left is the whole
+    history, and hours before its oldest run really had no run.
+    """
+    if len(runs) < MAX_RUN_HISTORY:
+        return None
+    stamps = [t for t in (_dt(r.get("at")) for r in runs) if t is not None]
+    return min(stamps) if stamps else None
 
 
 def _slots_by_trigger(filled: dict[int, str]) -> dict[str, int]:
@@ -600,6 +666,12 @@ def minutes_spent(runs: list[dict[str, Any]], window_hours: int = 24,
     """
     now = now or clock.now()
     start = now - timedelta(hours=window_hours)
+    # A full run log can begin inside the window. The sums then cover only
+    # the hours it reaches, and the window says how many that is.
+    reach = _log_reaches(runs)
+    if reach is not None and reach > start:
+        start = reach
+        window_hours = round(_hours_between(now, start), 1)
     window = [r for r in runs if (_dt(r.get("at")) or start) >= start]
     # A firing that stood down is a run, not a check: it read nothing, and
     # averaging its zero duration in would drag the mean down. It is still
@@ -641,24 +713,45 @@ def weekly(entries: Iterable[dict[str, Any]], runs: list[dict[str, Any]],
         by_kind.setdefault(event["kind"], []).append(event)
 
     drops = sorted(by_kind.get("price_drop", []), key=lambda e: e.get("delta") or 0)
-    live = [e for e in entries if e.get("status") == "active" and e.get("price")]
+
+    # Arrivals are the market's news: not cars a rule of yours hides, nor the
+    # cars already for sale when a search began or changed, which were
+    # recorded as a starting point rather than announced.
+    started = {str(e.get("id")) for e in entries
+               if e.get("quiet_reason") in STARTING_POINT_REASONS}
+    arrivals = [e for e in by_kind.get("new", [])
+                if not e["filtered"] and e["listing_id"] not in started]
+
+    # Both medians are taken over one population, the cars your rules keep,
+    # as the market view prices them. A week ago means each of those cars
+    # listed then, at the price it asked then.
+    yours = [e for e in entries if not e.get("filtered")]
+    live = [e for e in yours if e.get("status") == "active" and e.get("price")]
     prices = sorted(int(e["price"]) for e in live)
 
     # A median moves when prices change or when the mix of cars changes, and
     # over a week it is usually the mix; the digest says so plainly.
-    older = [e for e in entries
-             if e.get("price_history") and len(e["price_history"]) > 1]
     then: list[int] = []
-    for entry in older:
-        for point in entry["price_history"]:
-            if str(point.get("at") or "") <= since and point.get("price"):
-                then.append(int(point["price"]))
-                break
+    for entry in yours:
+        first = _dt(entry.get("first_seen"))
+        left = _dt(entry.get("removed_at"))
+        if first is None or first > start or (left is not None and left <= start):
+            continue
+        asked = [p for p in (entry.get("price_history") or [])
+                 if p.get("price") and (_dt(p.get("at")) or now) <= start]
+        if asked:
+            then.append(int(asked[-1]["price"]))
+
+    # Checks that read the site. The run log keeps only the newest runs, so
+    # on a busy schedule it can reach back less than the week, and the
+    # digest says how far it does reach rather than calling it the week.
+    looked = [_dt(r.get("at")) for r in runs if _read_the_site(r)]
+    reach = _log_reaches(runs)
 
     out: dict[str, Any] = {
         "since": since,
         "days": days,
-        "new": len(by_kind.get("new", [])),
+        "new": len(arrivals),
         "gone": len(by_kind.get("removed", [])),
         "back": len(by_kind.get("relisted", [])),
         "qualified": len(by_kind.get("qualified", [])),
@@ -669,7 +762,11 @@ def weekly(entries: Iterable[dict[str, Any]], runs: list[dict[str, Any]],
         "biggest_drop": drops[0] if drops else None,
         "live": len(live),
         "median": int(statistics.median(prices)) if prices else None,
-        "checks": sum(1 for r in runs if str(r.get("at") or "") >= since and r.get("ok")),
+        "checks": sum(1 for t in looked if t is not None and t >= start),
+        # How many hours the check count covers, when that is less than the
+        # week; None when the log reaches the whole of it.
+        "checks_hours": (round(_hours_between(now, reach), 1)
+                         if reach is not None and reach > start else None),
     }
     if then and prices:
         was = int(statistics.median(sorted(then)))
@@ -716,8 +813,13 @@ def weekly_text(summary: dict[str, Any]) -> str:
             line += (f" - {way} ${abs(move):,} on a week ago, though a median moves "
                      f"as much on which cars are listed as on what they cost")
         lines.append(line + ".")
-    lines.append(f"Built from {_count(summary['checks'], 'successful check')} "
-                 f"this week.")
+    if summary.get("checks_hours") is not None:
+        lines.append(f"{_count(summary['checks'], 'successful check')} in the "
+                     f"last {_span(summary['checks_hours'])}, as far back as "
+                     f"the bot keeps a log of its runs.")
+    else:
+        lines.append(f"Built from {_count(summary['checks'], 'successful check')} "
+                     f"this week.")
     return "\n".join(lines)
 
 
@@ -855,7 +957,11 @@ def market(entries: Iterable[dict[str, Any]], *, now: datetime | None = None,
     now = now or clock.now()
     entries = list(entries)
     live = [e for e in entries if e.get("status") == "active"]
-    gone = [e for e in entries if e.get("status") == "gone" and e.get("removed_at")]
+    # Cars that left the market. Not the ones you stopped watching (a search
+    # taken away, Marketplace switched off for one), which may still be for
+    # sale: counted, they made an owner's edit read as a busy week.
+    gone = [e for e in entries if e.get("status") == "gone" and e.get("removed_at")
+            and not retired_by_owner(e)]
 
     # ---- price by model, then by year and trim within it ------------------
     #
@@ -997,6 +1103,14 @@ def market(entries: Iterable[dict[str, Any]], *, now: datetime | None = None,
     }
 
 
+def _first_price(entry: dict[str, Any]) -> Any:
+    """The first price the bot saw a car asking, or its price if it kept none."""
+    for point in entry.get("price_history") or []:
+        if point.get("price"):
+            return point["price"]
+    return entry.get("price")
+
+
 def backtest(entries: Iterable[dict[str, Any]]) -> dict[str, Any]:
     """Did the deal score say anything useful, in hindsight?
 
@@ -1005,10 +1119,14 @@ def backtest(entries: Iterable[dict[str, Any]]) -> dict[str, Any]:
     says so either way.
     """
     entries = list(entries)
-    scores = comparables(entries)
-    # Cars are re-scored against today's market, so a car that has since been
-    # discounted is compared at its current price. Using its first price is
-    # the honest test of "was it dear when it appeared".
+    # Each car is scored as it stood when it appeared: at its first price,
+    # against the others at theirs. Its price today already carries the cut
+    # being tested for, so scoring that called a car that appeared dear and
+    # then cut hard "cheap, and cut". Cars that have since left are scored
+    # too, or only the ones nobody took would be tested.
+    scores = comparables(dict(e, price=_first_price(e), status="active")
+                         for e in entries
+                         if _first_price(e) and not e.get("filtered"))
     cheap_cut = cheap_n = dear_cut = dear_n = 0
     for entry in entries:
         row = scores.get(str(entry.get("id")))

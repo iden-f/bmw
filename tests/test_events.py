@@ -79,6 +79,27 @@ class TestFindingTheFirstOfEachKind:
         assert priced["before"] is None and priced["after"] == 37450
         assert "no price" in priced["detail"]
 
+    def test_a_drop_after_a_rise_is_still_offered(self, tmp_path, paths):
+        """Each car offered its first move and stopped, so a car that went
+        up and then down never offered its drop."""
+        state = State(path=tmp_path / "s.json")
+        car(state, price=30000)
+        a_check_later()
+        car(state, price=31000)
+        a_check_later()
+        car(state, price=29000)
+        found = events.scan(state)
+        assert found["price_rise"].after == 31000
+        assert found["price_drop"].before == 31000
+        assert found["price_drop"].after == 29000
+
+    def test_a_car_whose_search_was_removed_did_not_leave(self, tmp_path, paths):
+        state = State(path=tmp_path / "s.json")
+        car(state)
+        state.forget_searches(set())
+        assert state.listings["1"]["status"] == "gone"
+        assert "removed" not in events.scan(state)
+
     def test_a_car_that_never_moved_produces_nothing(self, tmp_path, paths):
         state = State(path=tmp_path / "s.json")
         car(state)
@@ -333,6 +354,124 @@ class TestSilenceAndFailureAreDifferentFaults:
     def test_a_recent_success_says_nothing_either_way(self, tmp_path):
         state = self._state(tmp_path, [{"at": self._ago(0.5), "ok": True}])
         assert events.silence(self._cfg(), state, {}) is None
+
+    def _half_read(self, hours, **over):
+        """One of two searches would not load; the other read fine. The
+        runner counts the read one as run and the other as failed."""
+        row = {"at": self._ago(hours), "ok": False, "searches_run": 1,
+               "searches_failed": 1,
+               "errors": ["Honda Civic: HTTP 404 for the search page"]}
+        row.update(over)
+        return row
+
+    def test_one_search_down_is_not_silence(self, tmp_path):
+        """The site was read every two hours. The alarm said nothing had
+        succeeded for eight, while the page showed a check minutes old."""
+        runs = [self._half_read(h) for h in (0.1, 2.1, 4.1, 6.1, 8.1)]
+        runs.append({"at": self._ago(10.1), "ok": True, "searches_run": 2,
+                     "searches_failed": 0})
+        state = self._state(tmp_path, runs)
+        assert events.silence(self._cfg(), state, {}) is None
+
+    def test_a_page_read_as_nothing_is_still_running_and_failing(self, tmp_path):
+        """Only a search that would not load is let off. A page that loaded
+        and read as nothing is the parser falling behind the site."""
+        errors = ["Honda Civic: HTTP 404 for the search page",
+                  "Audi RS 5: the page loaded but no listings could be read"]
+        runs = [self._half_read(h, errors=errors) for h in (0.1, 2.1, 4.1)]
+        runs.append({"at": self._ago(6.1), "ok": True})
+        said = events.silence(self._cfg(), self._state(tmp_path, runs), {})
+        assert said and said["failing"] is True
+
+    def test_the_books_failing_is_still_running_and_failing(self, tmp_path):
+        runs = [self._half_read(h, invariants=["a car is owed and quiet"])
+                for h in (0.1, 2.1, 4.1)]
+        runs.append({"at": self._ago(6.1), "ok": True})
+        said = events.silence(self._cfg(), self._state(tmp_path, runs), {})
+        assert said and said["failing"] is True
+
+
+class TestABudgetStopIsNotGitHub:
+    """The guard wrote BUDGET-STOP, and every check stopped before it began.
+
+    Six hours later the watchdog said the watcher had gone quiet and sent the
+    reader to the Actions tab for a disabled schedule or an expired token,
+    and the coverage alarm blamed GitHub's scheduler. The bot had stopped
+    itself, and only deleting the file brings it back.
+    """
+
+    def _state(self, tmp_path, hours=(8, 10, 12, 14, 16, 18, 20, 22)):
+        """A check every two hours until the stop, and nothing since."""
+        from datetime import timedelta
+        state = State(path=tmp_path / "s.json")
+        now = clock.now()
+        state.data["runs"] = [
+            {"at": (now - timedelta(hours=h)).isoformat(timespec="seconds"),
+             "ok": True, "searches_run": 2, "searches_failed": 0,
+             "trigger": "schedule"}
+            for h in hours]
+        return state
+
+    def _cfg(self):
+        return {"health": {"silent_after_hours": 6,
+                           "expected_interval_minutes": 120,
+                           "coverage_floor_pct": 50}}
+
+    def test_the_silence_is_put_down_to_the_stop(self, tmp_path):
+        stop = tmp_path / "BUDGET-STOP"
+        stop.write_text("spent", encoding="utf-8")
+        said = events.silence(self._cfg(), self._state(tmp_path), {},
+                              stop_file=stop)
+        assert said and "budget guard" in said["subject"]
+        assert "Delete BUDGET-STOP on main" in said["body"]
+        assert "month turns" in said["body"]
+        assert "Actions tab" not in said["body"]
+        assert "keep-time" not in said["body"]
+
+    def test_it_is_said_once(self, tmp_path):
+        stop = tmp_path / "BUDGET-STOP"
+        stop.write_text("spent", encoding="utf-8")
+        state = self._state(tmp_path)
+        said = events.silence(self._cfg(), state, {}, stop_file=stop)
+        assert events.silence(self._cfg(), state,
+                              {"silence_reported": said["since"]},
+                              stop_file=stop) is None
+
+    def test_without_the_file_it_is_an_ordinary_silence(self, tmp_path):
+        said = events.silence(self._cfg(), self._state(tmp_path), {},
+                              stop_file=tmp_path / "BUDGET-STOP")
+        assert said and "gone quiet" in said["subject"]
+
+    def test_the_coverage_alarm_does_not_blame_the_scheduler(self, tmp_path):
+        stop = tmp_path / "BUDGET-STOP"
+        state = self._state(tmp_path, hours=(14, 16, 18, 20, 22))
+        assert events.thin_coverage(self._cfg(), state, {}, stop_file=stop)
+        stop.write_text("spent", encoding="utf-8")
+        assert events.thin_coverage(self._cfg(), state, {},
+                                    stop_file=stop) is None
+
+    def test_the_watchdog_command_looks_for_the_file(self, tmp_path, monkeypatch,
+                                                      capsys):
+        from autotrader import cli
+        from autotrader.config import Config
+        monkeypatch.chdir(tmp_path)
+        cfg = Config.defaults(tmp_path / "config.json")
+        cfg.add_search("https://www.autotrader.ca/cars/honda/civic/?rcp=25", "Civic")
+        cfg.set("health.silent_after_hours", 6)
+        cfg.set("health.expected_interval_minutes", 120)
+        cfg.set("health.coverage_floor_pct", 50)
+        cfg.save()
+        # Thin enough that the coverage alarm would go off without the file.
+        state = self._state(tmp_path, hours=(14, 16, 18, 20, 22))
+        state.path = tmp_path / "state.json"
+        state.save()
+        (tmp_path / "BUDGET-STOP").write_text("spent", encoding="utf-8")
+        sent = []
+        monkeypatch.setattr(cli.notifiers, "alert",
+                            lambda c, subject, body, env=None: sent.append(subject) or [])
+        cli.main(["events", "--notify"])
+        assert sent and "budget guard" in sent[0], sent
+        assert not any("covered only" in s for s in sent), sent
 
 
 class TestRunningIsNotTheSameAsWatching:

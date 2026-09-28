@@ -14,7 +14,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from . import clock, words
+from . import budget, clock, words
+from .state import retired_by_owner
 
 LEDGER_PATH = Path("EVENTS.md")
 DATA_PATH = Path("docs/events.json")
@@ -86,6 +87,62 @@ def _delivery(entry: dict[str, Any]) -> str:
     return "no record - which is itself a fault the run should have caught"
 
 
+def told_about(entry: dict[str, Any], at: Any, until: Any) -> str | None:
+    """When you were told about the event at ``at``, as far as is known.
+
+    delivery_state reads the car as it is now, which answers for its newest
+    event only. For an earlier one this reads the car's record of alert
+    times (State.mark_notified keeps it): the first alert at or after ``at``
+    and before ``until``, the car's next event. "" when the record covers
+    that stretch and no alert went out; None when it cannot say, because the
+    car keeps no record or it starts later.
+    """
+    told = [t for t in (clock.parse(x) for x in (entry.get("told") or [])) if t]
+    start, end = clock.parse(at), clock.parse(until)
+    if not told or start is None:
+        return None
+    hits = [t for t in told if t >= start and (end is None or t < end)]
+    if hits:
+        return min(hits).isoformat(timespec="seconds")
+    since = clock.parse(entry.get("told_since"))
+    if since is not None and start < since:
+        return None
+    return ""
+
+
+def event_times(entry: dict[str, Any]) -> list[str]:
+    """When each thing that happened to this car happened, oldest first.
+
+    The same moments insight.events lists as the car's events, so the ledger
+    can tell which of them an alert belongs to.
+    """
+    stamps = [entry.get(k) for k in ("first_seen", "priced_at", "relisted_at",
+                                     "qualified_at", "seller_changed_at",
+                                     "photos_at")]
+    history = entry.get("price_history") or []
+    stamps += [after.get("at") for before, after in zip(history, history[1:])
+               if before.get("price") and after.get("price")
+               and before["price"] != after["price"]]
+    if entry.get("status") == "gone":
+        stamps.append(entry.get("removed_at"))
+    times = sorted({t for t in (clock.parse(x) for x in stamps) if t})
+    return [t.isoformat(timespec="seconds") for t in times]
+
+
+def _delivery_of(entry: dict[str, Any], at: Any) -> str:
+    """What the bot did about the event at ``at``: _delivery for the car's
+    newest event, and its record of alert times for an earlier one."""
+    when = clock.parse(at)
+    later = [t for t in event_times(entry) if when and clock.parse(t) > when]
+    if later:
+        told = told_about(entry, at, later[0])
+        if told:
+            return f"delivered at {told}"
+        if told == "":
+            return "not sent at the time"
+    return _delivery(entry)
+
+
 def _run_at(runs: list[dict[str, Any]], when: str) -> dict[str, Any]:
     """The run that was happening when this was recorded."""
     best: dict[str, Any] = {}
@@ -115,32 +172,42 @@ def scan(state) -> dict[str, Event]:
 
         history = [p for p in (entry.get("price_history") or [])
                    if p.get("price") and p.get("at")]
+        # The first move of each kind, not the first move: a car that went up
+        # and then down has a drop to offer as well.
+        offered: set[str] = set()
         for older, newer in zip(history, history[1:]):
             kind = "price_drop" if newer["price"] < older["price"] else "price_rise"
-            if newer["price"] == older["price"]:
+            if newer["price"] == older["price"] or kind in offered:
                 continue
+            offered.add(kind)
             delta = newer["price"] - older["price"]
             offer(Event(
                 kind=kind, at=newer["at"], listing_id=lid, title=title, url=url,
                 before=older["price"], after=newer["price"],
                 detail=f"${abs(delta):,} {'off' if delta < 0 else 'more'} "
                        f"(${older['price']:,} to ${newer['price']:,})",
-                delivered=_delivery(entry), run=_run_at(runs, newer["at"])))
-            break
+                delivered=_delivery_of(entry, newer["at"]),
+                run=_run_at(runs, newer["at"])))
+            if len(offered) == 2:
+                break
 
-        if entry.get("status") == "gone" and entry.get("removed_at"):
+        # A car you stopped watching did not leave the market.
+        if entry.get("status") == "gone" and entry.get("removed_at") \
+                and not retired_by_owner(entry):
             offer(Event(
                 kind="removed", at=entry["removed_at"], listing_id=lid,
                 title=title, url=url, before="active", after="gone",
                 detail=f"last seen {entry.get('last_seen') or 'unknown'}",
-                delivered=_delivery(entry), run=_run_at(runs, entry["removed_at"])))
+                delivered=_delivery_of(entry, entry["removed_at"]),
+                run=_run_at(runs, entry["removed_at"])))
 
         if entry.get("relisted_at"):
             offer(Event(
                 kind="relisted", at=entry["relisted_at"], listing_id=lid,
                 title=title, url=url, before="gone", after="active",
                 detail="written off, then listed again",
-                delivered=_delivery(entry), run=_run_at(runs, entry["relisted_at"])))
+                delivered=_delivery_of(entry, entry["relisted_at"]),
+                run=_run_at(runs, entry["relisted_at"])))
 
         # A call-for-price car naming a figure. Without a priced_at stamp, a
         # price history that starts after first_seen is the evidence.
@@ -153,7 +220,8 @@ def scan(state) -> dict[str, Event]:
                 url=url, before=None, after=entry.get("price") or history[-1]["price"],
                 detail=f"listed with no price on {str(entry.get('first_seen'))[:10]}, "
                        f"then asked ${entry.get('price') or history[-1]['price']:,}",
-                delivered=_delivery(entry), run=_run_at(runs, priced_at)))
+                delivered=_delivery_of(entry, priced_at),
+                run=_run_at(runs, priced_at)))
 
     return found
 
@@ -231,12 +299,42 @@ def render(record: dict[str, Any]) -> str:
     return "\n".join(lines) + "\n"
 
 
+def _succeeded(run: dict[str, Any]) -> bool:
+    """Did this run read the site and find nothing wrong but a search down?
+
+    A search that failed to load while others read fine is a narrower watch,
+    and the run's own health alert already names it, so the watch has not
+    gone silent. Anything else that went wrong (a page read as nothing, the
+    bot's own books) still counts against it: those are what "running and
+    failing" is for. The runner counts a search as run only when it was
+    read, so the two counters never overlap.
+    """
+    if run.get("skipped"):
+        return False
+    if run.get("ok"):
+        return True
+    ran = int(run.get("searches_run") or 0)
+    failed = int(run.get("searches_failed") or 0)
+    errors = run.get("errors") or []
+    return (ran > 0 and failed > 0 and len(errors) <= failed
+            and not run.get("invariants"))
+
+
+def _stopped(stop_file: Path | None) -> bool:
+    """Is the budget guard's stop file there? Only asked when a caller names
+    one, so a check of the state alone never depends on the working folder."""
+    return stop_file is not None and stop_file.exists()
+
+
 def silence(cfg, state, record: dict[str, Any],
-            now: datetime | None = None) -> dict[str, Any] | None:
+            now: datetime | None = None, *,
+            stop_file: Path | None = None) -> dict[str, Any] | None:
     """Has the bot stopped checking?  Returns what to say, or None.
 
     A watcher cannot report its own absence, so a separate job asks this on
-    its own schedule, from the state file alone.
+    its own schedule, from the state file alone - and from ``stop_file``, the
+    budget guard's file, when the caller names it: while that is there the
+    bot stopped itself, which no timer or token will fix.
     """
     hours = float((cfg.get("health", {}) or {}).get("silent_after_hours", 3) or 0)
     if hours <= 0:
@@ -252,7 +350,7 @@ def silence(cfg, state, record: dict[str, Any],
         # A firing that stood down proves the timer is alive but read nothing,
         # and this alarm measures time since the site was last read (as
         # lastCheck does in app.js).
-        if run.get("ok") and not run.get("skipped") and at > last_ok:
+        if _succeeded(run) and at > last_ok:
             last_ok = at
         if at > last_any:
             last_any = at
@@ -269,6 +367,23 @@ def silence(cfg, state, record: dict[str, Any],
     if str(record.get("silence_reported") or "") == last_ok:
         return None
     every = (cfg.get("health", {}) or {}).get("expected_interval_minutes", 30)
+
+    if _stopped(stop_file):
+        return {
+            "since": last_ok,
+            "hours": round(quiet_for, 1),
+            "failing": False,
+            "budget_stop": True,
+            "subject": "AutoTrader watcher is stopped by its budget guard",
+            "body": (f"The last successful check was {quiet_for:.1f} hours ago "
+                     f"({last_ok}). Nothing is being watched while this is "
+                     f"true.\n\nThis is not GitHub's schedule or a token. The "
+                     f"bot stopped itself: this month's runner minutes passed "
+                     f"the share of the allowance it allows itself, so it "
+                     f"wrote {budget.STOP_FILE} on main, and every check "
+                     f"stops before it starts while that file is there.\n\n"
+                     + budget.RESUME),
+        }
 
     # "Gone quiet" and "running but failing" need different fixes. A run
     # newer than the last success means the bot is still being started.
@@ -430,6 +545,12 @@ def update(state, ledger_path: Path = LEDGER_PATH,
     return record
 
 
+def _hours(hours: Any) -> str:
+    """A window's length for a subject line: "24 hours", "14.9 hours"."""
+    value = float(hours or 0)
+    return f"{value:g} hour{'' if value == 1 else 's'}"
+
+
 def _slot_word(minutes: int) -> str:
     """The schedule's slot as a plural noun, derived from the interval."""
     if minutes == 30:
@@ -448,17 +569,20 @@ COVERAGE_FLOOR_PCT = 50.0
 
 
 def thin_coverage(cfg, state, record: dict[str, Any],
-                  now: datetime | None = None) -> dict[str, Any] | None:
+                  now: datetime | None = None, *,
+                  stop_file: Path | None = None) -> dict[str, Any] | None:
     """Is the schedule delivering enough checks to be worth trusting?
 
     Separate from the silence alarm: a watcher that runs reliably but rarely
-    is never silent and still misses most of what happens.
+    is never silent and still misses most of what happens. Says nothing while
+    the budget guard's ``stop_file`` is there: the checks stopped because the
+    bot stopped them, and the silence alarm says so.
     """
     from . import insight
 
     health = cfg.get("health", {}) or {}
     floor = float(health.get("coverage_floor_pct", COVERAGE_FLOOR_PCT) or 0)
-    if floor <= 0:
+    if floor <= 0 or _stopped(stop_file):
         return None
     expected = int(health.get("expected_interval_minutes", 30) or 30)
     now = now or clock.now()
@@ -475,6 +599,13 @@ def thin_coverage(cfg, state, record: dict[str, Any],
     # A schedule that changed recently has not had time to be thin.
     if cover.get("partial") and cover.get("window_hours", 0) < 6:
         return None
+    # The bot was started often enough, and it is the checks that failed.
+    # That is the bot's fault rather than GitHub's, and the silence alarm and
+    # the run's own health alert already say so; this one would blame the
+    # scheduler for it.
+    attempted = cover.get("slots_attempted")
+    if attempted is not None and attempted / max(1, cover["expected"]) * 100 >= floor:
+        return None
 
     longest = cover.get("longest_gap_minutes") or 0
     return {
@@ -485,12 +616,13 @@ def thin_coverage(cfg, state, record: dict[str, Any],
         "slots_covered": cover.get("slots_covered"),
         "expected": cover.get("expected"),
         "at": now.isoformat(timespec="seconds"),
-        "subject": f"AutoTrader watcher covered only {cover['pct']}% of yesterday",
+        "subject": (f"AutoTrader watcher covered only {cover['pct']}% of the "
+                    f"last {_hours(cover['window_hours'])}"),
         # cover["pct"] is the share of slots that had a check, so it is
         # paired with slots_covered rather than the number of runs.
         "body": (f"{cover.get('slots_covered', cover['successful'])} of "
                  f"{cover['expected']} {_slot_word(expected)} in the last "
-                 f"{cover['window_hours']} hours had a check, at one asked "
+                 f"{_hours(cover['window_hours'])} had a check, at one asked "
                  f"for every {expected} minutes.\n\n"
                  f"The longest gap was {longest / 60:.1f} hours. A car can be "
                  f"listed and sold inside a gap that size, so treat anything "

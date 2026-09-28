@@ -800,16 +800,19 @@ def cmd_events(args: argparse.Namespace) -> int:
     It reads only stored state and writes a ledger. It never scrapes, so it
     cannot hold up or wedge a check.
     """
-    from . import events
+    from . import budget, events
 
     cfg = Config.load(args.config)
     state = State.load(args.state)
     record = events.update(state)
     first = record.get("first", {})
+    # watch.yml stops every check while this is on main, and this job runs
+    # from a checkout of main, so it can see why the checks stopped.
+    stop_file = Path(budget.STOP_FILE)
 
     # A watcher cannot report its own absence, so this job, on its own
     # schedule, raises the alarm instead.
-    quiet = events.silence(cfg, state, record)
+    quiet = events.silence(cfg, state, record, stop_file=stop_file)
     if quiet:
         print(_bad(f"no successful check for {_many(quiet['hours'], 'hour')} "
                    f"(since {quiet['since']})"))
@@ -839,7 +842,7 @@ def cmd_events(args: argparse.Namespace) -> int:
 
     # Running is not the same as covering the market: a watcher that gets a
     # fraction of its scheduled checks is never silent but still misses most.
-    thin = events.thin_coverage(cfg, state, record)
+    thin = events.thin_coverage(cfg, state, record, stop_file=stop_file)
     if thin:
         print(_bad(
             f"only {thin['pct']}% of the expected checks happened"

@@ -23,6 +23,24 @@ from .listing import Listing, on_marketplace
 # dashboard and the ledger quote it verbatim.
 HIDDEN_REASON_PREFIX = "hidden by your rules: "
 
+# Why a car already for sale when a search began, or changed what it covers,
+# was recorded without an alert: it is a starting point, not news. The runner
+# and the Marketplace intake write these, and the weekly digest reads them.
+BASELINE_REASON = "recorded as a starting point when this search's scope changed"
+# A car a loosened rule lets through, quiet for that one check.
+RULES_CHANGED_REASON = ("recorded as a starting point when this search's "
+                        "rules changed")
+STARTING_POINT = ("already for sale when Marketplace was first read for this "
+                  "search, so recorded as a starting point")
+STARTING_POINT_REASONS = (BASELINE_REASON, RULES_CHANGED_REASON, STARTING_POINT)
+
+# Why a car stopped being watched by your doing rather than the market's. It
+# left the watch, not the site, so nothing counts it as having left the market.
+SEARCH_REMOVED = "its search was removed, so it is no longer watched"
+SWITCHED_OFF = "Marketplace is switched off for this search"
+# The quiet reason forget_searches writes, which is all an older row has.
+SEARCH_REMOVED_QUIET = "the search that was watching this was removed"
+
 log = logging.getLogger(__name__)
 
 STATE_PATH = Path(os.getenv("AUTOTRADER_STATE", "state.json"))
@@ -31,6 +49,43 @@ MAX_RUN_HISTORY = 60
 _MANAGED_KEYS = {"first_seen", "last_seen", "status", "notified", "price_history",
                  "price_disputed"}
 MAX_PRICE_POINTS = 40
+# How many alert times each car keeps. notified_at holds only the last, which
+# is the wrong answer for every earlier event on the car's timeline.
+TOLD_KEPT = 10
+
+
+def retired_by_owner(entry: dict[str, Any]) -> bool:
+    """Did this car go because you stopped watching it, not because it left?
+
+    A search taken away, or Marketplace switched off for one, writes its cars
+    off. They may well still be for sale, so a figure about the market - how
+    many left this week, how long cars stay listed - must not count them.
+    """
+    if str(entry.get("status") or "") != "gone":
+        return False
+    why = entry.get("gone_reason")
+    if why:
+        return why in (SEARCH_REMOVED, SWITCHED_OFF)
+    return entry.get("quiet_reason") == SEARCH_REMOVED_QUIET
+
+
+def _note_told(entry: dict[str, Any], stamp: str) -> None:
+    """Add an alert time to the car's record of them, ``told``.
+
+    A record begun on a car already told about starts from the last time it
+    was, and one that has dropped its oldest times starts from the oldest it
+    kept; either way ``told_since`` says where it starts, so an event before
+    that is not read as never sent.
+    """
+    told = [str(t) for t in (entry.get("told") or []) if t]
+    if not told and entry.get("notified_at"):
+        told = [str(entry["notified_at"])]
+        entry["told_since"] = told[0]
+    told.append(stamp)
+    if len(told) > TOLD_KEPT:
+        told = told[-TOLD_KEPT:]
+        entry["told_since"] = told[0]
+    entry["told"] = told
 
 
 def utcnow() -> str:
@@ -402,9 +457,11 @@ class State:
         entry["notified"] = True
 
     def mark_notified(self, listing_ids: Iterable[str]) -> None:
+        stamp = utcnow()
         for lid in listing_ids:
             if lid in self.listings:
-                self.listings[lid]["notified_at"] = utcnow()
+                _note_told(self.listings[lid], stamp)
+                self.listings[lid]["notified_at"] = stamp
                 self.listings[lid].pop("quiet_reason", None)
                 self.listings[lid]["notified"] = True
                 self.listings[lid].pop("pending", None)
@@ -724,15 +781,18 @@ class State:
         A firing that stands down because a check just happened is still
         recorded as a run - it proves the timer is alive - but it read
         nothing, so figures about the last check must not come from it.
+
+        ``searches_run`` counts only the searches that were read, so any at
+        all means the site was read, however many others failed to load.
         """
         for run in (self.data.get("runs") or []):
             if run.get("skipped"):
                 continue
             ran = int(run.get("searches_run") or 0)
             failed = int(run.get("searches_failed") or 0)
-            if ran and failed < ran:
+            if ran:
                 return run
-            if not ran and run.get("ok"):
+            if not failed and run.get("ok"):
                 return run      # an older record without those counters
         return None
 
@@ -784,7 +844,10 @@ class State:
                 # about a car from a search you took away.
                 entry.pop("pending", None)
                 entry.pop("ride_along", None)
-                entry["quiet_reason"] = "the search that was watching this was removed"
+                entry["quiet_reason"] = SEARCH_REMOVED_QUIET
+                # Gone from the watch, not the site: the market figures
+                # leave it out (see retired_by_owner).
+                entry["gone_reason"] = SEARCH_REMOVED
                 entry["notified"] = True
                 released += 1
         if released:

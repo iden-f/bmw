@@ -36,6 +36,17 @@ class TestTheCostLedgerSaysItIsAFloor:
         assert "killed" in said and "billed" in said, \
             "a job killed before it wrote anything is billed and uncounted"
 
+    def test_it_says_which_jobs_it_counts(self):
+        """Only the check writes its minutes down. The watchdog, the tests on
+        every push, publishing and the cold start are billed from the same
+        allowance, and the ledger called itself what the repository spent."""
+        said = budget.Ledger.BLIND_SPOT
+        assert "check jobs" in said
+        for job in ("the watchdog", "the tests", "publishing the page",
+                    "the cold-start check"):
+            assert job in said, job
+        assert "what THIS repository spent" not in said
+
     def test_the_page_prints_it_where_the_number_is(self):
         app = Path("docs/app.js").read_text(encoding="utf-8")
         assert "blind_spot" in app, \

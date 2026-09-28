@@ -246,8 +246,9 @@ class TestAFiringThatStoodDownIsNotACheck:
         assert state.last_check["duration_s"] == 58.7
 
     def test_nor_is_a_run_that_could_not_read_a_single_search(self, tmp_path):
+        # searches_run counts the searches read; a run that read none has 0.
         state = self.state_with(tmp_path, [
-            {"at": "2026-01-14T19:34:00+00:00", "ok": False, "searches_run": 2,
+            {"at": "2026-01-14T19:34:00+00:00", "ok": False, "searches_run": 0,
              "searches_failed": 2},
             {"at": "2026-01-14T17:19:00+00:00", "ok": True, "searches_run": 2,
              "searches_failed": 0},
@@ -258,6 +259,15 @@ class TestAFiringThatStoodDownIsNotACheck:
         """One search down is a narrower watch, not a blind one."""
         state = self.state_with(tmp_path, [
             {"at": "2026-01-14T19:34:00+00:00", "ok": False, "searches_run": 2,
+             "searches_failed": 1},
+        ])
+        assert state.last_check["at"].startswith("2026-01-14T19:34")
+
+    def test_one_of_two_searches_down_is_still_a_check(self, tmp_path):
+        """What the runner writes for it: one read, one failed. The counters
+        never overlap, so this is not "every search it ran failed"."""
+        state = self.state_with(tmp_path, [
+            {"at": "2026-01-14T19:34:00+00:00", "ok": False, "searches_run": 1,
              "searches_failed": 1},
         ])
         assert state.last_check["at"].startswith("2026-01-14T19:34")

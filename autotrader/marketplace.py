@@ -25,7 +25,7 @@ from urllib.parse import urlencode
 
 from . import clock, filters, geo
 from .listing import MARKETPLACE_PREFIX, Listing, on_marketplace
-from .state import Change, State, utcnow
+from .state import STARTING_POINT, SWITCHED_OFF, Change, State, utcnow
 from .urls import describe_search
 
 log = logging.getLogger(__name__)
@@ -710,9 +710,6 @@ GONE_AFTER_DAYS = 10
 # first scrolls into view: results are capped, so older cars drift in as
 # newer ones sell.
 NEW_WITHIN_DAYS = 7
-STARTING_POINT = ("already for sale when Marketplace was first read for this "
-                  "search, so recorded as a starting point")
-SWITCHED_OFF = "Marketplace is switched off for this search"
 SESSION_WORDS = {
     "signed_out": "Facebook has signed the collector out",
     "checkpoint": "Facebook wants the collector's account to confirm who it is",

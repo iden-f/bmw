@@ -27,7 +27,8 @@ from .enrich import detail_from_html, enrich, page_identifies
 from .http import BlockedError, BudgetExhausted, FetchError, Fetcher
 from .listing import Listing, on_marketplace
 from .parser import looks_like_no_results, parse_search_page
-from .state import HIDDEN_REASON_PREFIX, Change, State, utcnow
+from .state import (BASELINE_REASON, HIDDEN_REASON_PREFIX, RULES_CHANGED_REASON,
+                    Change, State, utcnow)
 from .urls import listing_id_from_url, normalise_search_url, page_url
 
 log = logging.getLogger(__name__)
@@ -181,13 +182,6 @@ class RunReport:
         return (", ".join(bits)
                 + f" - {_many(self.requests_made, 'request')} in {self.duration_s}s")
 
-
-# Why a car found while a search establishes what it watches stays quiet.
-BASELINE_REASON = "recorded as a starting point when this search's scope changed"
-
-# Why a car a loosened rule lets through stays quiet for that one check.
-RULES_CHANGED_REASON = ("recorded as a starting point when this search's "
-                        "rules changed")
 
 # Below this a search is too small for "half of last time" to mean anything.
 MIN_COUNT_FOR_COLLAPSE = 6
@@ -1806,8 +1800,10 @@ def _charge_the_budget(cfg: Config, state: State, report: "RunReport",
 
     The stop is a file rather than an API call to disable a workflow: it is
     visible in the repository, needs no actions: write token, and is deleted
-    by hand to resume. watch.yml reads it before installing anything. The
-    check runs every time, so a new month clears it on its own.
+    by hand to resume. watch.yml reads it before installing anything, so in
+    Actions the bot never runs while it is there, and a new month does not
+    clear it: it lasts until someone deletes it. The branch below that
+    deletes it serves a copy run by hand.
     """
     from . import budget as budget_mod
 
@@ -1836,9 +1832,14 @@ def _charge_the_budget(cfg: Config, state: State, report: "RunReport",
             encoding="utf-8")
         report.warnings.append(verdict["text"])
         if notify and not state.data.get("budget_told") == verdict["month"]:
-            notifiers.alert(cfg, "The watcher has stopped: this month's minutes are spent",
-                            verdict["text"] + "\n\n" + BILLED_WHILE_STOPPED, env)
-            state.data["budget_told"] = verdict["month"]
+            results = notifiers.alert(
+                cfg, "The watcher has stopped: this month's minutes are spent",
+                verdict["text"] + "\n\n" + budget_mod.RESUME + "\n\n"
+                + BILLED_WHILE_STOPPED, env)
+            # Marked as told only once a channel took it, so a run that
+            # gets here again tries again. The watchdog says it too.
+            if any(r.ok for r in results):
+                state.data["budget_told"] = verdict["month"]
     else:
         if stop_file.exists():
             stop_file.unlink()

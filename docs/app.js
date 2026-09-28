@@ -390,7 +390,7 @@ function comparableSays(cmp, l) {
       badge: `${n}% ${under ? 'under' : 'over'} the median of ${num(cmp.sample)}`,
       sentence: `${n}% ${under ? 'under' : 'over'} the median ${money(cmp.median)} `
         + `of ${plural(cmp.sample, 'comparable')} — ${esc(cmp.cohort || 'cars like it')}, `
-        + `each within a third of this car's odometer.`,
+        + `each with about two-thirds to one and a half times this car's kilometres.`,
     };
   }
   if (cmp.rank !== undefined) {

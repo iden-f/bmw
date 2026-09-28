@@ -491,3 +491,169 @@ class TestEveryCarGetsAnAnswer:
     def test_a_generator_is_read_once_and_still_answers_everything(self):
         cars = [car(i, make="Honda", model="Civic") for i in range(4)]
         assert len(insight.comparables(c for c in cars)) == len(cars)
+
+
+class TestTheWeekAgoIsAWeekAgo:
+    """The digest said "median asking $40,000 - down $10,000 on a week ago"
+    when no price had moved all week.
+
+    Its week-ago median took each car's first price ever, and only for cars
+    priced more than once, while today's covered every live car, hidden ones
+    too. A car cut in January read as this week's news.
+    """
+
+    def cars(self):
+        a = car(1, price=40000, first=250, make="Honda", model="Civic",
+                history=[{"at": ago(250), "price": 50000},
+                         {"at": ago(11), "price": 40000}])
+        b = car(2, price=39000, first=2, make="Honda", model="Civic")
+        c = car(3, price=41000, first=250, make="Honda", model="Civic")
+        return [a, b, c]
+
+    def test_the_median_then_is_of_the_prices_asked_then(self):
+        out = insight.weekly(self.cars(), [], now=NOW)
+        assert out["median"] == 40000
+        assert out["median_then"] == 40500, out
+        assert out["median_move"] == -500, out
+        assert "$10,000" not in insight.weekly_text(out)
+
+    def test_a_car_gone_before_the_week_is_not_in_the_median_then(self):
+        cars = self.cars() + [car(4, price=90000, first=250, status="gone",
+                                  removed=20, make="Honda", model="Civic")]
+        assert insight.weekly(cars, [], now=NOW)["median_then"] == 40500
+
+    def test_a_hidden_car_is_in_neither_median(self):
+        cars = self.cars() + [car(5, price=150000, first=250, filtered=True,
+                                  make="Honda", model="Civic")]
+        out = insight.weekly(cars, [], now=NOW)
+        assert out["median"] == 40000 and out["median_then"] == 40500
+        assert out["live"] == 3
+
+    def test_new_listings_are_neither_hidden_nor_a_starting_point(self):
+        from autotrader.state import BASELINE_REASON, STARTING_POINT
+        fresh = car(10, first=2, make="Honda", model="Civic")
+        hidden = car(11, first=2, filtered=True, make="Honda", model="Civic")
+        base = car(12, first=2, make="Honda", model="Civic")
+        base["quiet_reason"] = BASELINE_REASON
+        market = car(13, first=2, make="Honda", model="Civic")
+        market["quiet_reason"] = STARTING_POINT
+        out = insight.weekly([fresh, hidden, base, market], [], now=NOW)
+        assert out["new"] == 1, out
+
+    def test_a_stand_down_is_not_a_successful_check(self):
+        runs = [{"at": ago(1), "ok": True, "searches_run": 2},
+                {"at": ago(2), "ok": True, "skipped": True},
+                {"at": ago(3), "ok": False, "searches_run": 2,
+                 "searches_failed": 1}]
+        out = insight.weekly([], runs, now=NOW)
+        assert out["checks"] == 2, "the stand-down read nothing"
+        assert out["checks_hours"] is None
+        assert "2 successful checks this week" in insight.weekly_text(out)
+
+    def test_a_full_run_log_says_how_far_back_it_reaches(self):
+        from datetime import timedelta
+        from autotrader.state import MAX_RUN_HISTORY
+        runs = [{"at": (NOW - timedelta(minutes=15 * i)).isoformat(),
+                 "ok": True, "searches_run": 1, "skipped": i % 4 != 0}
+                for i in range(MAX_RUN_HISTORY)]
+        out = insight.weekly([], runs, now=NOW)
+        assert out["checks"] == 15
+        assert out["checks_hours"] == 14.8
+        text = insight.weekly_text(out)
+        assert "this week" not in text.split("\n")[-1], text
+        assert "15 hours" in text, text
+
+
+class TestCarsYouStoppedWatchingDidNotLeave:
+    """Taking a search away wrote its cars off, and the market read that as
+    three cars leaving this week after five days listed each."""
+
+    def test_a_removed_search_is_not_a_week_of_departures(self):
+        from autotrader.state import State
+        state = State({"listings": {}, "searches": {"s1": {}, "s2": {}}})
+        for i in range(3):
+            entry = car(i, first=5, make="Honda", model="Civic")
+            entry["search_id"] = "s2"
+            state.listings[entry["id"]] = entry
+        state.forget_searches({"s1"})
+        cars = list(state.listings.values())
+        assert all(e["status"] == "gone" for e in cars)
+
+        out = insight.market(cars, now=clock_now())
+        assert out["gone"] == 0
+        assert out["velocity"]["left_7d"] == 0
+        assert out["listed_days"]["n"] == 0
+        assert not [e for e in insight.events(cars) if e["kind"] == "removed"]
+        assert insight.weekly(cars, [], now=clock_now())["gone"] == 0
+
+    def test_marketplace_switched_off_is_not_a_departure(self):
+        from autotrader.state import SWITCHED_OFF
+        gone = car(1, first=5, status="gone", removed=1)
+        gone["gone_reason"] = SWITCHED_OFF
+        assert insight.market([gone], now=NOW)["velocity"]["left_7d"] == 0
+
+    def test_an_older_row_is_known_by_its_quiet_reason(self):
+        gone = car(1, first=5, status="gone", removed=1)
+        gone["quiet_reason"] = "the search that was watching this was removed"
+        assert insight.market([gone], now=NOW)["gone"] == 0
+
+    def test_a_car_that_really_left_still_counts(self):
+        gone = car(1, first=5, status="gone", removed=1)
+        gone["gone_reason"] = "marked sold on Marketplace"
+        out = insight.market([gone], now=NOW)
+        assert out["gone"] == 1 and out["velocity"]["left_7d"] == 1
+
+
+def clock_now():
+    from autotrader import clock
+    return clock.now()
+
+
+class TestTheScoreIsTestedAsTheCarsAppeared:
+    """Ten Honda Civics at $30,000 that never move, five listed at $36,000
+    that cut to $26,000, five at $26,000 and five at $36,000 that stay.
+
+    Of the cars that appeared dear, half cut; of those that appeared cheap,
+    none. The backtest scored every car at today's price, so the five that
+    cut read as "called cheap, and cut", and it reported that the score
+    predicts nothing - the opposite of what happened.
+    """
+
+    def cars(self):
+        out = []
+
+        def add(i, first, now):
+            history = [{"at": ago(20), "price": first}]
+            if now != first:
+                history.append({"at": ago(2), "price": now})
+            out.append(car(i, price=now, year=2019, make="Honda",
+                           model="Civic", history=history))
+
+        for i in range(10):
+            add(i, 30000, 30000)
+        for i in range(5):
+            add(100 + i, 36000, 26000)
+        for i in range(5):
+            add(200 + i, 26000, 26000)
+        for i in range(5):
+            add(300 + i, 36000, 36000)
+        return out
+
+    def test_a_car_is_judged_at_the_price_it_appeared_at(self):
+        out = insight.backtest(self.cars())
+        assert out["called_dear"] == 10 and out["dear_that_cut"] == 5, out
+        assert out["called_cheap"] == 5 and out["cheap_that_cut"] == 0, out
+        assert out["dear_rate"] > out["cheap_rate"], out
+        assert "which is what the score claims" in out["verdict"]
+
+    def test_a_car_that_has_left_is_still_tested(self):
+        cars = self.cars()
+        for entry in cars[10:13]:
+            entry["status"], entry["removed_at"] = "gone", ago(1)
+        out = insight.backtest(cars)
+        assert out["called_dear"] == 10 and out["dear_that_cut"] == 5, out
+
+    def test_a_car_your_rules_hide_is_not(self):
+        cars = self.cars()
+        cars[10]["filtered"] = True
+        assert insight.backtest(cars)["called_dear"] == 9

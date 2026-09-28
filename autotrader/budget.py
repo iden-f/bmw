@@ -13,9 +13,10 @@ Every minute is labelled when it is spent, not when the ledger is read:
 The label is stored in the day's row beside the number, so a later change of
 visibility never relabels earlier minutes.
 
-An allowance is metered per account and this bot sees one repository, so it
-reports only its own spending and says so. GitHub rounds every job up to a
-whole minute, so minutes are counted per job here too.
+An allowance is metered per account and this bot sees one repository, and
+only its check jobs write their minutes down, so it reports what its checks
+spent and says so. GitHub rounds every job up to a whole minute, so minutes
+are counted per job here too.
 """
 
 from __future__ import annotations
@@ -40,6 +41,11 @@ DEFAULT_STOP_AT = 0.85
 MIN_DAYS_TO_PROJECT = 2
 
 STOP_FILE = "BUDGET-STOP"
+# How the stop is lifted. The workflow reads the file before the bot runs, so
+# nothing the bot does can lift it, a new month included.
+RESUME = (f"Delete {STOP_FILE} on main to start checking again. It does not "
+          f"lift by itself when the month turns: the workflow stops before "
+          f"the bot runs for as long as the file is there.")
 
 # The only labels a minute can carry. "unknown" counts as drawing wherever a
 # decision is made: wrongly assuming a charge costs a sentence on the
@@ -153,13 +159,18 @@ class Ledger:
     # The caveat the verdict carries. Minutes are recorded in the runner's
     # `finally`, so even a crashed run is counted, but a job killed outright
     # (a timeout, a lost runner, an out-of-memory kill) is billed and never
-    # seen here. The ledger is a floor, not a total, and says so.
+    # seen here. Only the check job records itself at all: the watchdog, the
+    # tests, publishing the page and the cold-start check are billed from
+    # the same allowance and never pass through this count. The ledger is a
+    # floor, not a total, and says so.
     BLIND_SPOT = (
-        "This is what THIS repository spent. The allowance has one meter per "
-        "account and this bot can see one repository, so it cannot tell you "
-        "how much of the allowance is left. It is also a floor rather than a "
-        "total: a job killed outright - a timeout, a lost runner - is billed "
-        "by GitHub and never reaches this count."
+        "This counts the check jobs in THIS repository and nothing else. The "
+        "allowance has one meter per account and this bot can see one "
+        "repository, so it cannot tell you how much of the allowance is left. "
+        "It is also a floor rather than a total: the watchdog, the tests, "
+        "publishing the page and the cold-start check are billed too and not "
+        "counted, and a check job killed outright - a timeout, a lost runner "
+        "- is billed by GitHub and never reaches this count."
     )
 
     def _short(self, projection: float | None) -> str:

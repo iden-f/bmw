@@ -33,8 +33,10 @@ class TestCoverageMeasuresTheWatchNotTheExitCode:
         assert cov["complained"] == len(runs)
 
     def test_a_run_whose_searches_all_failed_does_not(self):
+        # searches_run counts only the searches that were read, so a run
+        # that read none records 0 and every search as failed.
         from autotrader import insight
-        runs = [self.run_at(m, ok=False, searches_run=2, searches_failed=2)
+        runs = [self.run_at(m, ok=False, searches_run=0, searches_failed=2)
                 for m in range(0, 240, 30)]
         assert insight.coverage(runs, expected_minutes=30, since_change=None)["successful"] == 0
 
@@ -42,6 +44,17 @@ class TestCoverageMeasuresTheWatchNotTheExitCode:
         """One search down is a narrower watch, not a blind one."""
         from autotrader import insight
         runs = [self.run_at(0, ok=False, searches_run=2, searches_failed=1)]
+        assert insight.coverage(runs, expected_minutes=30, since_change=None)["successful"] == 1
+
+    def test_one_of_two_searches_down_still_counts(self):
+        """What the runner records for it: one read, one failed.
+
+        The counters never overlap, and reading "1 failed of 1 run" as no
+        search read left a hole in the coverage every time one of two
+        searches would not load.
+        """
+        from autotrader import insight
+        runs = [self.run_at(0, ok=False, searches_run=1, searches_failed=1)]
         assert insight.coverage(runs, expected_minutes=30, since_change=None)["successful"] == 1
 
     def test_a_skipped_run_never_looked(self):
@@ -378,8 +391,202 @@ class TestACountOfThingsThatHappenedIsNeverNegative:
         It is still a check that was attempted, which is a different number
         and is reported as one.
         """
-        cov = self.coverage([self.at(30, ok=False, searches_run=2,
+        cov = self.coverage([self.at(30, ok=False, searches_run=0,
                                      searches_failed=2)])
         assert cov["checks"] == 1, "a firing that tried"
         assert cov["successful"] == 0, "and read nothing"
         assert cov["clean"] == 0 and cov["complained"] == 0
+
+
+class TestCoverageStopsWhereTheRunLogDoes:
+    """The run log keeps the newest sixty runs, stand-downs included.
+
+    A cron at :07 and :37 and an outside timer at :15 and :45 record four runs
+    an hour, so the log reaches back about fifteen hours. Measured over
+    twenty-four, the nine hours it no longer holds counted as unwatched: a
+    schedule that had a check in every slot read 67%, with a nine-hour gap,
+    and the thin-coverage alarm blamed GitHub for it.
+    """
+
+    NOW = "2026-03-10T12:50:00+00:00"
+
+    def firings(self, days=3):
+        from datetime import timedelta
+        now = clock.parse(self.NOW)
+        rows = []
+        for hour in range(days * 24):
+            top = now.replace(minute=0) - timedelta(hours=hour)
+            for minute, how in ((45, "repository_dispatch:timer"),
+                                (37, "schedule"),
+                                (15, "repository_dispatch:timer"),
+                                (7, "schedule")):
+                at = top + timedelta(minutes=minute)
+                if at > now:
+                    continue
+                # A check every two hours; every other firing stands down.
+                reads = minute == 7 and at.hour % 2 == 0
+                rows.append({"at": at.isoformat(timespec="seconds"),
+                             "trigger": how, "ok": True,
+                             "skipped": not reads,
+                             "searches_run": 2 if reads else 0,
+                             "searches_failed": 0})
+        return rows            # newest first, as State.record_run keeps them
+
+    def test_a_full_log_is_measured_from_its_oldest_run(self):
+        from autotrader import insight
+        from autotrader.state import MAX_RUN_HISTORY
+        kept = self.firings()[:MAX_RUN_HISTORY]
+        cov = insight.coverage(kept, 120, now=clock.parse(self.NOW),
+                               since_change=None)
+        assert cov["truncated"] is True
+        assert cov["window_hours"] < 24
+        assert cov["partial"] is False, "the schedule did not change"
+        assert cov["pct"] == 100.0, cov
+        assert cov["pct_scheduled"] == 100.0, cov
+        assert cov["longest_gap_minutes"] <= 120, cov
+
+    def test_a_log_with_room_left_still_counts_the_hours_before_it(self):
+        """Nothing was dropped from it, so an empty stretch really was empty."""
+        from autotrader import insight
+        few = self.firings()[:20]
+        cov = insight.coverage(few, 120, now=clock.parse(self.NOW),
+                               since_change=None)
+        assert cov["truncated"] is False
+        assert cov["window_hours"] == 24.0
+        assert cov["pct"] < 50
+
+    def test_the_minutes_spent_say_how_far_back_they_reach(self):
+        from autotrader import insight
+        from autotrader.state import MAX_RUN_HISTORY
+        kept = self.firings()[:MAX_RUN_HISTORY]
+        cost = insight.minutes_spent(kept, now=clock.parse(self.NOW))
+        assert cost["window_hours"] < 24
+        assert cost["firings"] == MAX_RUN_HISTORY
+
+
+def test_the_card_says_how_far_apart_on_the_odometer_a_peer_can_be():
+    """The card said "each within a third of this car's odometer", while a
+    car with 60,000 km was judged against peers with 92,000."""
+    from pathlib import Path
+    from autotrader import insight
+    assert insight._similar_wear(60000, 92000), "about one and a half times"
+    assert not insight._similar_wear(60000, 93000)
+    assert insight._similar_wear(60000, 39000), "about two-thirds"
+    assert not insight._similar_wear(60000, 38000)
+    page = (Path(__file__).resolve().parent.parent / "docs" / "app.js").read_text(
+        encoding="utf-8")
+    assert "within a third of this car's odometer" not in page
+    assert "about two-thirds to one and a half times this car's kilometres" in page
+
+
+class TestEachEventSaysWhatHappenedToIt:
+    """A car announced on the 1st, told about a $2,000 drop on the 5th, and
+    kept quiet about a $100 drop on the 10th.
+
+    Every event on the car carried the car's latest state, so all three read
+    "quiet: the price moved $100", the Feed's "sent" count left out the
+    $2,000 drop that was sent, and the car's timeline printed the $100 reason
+    under the day it was listed.
+    """
+
+    def car(self, state, price):
+        from autotrader.listing import Listing
+        state.record(Listing(id="1", url="https://www.autotrader.ca/offers/honda-civic-1",
+                             title="2020 Honda Civic", price=price,
+                             price_source="detail", search_id="s"))
+        return state.listings["1"]
+
+    def rows(self, state):
+        from autotrader import insight
+        return {e["kind"] + str(e.get("delta") or ""): e["delivery"]
+                for e in insight.events(state.listings.values())}
+
+    def test_each_event_keeps_its_own_delivery(self, tmp_path):
+        from autotrader.state import State
+        state = State(path=tmp_path / "s.json")
+        clock.freeze("2026-09-01T12:00:00+00:00")
+        self.car(state, 30000)
+        state.mark_notified(["1"])
+        clock.freeze("2026-09-05T12:00:00+00:00")
+        self.car(state, 28000)
+        state.mark_notified(["1"])
+        clock.freeze("2026-09-10T12:00:00+00:00")
+        self.car(state, 27900)
+        state.hold_for_ride_along("1", "the price moved $100, under the bar")
+
+        rows = self.rows(state)
+        assert rows["new"]["state"] == "sent"
+        assert rows["new"]["at"].startswith("2026-09-01")
+        assert rows["price_drop-2000"]["state"] == "sent"
+        assert rows["price_drop-2000"]["at"].startswith("2026-09-05")
+        assert rows["price_drop-100"]["state"] == "quiet"
+        assert "$100" in rows["price_drop-100"]["text"]
+        assert "$100" not in rows["new"].get("text", "")
+
+    def test_a_starting_point_told_about_later_was_not_told_on_arrival(self, tmp_path):
+        from autotrader.state import BASELINE_REASON, State
+        state = State(path=tmp_path / "s.json")
+        clock.freeze("2026-09-01T12:00:00+00:00")
+        self.car(state, 30000)
+        state.silence("1", BASELINE_REASON)
+        clock.freeze("2026-09-05T12:00:00+00:00")
+        self.car(state, 28000)
+        state.mark_notified(["1"])
+
+        rows = self.rows(state)
+        assert rows["new"]["state"] == "quiet", rows["new"]
+        assert rows["price_drop-2000"]["state"] == "sent"
+
+    def test_the_ledger_agrees(self, tmp_path):
+        from autotrader import events
+        from autotrader.state import State
+        state = State(path=tmp_path / "s.json")
+        clock.freeze("2026-09-01T12:00:00+00:00")
+        self.car(state, 30000)
+        state.mark_notified(["1"])
+        clock.freeze("2026-09-05T12:00:00+00:00")
+        self.car(state, 28000)
+        state.mark_notified(["1"])
+        clock.freeze("2026-09-10T12:00:00+00:00")
+        self.car(state, 29000)
+        state.silence("1", "you asked not to hear about price rises")
+        found = events.scan(state)
+        assert found["price_drop"].delivered == "delivered at 2026-09-05T12:00:00+00:00"
+        assert found["price_rise"].delivered.startswith("deliberately quiet")
+
+    def test_a_car_told_about_before_the_record_began_is_not_guessed(self, tmp_path):
+        """Its record starts at the last alert it knew of; an event before
+        that keeps the car's answer rather than reading as never sent."""
+        from autotrader.state import State
+        state = State(path=tmp_path / "s.json")
+        clock.freeze("2026-09-01T12:00:00+00:00")
+        entry = self.car(state, 30000)
+        clock.freeze("2026-09-03T12:00:00+00:00")
+        self.car(state, 29000)
+        entry = state.listings["1"]
+        entry["notified_at"] = "2026-09-03T12:00:00+00:00"   # an older build
+        clock.freeze("2026-09-05T12:00:00+00:00")
+        self.car(state, 27000)
+        state.mark_notified(["1"])
+        assert state.listings["1"]["told_since"] == "2026-09-03T12:00:00+00:00"
+
+        rows = self.rows(state)
+        assert rows["price_drop-1000"]["at"].startswith("2026-09-03")
+        assert rows["price_drop-2000"]["at"].startswith("2026-09-05")
+        # 1 Sep is before the record, and nothing in it falls before the 3rd.
+        assert rows["new"]["state"] == "sent"
+        assert rows["new"]["at"].startswith("2026-09-05"), \
+            "the car's own answer, as before the record existed"
+
+    def test_the_record_keeps_only_the_last_few(self, tmp_path):
+        from datetime import timedelta
+        from autotrader.state import TOLD_KEPT, State
+        state = State(path=tmp_path / "s.json")
+        clock.freeze("2026-09-01T12:00:00+00:00")
+        self.car(state, 30000)
+        for n in range(TOLD_KEPT + 3):
+            clock.advance(timedelta(hours=1))
+            state.mark_notified(["1"])
+        entry = state.listings["1"]
+        assert len(entry["told"]) == TOLD_KEPT
+        assert entry["told_since"] == entry["told"][0]

@@ -86,6 +86,31 @@ class TestForgetting:
         assert "orphan" not in state.listings
 
 
+class TestRetiringIsNotLeaving:
+    """Retired cars were counted as having left the market: three cars of a
+    removed search read as three departures this week, a median of five
+    days listed, and three "gone from the site" rows in the feed."""
+
+    def test_a_retired_car_says_why_it_went(self, bench):
+        from autotrader.state import SEARCH_REMOVED, retired_by_owner
+        state = bench.state()
+        state.forget_searches({bench.keep})
+        entry = state.listings["old-0"]
+        assert entry["status"] == "gone"
+        assert entry["gone_reason"] == SEARCH_REMOVED
+        assert retired_by_owner(entry)
+        assert not retired_by_owner(state.listings["keep-1"])
+
+    def test_a_car_that_comes_back_is_not_retired_any_more(self, bench):
+        from autotrader.state import retired_by_owner
+        state = bench.state()
+        state.forget_searches({bench.keep})
+        state.record(car("old-0", bench.keep))
+        entry = state.listings["old-0"]
+        assert entry["status"] == "active" and "gone_reason" not in entry
+        assert not retired_by_owner(entry)
+
+
 class TestTheCommand:
     def test_without_yes_it_only_says_what_it_would_do(self, bench, capsys):
         bench.cfg.remove_search(bench.going)
