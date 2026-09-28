@@ -2,9 +2,9 @@
 
 GitHub's scheduler fills about 40% of this repository's two-hour slots, and it
 drops whole windows rather than individual firings, so a second cron offset
-buys very little. An outside timer calling repository_dispatch is the fix, and
-the handoff for setting one up is the thing most likely to be got wrong - so
-it is a script in the repository rather than a curl in a README, and the
+buys very little. An outside timer starting the check is the fix, and the
+handoff for setting one up is the thing most likely to be got wrong - so it
+is a script in the repository rather than a curl in a README, and the
 script's assumptions are asserted against the workflow here.
 
 Every status-code branch is exercised with a stubbed curl. The README version
@@ -47,18 +47,50 @@ def run(*args, code="204", body='{"ok":1}', token="github_pat_x", **env):
                           text=True, env=environ, cwd=ROOT, timeout=30)
 
 
+def sent(tmp_path, *args):
+    """What the script handed curl: its arguments, and what came on its input."""
+    record = tmp_path / "curl.txt"
+    out = run(*args, FAKE_RECORD=str(record))
+    assert out.returncode == 0, out.stdout + out.stderr
+    argv, _, given = record.read_text().partition("--- input\n")
+    return argv.splitlines(), given
+
+
 class TestItCannotDriftFromTheWorkflow:
-    """The script names an event type and a repository. If either stops
+    """The script names a workflow, its inputs and a repository. If any stops
     matching the workflow, the owner's timer silently stops working and the
     dashboard says the schedule is keeping time when nothing is."""
 
-    def test_the_event_type_is_one_the_workflow_accepts(self):
-        accepted = workflow()["repository_dispatch"]["types"]
-        body = SCRIPT.read_text()
-        used = [l for l in body.splitlines() if l.startswith("EVENT=")]
-        assert len(used) == 1, used
-        event = used[0].split('"')[1]
-        assert event in accepted, f"script sends {event!r}, workflow takes {accepted}"
+    def test_it_starts_the_check_workflow(self, tmp_path):
+        argv, _ = sent(tmp_path)
+        url = [a for a in argv if a.startswith("https://")]
+        assert len(url) == 1, argv
+        assert url[0].endswith(f"/actions/workflows/{WATCH.name}/dispatches"), url
+
+    def test_every_input_it_sends_is_one_the_workflow_takes(self, tmp_path):
+        import json
+        argv, _ = sent(tmp_path, "--from", "laptop")
+        body = json.loads(argv[argv.index("-d") + 1])
+        declared = workflow()["workflow_dispatch"]["inputs"]
+        assert set(body["inputs"]) <= set(declared), (body, sorted(declared))
+        assert body["ref"] == "main"
+        assert body["inputs"]["from"] == "laptop"
+
+    def test_it_is_deduplicated_like_the_schedule(self, tmp_path):
+        """A check started without `automatic` never stands down, so an
+        hourly timer would read the site every hour."""
+        import json
+        argv, _ = sent(tmp_path)
+        body = json.loads(argv[argv.index("-d") + 1])
+        assert body["inputs"]["automatic"] == "true"
+        step = [s for s in yaml.safe_load(WATCH.read_text())["jobs"]["check"]["steps"]
+                if s.get("id") == "bot"][0]
+        assert "inputs.automatic" in step["env"]["AUTOTRADER_SCHEDULED"]
+
+    def test_a_timer_that_asks_the_older_way_is_still_taken(self):
+        """A cron service set up to send repository_dispatch of type `check`
+        still starts a check, and still stands down like the schedule."""
+        assert "check" in workflow()["repository_dispatch"]["types"]
 
     def test_no_repository_is_hard_coded(self):
         """A fork running it must ask for a check on itself, not on the
@@ -76,8 +108,32 @@ class TestItCannotDriftFromTheWorkflow:
         assert f"Asking {repo} for a check" in out.stdout, out.stdout + out.stderr
 
     def test_the_workflow_still_accepts_an_outside_timer_at_all(self):
-        assert "repository_dispatch" in workflow(), (
-            "the script has nothing to call")
+        assert "workflow_dispatch" in workflow(), "the script has nothing to call"
+        assert "from" in workflow()["workflow_dispatch"]["inputs"], (
+            "an outside timer cannot say who it is")
+
+
+class TestTheTokenItNeedsCannotReachThePassphrase:
+    """Contents: write, which repository_dispatch needs, can push any code to
+    main, and the next check runs it with the passphrase and every channel's
+    secret. The script asks for a token that can only start a workflow, and
+    keeps it off the command line, where `ps` shows it to every user."""
+
+    def test_it_asks_for_actions_not_contents(self):
+        out = run(token=None)
+        assert "Actions to 'Read and write'" in out.stderr, out.stderr
+        assert "Contents to" not in out.stderr, out.stderr
+
+    def test_the_token_is_not_on_curls_command_line(self, tmp_path):
+        argv, given = sent(tmp_path)
+        assert not any("github_pat_x" in a for a in argv), argv
+        assert "-H" in argv and argv[argv.index("-H") + 1] == "@-", argv
+        assert given == "Authorization: Bearer github_pat_x\n", given
+
+    def test_the_usage_does_not_put_it_on_one_either(self):
+        usage = run("--help").stdout
+        assert "--token" not in usage, usage
+        assert "read -rs GITHUB_TOKEN" in usage, usage
 
 
 class TestEveryAnswerGitHubCanGive:
@@ -86,7 +142,7 @@ class TestEveryAnswerGitHubCanGive:
     @pytest.mark.parametrize("code,expect", [
         ("204", "OK"),
         ("401", "does not recognise the token"),
-        ("403", "Contents: Read and write"),
+        ("403", "Actions: Read and write"),
         ("404", "cannot SEE"),
         ("422", "bug in this script"),
         ("415", "bug in this script"),
@@ -113,7 +169,7 @@ class TestItRefusesToDoSomethingUseless:
     def test_no_token_explains_how_to_make_one(self):
         out = run(token=None)
         assert out.returncode == 1
-        for needed in ("Fine-grained", "Contents", "Read and write"):
+        for needed in ("Fine-grained", "Actions", "Read and write"):
             assert needed in out.stderr, out.stderr
 
     def test_the_timer_name_reaching_the_dashboard_is_bounded(self):
@@ -155,7 +211,7 @@ class TestTheDocumentationMatchesTheScript:
     def test_the_flags_it_shows_are_ones_the_script_takes(self):
         import re
         accepted = set(re.findall(r"^\s+(--[\w-]+)\)", SCRIPT.read_text(), re.M))
-        assert {"--repo", "--from", "--cron", "--token"} <= accepted, accepted
+        assert {"--repo", "--from", "--cron"} <= accepted, accepted
         shown = set(re.findall(r"(?<![\w-])(--[a-z][\w-]*)", self.schedule()))
         assert shown, "the README shows no way to run it"
         assert shown <= accepted, f"not flags of the script: {shown - accepted}"
@@ -167,9 +223,28 @@ class TestTheDocumentationMatchesTheScript:
 
     def test_the_permission_it_names_is_the_one_the_script_asks_for(self):
         flat = " ".join(self.schedule().split())
-        assert "Contents: Read and write" in flat
+        assert "with **Actions: Read and write** on your fork and nothing else" in flat
         body = SCRIPT.read_text()
-        assert "Contents" in body and "Read and write" in body
+        assert 'Actions set to "Read and write"' in " ".join(
+            l.lstrip("# ") for l in body.splitlines())
+
+    def test_the_readme_does_not_put_the_token_on_a_command_line(self):
+        """A token typed into a command is in the shell's history."""
+        import re
+        for block in re.findall(r"```sh\n(.*?)```", self.schedule(), re.S):
+            assert "github_pat_" not in block, block
+
+    def test_the_hosted_timer_asks_the_way_the_script_does(self, tmp_path):
+        import json
+        import re
+        section = self.schedule()
+        url = re.search(r"\| URL \| `([^`]+)` \|", section).group(1)
+        body = json.loads(re.search(r"\| Request body \| `([^`]+)` \|", section).group(1))
+        argv, _ = sent(tmp_path, "--from", "cron-job")
+        mine = [a for a in argv if a.startswith("https://")][0]
+        assert url.split("/repos/", 1)[1].split("/", 2)[2] == \
+            mine.split("/repos/", 1)[1].split("/", 2)[2], (url, mine)
+        assert body == json.loads(argv[argv.index("-d") + 1]), body
 
     def test_it_does_not_also_carry_a_rival_curl_to_get_wrong(self):
         """Two ways to do it is two things to keep correct."""

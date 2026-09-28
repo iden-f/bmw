@@ -229,12 +229,18 @@ def test_without_a_passphrase_nothing_opens(repo, monkeypatch):
 
 
 def envelope(changes, *, at=None, change_id=None):
-    """A change the way the dashboard seals it."""
+    """A change the way the dashboard seals it.
+
+    Stamped by the bot's clock, which judges its age: the host's clock is
+    another date whenever AUTOTRADER_NOW moves the bot's (scripts/time-gate.sh),
+    and a change from the real today was then from the future or weeks old.
+    """
     import secrets
-    from datetime import datetime, timezone
+
+    from autotrader import clock
     return json.dumps({
         "id": change_id or secrets.token_hex(16),
-        "at": at or datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+        "at": at or clock.now().isoformat().replace("+00:00", "Z"),
         "changes": changes,
     }).encode()
 
@@ -420,3 +426,31 @@ def test_an_outside_timer_is_named_from_the_event_file(tmp_path):
     env = {"RUN_TRIGGER": "repository_dispatch", "GITHUB_EVENT_PATH": str(event)}
     assert _trigger_of(env) == "repository_dispatch:laptop"
     assert _trigger_of({"RUN_TRIGGER": "repository_dispatch"}) == "repository_dispatch"
+
+
+def test_an_outside_timer_that_starts_the_workflow_is_named_from_its_input(tmp_path):
+    """scripts/keep-time.sh starts the check as its Run workflow button does,
+    with a token that cannot change the code, and names itself in the `from`
+    input. That is still an outside timer, and is counted as one."""
+    from autotrader.insight import _is_a_schedule
+    from autotrader.runner import _trigger_of
+    event = tmp_path / "event.json"
+    event.write_text(json.dumps({"inputs": {"automatic": "true", "from": "Cron-Job <b>"}}))
+    env = {"RUN_TRIGGER": "workflow_dispatch", "GITHUB_EVENT_PATH": str(event)}
+    assert _trigger_of(env) == "repository_dispatch:cron-jobb"
+    assert _is_a_schedule(_trigger_of(env))
+
+
+def test_a_person_at_the_button_is_not_a_timer(tmp_path):
+    from autotrader.insight import _is_a_schedule
+    from autotrader.runner import _trigger_of
+    event = tmp_path / "event.json"
+    for inputs in ({}, {"from": ""}, {"from": "<>!"}, {"dry_run": "true"}):
+        event.write_text(json.dumps({"inputs": inputs}))
+        env = {"RUN_TRIGGER": "workflow_dispatch", "GITHUB_EVENT_PATH": str(event)}
+        assert _trigger_of(env) == "workflow_dispatch", inputs
+        assert not _is_a_schedule(_trigger_of(env))
+    # A repository_dispatch's own payload is where its name is, not an input.
+    event.write_text(json.dumps({"inputs": {"from": "laptop"}}))
+    env = {"RUN_TRIGGER": "repository_dispatch", "GITHUB_EVENT_PATH": str(event)}
+    assert _trigger_of(env) == "repository_dispatch"

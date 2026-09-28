@@ -29,9 +29,11 @@ reliable, private, and easy to read. Setup and everyday use are in the
    firing within 90 minutes of the last check stands down here without
    contacting AutoTrader. A check AutoTrader turned away with an anti-bot page
    counts as one, and reads no further searches once it meets that page.
-6. **Record.** `events --notify` updates the ledger of market firsts.
-   Steps 3 to 6 send their output only to `run.log`, which is sealed with the
-   rest.
+6. **Record.** `events --notify` updates the ledger of market firsts, and
+   `weekly --notify --if-due` sends the weekly digest once it is owed: from
+   Monday 14:00 UTC, by the first check after it, so a dropped firing makes
+   the week late rather than lost. Steps 3 to 6 send their output only to
+   `run.log`, which is sealed with the rest.
 7. **Save.** `vault seal` re-encrypts whatever changed; `vault push` replaces
    the `vault` branch with a single commit.
 8. **Tidy `main`.** The `control/` files this check read are removed, applied
@@ -186,11 +188,11 @@ overwrite a check that saved in the meantime.
 
 | File | Name | Runs | What it does |
 |---|---|---|---|
-| `watch.yml` | Check AutoTrader | Fires every 30 minutes (`7,37 * * * *`); on a push to `control/`; on `repository_dispatch` of type `check` or `marketplace`; by hand, optionally as a dry run | The check, as above, taking in a Marketplace batch first when one came with it. A push only counts when the repository owner made it. |
-| `events.yml` | Watchdog | Four times a day (`41 1,7,13,19 * * *`), and Mondays (`20 14 * * 1`) | Alerts when no check has succeeded for six hours, and sends the weekly digest. |
+| `watch.yml` | Check AutoTrader | Fires every 30 minutes (`7,37 * * * *`); on a push to `control/`; on `repository_dispatch` of type `marketplace` (the collector) or `check`; by hand, optionally as a dry run, and by an outside timer the same way (`scripts/keep-time.sh`) | The check, as above, taking in a Marketplace batch first when one came with it. A push only counts when the repository owner made it. |
+| `events.yml` | Watchdog | Every two hours (`41 */2 * * *`) | Alerts when no check has succeeded for six hours. A crash fails the run, so GitHub tells you even then. |
 | `pages.yml` | Publish dashboard | A push to `docs/` or the dashboard code; by hand | Rebuilds and publishes the site from the vault. |
 | `coldstart.yml` | Cold start | Weekly (`23 6 * * 0`); a push to `autotrader/` | Sets up from nothing, watches a generic public search, and checks it once. Never pushes, never touches the vault. |
-| `ci.yml` | Tests | Every push except change files, and pull requests | The suite on three Python versions, and a command-line smoke test. |
+| `ci.yml` | Tests | Every push except change files, and pull requests | The suite on three Python versions, one with a browser and one at another date and zone, and a command-line smoke test. |
 
 Public repositories on standard runners pay nothing for Actions, and the bot
 labels each minute it spends as exempt or not. Should the repository ever draw
@@ -359,8 +361,9 @@ reads is one AutoTrader really served, kept in `tests/fixtures/`, and
 | `test_workflows.py` | The workflows parse, stay one job per check, and keep their schedule promises. |
 | `test_docs.py` | These documents against the code: commands, files, links, and the numbers they quote. |
 
-`sh scripts/time-gate.sh` runs the whole suite at month ends, a leap day and a
-year boundary, in six timezones.
+`sh scripts/time-gate.sh` runs the whole suite at month ends, a leap day, a
+year boundary and both daylight saving changeovers, in six timezones; CI runs
+one of those combinations on every push.
 
 ## When something goes wrong
 

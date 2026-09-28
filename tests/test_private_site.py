@@ -19,17 +19,14 @@ import pytest
 
 from autotrader import vault as V
 
-pytest.importorskip("playwright.sync_api", reason="playwright is not installed")
+from .helpers import need_browser, playwright_or_skip
+
+playwright_or_skip()
 
 DOCS = Path(__file__).resolve().parent.parent / "docs"
 PHOTO = Path(__file__).resolve().parent / "fixtures" / "photo.webp"
 PHRASE = "a long enough test passphrase"
 TITLE = "2018 Example Coupe"
-
-
-def _browser_path() -> str | None:
-    found = sorted(Path("/opt/pw-browsers").glob("chromium-*/chrome-linux/chrome"))
-    return str(found[0]) if found else None
 
 
 class _Quiet(SimpleHTTPRequestHandler):
@@ -88,9 +85,7 @@ def private_site(tmp_path_factory):
 
 @pytest.fixture(scope="module")
 def browser():
-    path = _browser_path()
-    if not path:
-        pytest.skip("no bundled chromium to render with")
+    path = need_browser()
     from playwright.sync_api import sync_playwright
     with sync_playwright() as p:
         b = p.chromium.launch(executable_path=path)

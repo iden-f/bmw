@@ -13,8 +13,8 @@ this page during its build, and that no unit test would have caught:
 
 These are checked by rendering, not by reading the CSS, because in every one
 of those cases the CSS said the right thing and the browser did something
-else. Skipped when playwright or the bundled browser is missing, so the suite
-still runs anywhere.
+else. Skipped when playwright or a browser is missing, so the suite still
+runs anywhere, except where REQUIRE_BROWSER says one was installed.
 """
 
 from __future__ import annotations
@@ -29,24 +29,20 @@ from pathlib import Path
 
 import pytest
 
+from .helpers import browser_path, need_browser, playwright_or_skip
+
 DOCS = Path(__file__).resolve().parent.parent / "docs"
 PHOTO = Path(__file__).resolve().parent / "fixtures" / "photo.webp"
 # What the bot writes into docs/ on a check. The page is tested as published;
 # the data it draws is built here, so none of this is copied from a checkout.
 GENERATED = ("data.json", "events.json", "thumbs", "data.enc", "lock.json")
-CHROME = Path("/opt/pw-browsers/chromium-1194/chrome-linux/chrome")
 WIDTHS = (390, 834, 1440)
 THEMES = ("light", "dark")
 
-playwright = pytest.importorskip("playwright.sync_api",
-                                 reason="playwright is not installed")
+playwright = playwright_or_skip()
 
-
-def _browser_path() -> str | None:
-    if CHROME.exists():
-        return str(CHROME)
-    found = sorted(Path("/opt/pw-browsers").glob("chromium-*/chrome-linux/chrome"))
-    return str(found[0]) if found else None
+# Imported from here by the other page tests.
+_browser_path = browser_path
 
 
 def _demo_payload(root: Path) -> dict:
@@ -147,9 +143,7 @@ def site(tmp_path_factory, payload):
 
 @pytest.fixture(scope="module")
 def browser():
-    path = _browser_path()
-    if not path:
-        pytest.skip("no bundled chromium to render with")
+    path = need_browser()
     from playwright.sync_api import sync_playwright
     with sync_playwright() as p:
         b = p.chromium.launch(executable_path=path)

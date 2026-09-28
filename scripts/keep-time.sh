@@ -2,19 +2,21 @@
 # Ask the AutoTrader watcher for a check, from anywhere, over one HTTP request.
 #
 # Run it from an outside timer to keep checks on time when GitHub's scheduler
-# drops runs. It sends a repository_dispatch event and explains whatever
-# GitHub answers; a reply it does not recognise is printed as it came.
+# drops runs. It starts Check AutoTrader the way its Run workflow button does,
+# marked as a timer so it stands down when a check ran recently, and explains
+# whatever GitHub answers; a reply it does not recognise is printed as it came.
 #
 # Usage
-#   GITHUB_TOKEN=github_pat_... sh scripts/keep-time.sh
-#   sh scripts/keep-time.sh --token github_pat_...   (same thing)
+#   read -rs GITHUB_TOKEN && export GITHUB_TOKEN     (typed, not shown or kept)
+#   sh scripts/keep-time.sh
 #   sh scripts/keep-time.sh --from my-mac            (name this timer)
 #   sh scripts/keep-time.sh --repo owner/name        (another repository)
 #   sh scripts/keep-time.sh --cron                   (quiet; for crontab)
 #
 # The token is a fine-grained personal access token for this repository only,
-# with Repository permissions > Contents set to "Read and write". GitHub files
-# repository_dispatch under Contents, not Actions.
+# with Repository permissions > Actions set to "Read and write" and nothing
+# else. That can start a workflow but not change the code one runs, so a
+# timer that leaks it does not leak the passphrase a check holds.
 #
 # A crontab line that asks every hour (extra requests are deduplicated):
 #   17 * * * * GITHUB_TOKEN=github_pat_... sh /path/to/keep-time.sh --cron
@@ -26,18 +28,21 @@
 set -eu
 
 REPO=""               # --repo owner/name; defaults to this clone's origin
-EVENT="check"          # must match `repository_dispatch: types:` in watch.yml
+WORKFLOW="watch.yml"   # the check, started as its Run workflow button does
+BRANCH="main"          # the branch whose check runs
 FROM="timer"
 QUIET=0
 TOKEN="${GITHUB_TOKEN:-${GH_TOKEN:-}}"
 
 while [ $# -gt 0 ]; do
   case "$1" in
+    # Still taken, but not shown: a token on the command line is in `ps` for
+    # every user of the machine, and in the shell's history.
     --token) TOKEN="$2"; shift 2 ;;
     --from)  FROM="$2";  shift 2 ;;
     --repo)  REPO="$2";  shift 2 ;;
     --cron)  QUIET=1;    shift ;;
-    -h|--help) sed -n '2,25p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h|--help) sed -n '2,27p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) echo "unknown option: $1 (try --help)" >&2; exit 1 ;;
   esac
 done
@@ -51,17 +56,20 @@ fi
 [ -n "$REPO" ] || { echo "Which repository? Pass --repo owner/name." >&2; exit 1; }
 die() { printf '%s\n' "$*" >&2; exit 1; }
 
-[ -n "$TOKEN" ] || die "No token. Set GITHUB_TOKEN, or pass --token github_pat_...
+[ -n "$TOKEN" ] || die "No token. Set GITHUB_TOKEN:
+  read -rs GITHUB_TOKEN && export GITHUB_TOKEN
 Make one at github.com -> Settings -> Developer settings -> Personal access
 tokens -> Fine-grained tokens. Give it access to ONLY $REPO, and under
-Repository permissions set Contents to 'Read and write'. Nothing else."
+Repository permissions set Actions to 'Read and write'. Nothing else."
 
 # The name is printed on the dashboard, so it is bounded here rather than
 # trusted: lowercase, digits, dot and dash, 24 characters.
 FROM=$(printf '%s' "$FROM" | tr '[:upper:]' '[:lower:]' | tr -cd 'a-z0-9.-' | cut -c1-24)
 [ -n "$FROM" ] || FROM="a-timer"
 
-BODY=$(printf '{"event_type":"%s","client_payload":{"from":"%s"}}' "$EVENT" "$FROM")
+# `automatic` makes it a timer's check, which stands down if a check ran
+# recently; `from` is the name the dashboard shows for it.
+BODY=$(printf '{"ref":"%s","inputs":{"automatic":"true","from":"%s"}}' "$BRANCH" "$FROM")
 
 say "Asking $REPO for a check (as \"$FROM\")..."
 
@@ -69,12 +77,15 @@ say "Asking $REPO for a check (as \"$FROM\")..."
 # prints a canned reply.
 CURL="${KEEP_TIME_CURL:-curl}"
 
-OUT=$($CURL -sS -X POST \
+# The token goes to curl on its input, not its command line, where `ps`
+# would show it. printf is built into the shell, so it is not a command
+# with the token on its line either.
+OUT=$(printf 'Authorization: Bearer %s\n' "$TOKEN" | $CURL -sS -X POST \
+  -H @- \
   -H "Accept: application/vnd.github+json" \
-  -H "Authorization: Bearer $TOKEN" \
   -H "X-GitHub-Api-Version: 2022-11-28" \
   -H "Content-Type: application/json" \
-  "https://api.github.com/repos/$REPO/dispatches" \
+  "https://api.github.com/repos/$REPO/actions/workflows/$WORKFLOW/dispatches" \
   -d "$BODY" -w '\n%{http_code}' 2>&1) || die "curl could not reach GitHub:
 $OUT
 Check this machine has a working internet connection."
@@ -89,7 +100,7 @@ case "$CODE" in
     say ""
     say "Look at https://github.com/$REPO/actions within about ten seconds."
     say "A run called \"Check AutoTrader\" should be there, marked"
-    say "repository_dispatch. If the bot checked recently it will finish in"
+    say "workflow_dispatch. If the bot checked recently it will finish in"
     say "about fifteen seconds without reading the site - that is the"
     say "deduplication working, not a failure."
     exit 0 ;;
@@ -98,20 +109,21 @@ case "$CODE" in
 It is mistyped, or it has expired. Fine-grained tokens expire; make a new one." ;;
   403)
     die "HTTP 403 - the token is real but not allowed to do this.
-Almost always: the token is missing 'Contents: Read and write'. Edit the token
+Almost always: the token is missing 'Actions: Read and write'. Edit the token
 at github.com -> Settings -> Developer settings -> Personal access tokens, open
-it, and check Repository permissions. (repository_dispatch is filed under
-Contents, not Actions - that is the usual surprise.)
+it, and check Repository permissions. A token made when this script asked for
+Contents instead: give it Actions: Read and write, and take Contents away.
 GitHub said: $REPLY" ;;
   404)
-    die "HTTP 404 - the token cannot SEE $REPO.
+    die "HTTP 404 - the token cannot SEE $REPO, or $REPO has no $WORKFLOW.
 GitHub returns 404 rather than 403 for a repository a token has no access to,
 so this is an access problem and not a typo in the name (though check the name
 too). Edit the token and make sure $REPO is in 'Only select repositories'." ;;
   415|422)
     die "HTTP $CODE - GitHub rejected the request body.
-This is a bug in this script rather than in anything you did. Please report it
-with this line: $REPLY" ;;
+If $REPO is a fork, bring it up to date (Sync fork): a $WORKFLOW older than this
+script does not take what it sends. Otherwise this is a bug in this script
+rather than in anything you did. Please report it with this line: $REPLY" ;;
   000)
     die "curl got no HTTP response at all.
 Usually a proxy, a firewall, or no DNS. Try: curl -sS https://api.github.com" ;;

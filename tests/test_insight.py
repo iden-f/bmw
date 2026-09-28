@@ -590,3 +590,108 @@ class TestEachEventSaysWhatHappenedToIt:
         entry = state.listings["1"]
         assert len(entry["told"]) == TOLD_KEPT
         assert entry["told_since"] == entry["told"][0]
+
+
+class TestTheWeeklyDigestIsOwedUntilItIsSent:
+    """One Watchdog firing, Monday at 14:20, sent the digest, and nothing
+    recorded that it had. GitHub drops scheduled firings, often in clusters,
+    so a dropped Monday meant no digest that week and no sign of it. Every
+    check asks now, and the first after Monday's hour is told yes."""
+
+    # Monday 5 October 2026, the first day of ISO week 41.
+    MONDAY = "2026-10-05T00:00:00+00:00"
+    BEGAN = "2026-09-01T00:00:00+00:00"
+
+    def due(self, sent, hours, began=BEGAN):
+        from datetime import timedelta
+
+        from autotrader import insight
+        return insight.weekly_due(sent, began,
+                                  now=clock.parse(self.MONDAY) + timedelta(hours=hours))
+
+    def test_not_before_monday_afternoon(self):
+        assert self.due("2026-W40", 13.9) is None
+        assert self.due("2026-W40", -1) is None      # still Sunday
+
+    def test_owed_from_monday_afternoon(self):
+        assert self.due("2026-W40", 14) == "2026-W41"
+
+    def test_a_dropped_monday_is_made_up_later_in_the_week(self):
+        assert self.due("2026-W40", 24 * 3 + 5) == "2026-W41"
+
+    def test_once_a_week(self):
+        assert self.due("2026-W41", 15) is None
+        assert self.due("2026-W41", 24 * 6 + 23) is None
+
+    def test_owed_again_the_next_week(self):
+        assert self.due("2026-W41", 24 * 7 + 14) == "2026-W42"
+
+    def test_a_watch_that_began_after_the_hour_waits_for_next_monday(self):
+        """It has no week to report, and a digest on its first day would
+        break the README's "every Monday" for nothing."""
+        began = "2026-10-05T20:00:00+00:00"
+        assert self.due(None, 30, began=began) is None
+        assert self.due(None, 24 * 7 + 14, began=began) == "2026-W42"
+        assert self.due(None, 30, began=None) is None   # never checked at all
+
+    def test_a_watch_that_was_running_is_owed_its_first(self):
+        assert self.due(None, 15) == "2026-W41"
+
+    def test_the_week_is_named_as_iso_names_it_across_new_year(self):
+        """Friday 1 January 2027 is in the 53rd week of 2026."""
+        from autotrader import insight
+        new_year = clock.parse("2027-01-01T12:00:00+00:00")
+        assert insight.weekly_due("2026-W52", self.BEGAN, now=new_year) == "2026-W53"
+        assert insight.weekly_due("2026-W53", self.BEGAN, now=new_year) is None
+
+
+class TestTheCheckSendsTheWeek:
+    """`weekly --notify --if-due`, which every check runs."""
+
+    MONDAY_AFTERNOON = "2026-10-05T15:07:00+00:00"
+
+    def setup(self, tmp_path, monkeypatch, *, ok=True):
+        from autotrader import cli
+        from autotrader.config import Config
+        from autotrader.notifiers import Result
+        from autotrader.state import State
+        monkeypatch.chdir(tmp_path)
+        Config.defaults(tmp_path / "config.json").save()
+        state = State(path=tmp_path / "state.json")
+        state.data["first_ok_at"] = "2026-09-01T00:00:00+00:00"
+        state.save()
+        sent = []
+
+        def alert(cfg, subject, body, env=None, notifiers=None):
+            sent.append(subject)
+            return [Result("capture", ok)]
+        monkeypatch.setattr(cli.notifiers, "alert", alert)
+        clock.freeze(self.MONDAY_AFTERNOON)
+
+        def weekly():
+            return cli.main(["--no-colour", "--config", str(tmp_path / "config.json"),
+                             "--state", str(tmp_path / "state.json"),
+                             "weekly", "--notify", "--if-due"])
+        return weekly, sent, lambda: State.load(tmp_path / "state.json")
+
+    def test_the_first_check_after_the_hour_sends_it_once(self, tmp_path, monkeypatch):
+        weekly, sent, state = self.setup(tmp_path, monkeypatch)
+        assert weekly() == 0
+        assert sent == ["AutoTrader: your last 7 days"]
+        assert state().data["weekly_sent"] == "2026-W41"
+        assert weekly() == 0
+        assert len(sent) == 1, "sent twice in one week"
+
+    def test_a_week_no_channel_carried_is_still_owed(self, tmp_path, monkeypatch):
+        weekly, sent, state = self.setup(tmp_path, monkeypatch, ok=False)
+        assert weekly() == 1
+        assert "weekly_sent" not in state().data
+        assert weekly() == 1
+        assert len(sent) == 2, "the next check did not try again"
+
+    def test_before_the_hour_it_sends_nothing(self, tmp_path, monkeypatch):
+        weekly, sent, state = self.setup(tmp_path, monkeypatch)
+        clock.freeze("2026-10-05T13:37:00+00:00")
+        assert weekly() == 0
+        assert sent == []
+        assert "weekly_sent" not in state().data

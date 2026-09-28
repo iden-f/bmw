@@ -20,10 +20,12 @@ QUIET=0
 #   leap day                - date construction that assumes 28 days
 #   new year's eve, UTC+14  - already tomorrow somewhere, still last year here
 #   31st                    - months that have no 31st
-#   DST changeovers         - an hour that is skipped or repeated
+#   DST changeovers         - an hour that is skipped or repeated: just after
+#                             North America springs forward, and inside the
+#                             hour New York repeats when it falls back
 DATES="2026-09-30T23:58:00Z 2026-10-01T00:02:00Z 2028-02-29T12:00:00Z
        2026-12-31T23:59:00Z 2027-01-01T00:01:00Z 2026-01-31T12:00:00Z
-       2026-03-29T01:30:00Z 2026-11-01T05:30:00Z"
+       2026-03-08T07:30:00Z 2026-11-01T05:30:00Z"
 
 # Zones chosen for the extremes and the awkward offsets.
 #   Kiritimati  UTC+14, the furthest ahead of UTC any place is

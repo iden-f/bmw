@@ -26,9 +26,9 @@ locked dashboard on GitHub Pages. No server, no other accounts, no cost.
   Price rises, cars leaving the site and every relisting are on the dashboard,
   and can be alerts too.
 - **It says when it breaks.** A search that fails three checks in a row, or
-  stays unreadable for six hours, raises an alert. A separate watchdog raises
-  one when no check has succeeded for six hours, because a watch cannot
-  report its own absence.
+  stays unreadable for six hours, raises an alert. A separate watchdog, which
+  fires every two hours, raises one when no check has succeeded for six
+  hours, because a watch cannot report its own absence.
 - **Facebook Marketplace too, if you like.** A Mac at home can read your
   searches on Marketplace and send what it finds here, where the same rules,
   alerts and dashboard apply; see [Facebook Marketplace](#facebook-marketplace).
@@ -115,6 +115,8 @@ That is all. From then on a check is due every two hours, and runs by itself.
   one on its next visit. Copies made under the old passphrase - old change
   files in the repository's history, or a snapshot someone kept - stay
   readable with it; if it truly leaked, start again in a fresh repository.
+  A Mac that runs the [Marketplace collector](#facebook-marketplace) needs
+  the new one too: run `collector/run setup --secrets` on it.
 - **A lost passphrase cannot be recovered.** Set a new `WATCH_PASSPHRASE`,
   delete the `vault` branch and run a check: it starts over with an empty
   vault and a new ntfy topic, and you add your searches again.
@@ -207,12 +209,15 @@ turned away with an anti-bot page counts as the last check. The Status tab
 shows which two-hour windows had a check and what started each one.
 
 For a clock that does not depend on GitHub's scheduler, point an outside timer
-at it. `scripts/keep-time.sh` asks for a check through `repository_dispatch`,
-using a fine-grained token with **Contents: Read and write** on your fork and
-nothing else:
+at it. `scripts/keep-time.sh` starts **Check AutoTrader** the way its *Run
+workflow* button does, marked as a timer, using a fine-grained token with
+**Actions: Read and write** on your fork and nothing else. That token can
+start a check but cannot change the code a check runs with your passphrase,
+so a timer service that leaks it leaks nothing more:
 
 ```sh
-GITHUB_TOKEN=github_pat_... sh scripts/keep-time.sh --repo <you>/<repo> --from laptop
+read -rs GITHUB_TOKEN && export GITHUB_TOKEN   # typed, not shown or kept
+sh scripts/keep-time.sh --repo <you>/<repo> --from laptop
 ```
 
 It prints what GitHub replied and what to do about it. Run it hourly from
@@ -225,14 +230,17 @@ With [cron-job.org](https://cron-job.org) (free), create a job with:
 
 | Field | Value |
 |---|---|
-| URL | `https://api.github.com/repos/<you>/<repo>/dispatches` |
+| URL | `https://api.github.com/repos/<you>/<repo>/actions/workflows/watch.yml/dispatches` |
 | Schedule | fires every 30 minutes |
 | Request method | `POST` |
 | Headers | `Authorization: Bearer <token>`, `Accept: application/vnd.github+json` |
-| Request body | `{"event_type":"check","client_payload":{"from":"cron-job"}}` |
+| Request body | `{"ref":"main","inputs":{"automatic":"true","from":"cron-job"}}` |
 
 A test run answers `204` when it works. The Status tab then shows checks kept
-by "cron-job (an outside timer)".
+by "cron-job (an outside timer)". A timer that sends `repository_dispatch` of
+type `check` is still taken, but that needs a token with **Contents: Read and
+write**, which can also change the code a check runs: move such a timer to
+the URL and body above, with a token like the one above.
 
 ## Facebook Marketplace
 
@@ -271,10 +279,14 @@ would.
 ## Stopping it
 
 To pause, disable **Check AutoTrader** and **Watchdog** (Actions → the
-workflow → ⋯ → *Disable workflow*), and enable them again to carry on. To
-stop for good, also disable **Cold start**, set Settings → Pages → Branch to
-*None*, and delete the `vault` and `gh-pages` branches, or delete the whole
-repository. Alerts already delivered stay where they were delivered.
+workflow → ⋯ → *Disable workflow*), and stop any outside timer. On a Mac that
+runs the Marketplace collector, run `collector/run uninstall` too: otherwise
+it keeps reading Facebook for a watch that takes nothing in. Enable the
+workflows again, and run `collector/run install`, to carry on. To stop for
+good, also disable **Cold start**, run `collector/run forget` on each
+collector Mac, set Settings → Pages → Branch to *None*, and delete the
+`vault` and `gh-pages` branches, or delete the whole repository. Alerts
+already delivered stay where they were delivered.
 
 ## Running it locally
 
@@ -325,7 +337,10 @@ python -m pytest -q
 
 The suite makes no network requests: it reads pages AutoTrader really served,
 kept in `tests/fixtures/`. The browser tests skip themselves unless
-Playwright's Chromium is installed under `/opt/pw-browsers`.
+Playwright has a Chromium to drive:
+`python -m playwright install chromium` gives it one. CI installs one for
+one of its Python versions, and there a browser test that finds none fails
+instead (`REQUIRE_BROWSER=1`).
 `PY=python sh scripts/time-gate.sh` runs the whole suite at awkward dates in
 awkward timezones.
 

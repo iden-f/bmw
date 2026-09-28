@@ -1184,6 +1184,14 @@ def cmd_weekly(args: argparse.Namespace) -> int:
 
     cfg = Config.load(args.config)
     state = State.load(args.state)
+    week = None
+    if args.if_due:
+        # Every check asks; the first after Monday's hour is told yes.
+        week = insight.weekly_due(state.data.get("weekly_sent"),
+                                  state.data.get("first_ok_at"))
+        if week is None:
+            print("The weekly digest is not due.")
+            return 0
     summary = insight.weekly(state.listings.values(),
                              state.data.get("runs") or [], days=args.days)
     text = insight.weekly_text(summary)
@@ -1193,7 +1201,12 @@ def cmd_weekly(args: argparse.Namespace) -> int:
             cfg, f"AutoTrader: your last {args.days} days", text, dict(os.environ))
         for result in results:
             print(f"   {result}")
-        return 0 if any(r.ok for r in results) else 1
+        sent = any(r.ok for r in results)
+        if sent and week:
+            # Only once a channel took it: a week nothing carried is still owed.
+            state.data["weekly_sent"] = week
+            state.save()
+        return 0 if sent else 1
     return 0
 
 
@@ -1386,6 +1399,9 @@ def build_parser() -> argparse.ArgumentParser:
                    help="send the summary to your channels")
     p.add_argument("--days", type=int, default=7,
                    help="how many days to summarise (default 7)")
+    p.add_argument("--if-due", action="store_true",
+                   help="only if this week's digest is owed and not yet sent "
+                        "(what a check runs)")
     p.set_defaults(func=cmd_weekly)
 
     p = sub.add_parser("control", help="apply changes sent from the dashboard")

@@ -528,7 +528,7 @@ class TestThePageTheyDescribe:
         page = "".join((ROOT / "docs" / f).read_text(encoding="utf-8")
                        for f in ("index.html", "app.js"))
         workflows = {workflow(p)["name"] for p in WORKFLOWS.glob("*.yml")}
-        github = {"Commit changes", "Contents: Read and write"}
+        github = {"Commit changes", "Contents: Read and write", "Actions: Read and write"}
         body = re.sub(r"```.*?```", "", text("README.md"), flags=re.S)
         # A list item's or quote's own bold title is not a label.
         body = re.sub(r"(?m)^(\s*(?:[-*>]|\d+\.)\s+)\*\*[^*]+\*\*", r"\1", body)
@@ -762,3 +762,64 @@ def test_hidden_cars_really_are_kept_and_explained(tmp_path):
     assert [l["id"] for l in hidden] == ["dear"]
     assert all(l.get("filter_reason") for l in hidden)
     assert {l["id"] for l in payload["listings"]} == {"cheap", "dear"}
+
+
+# ------------------------------------------------------------ the collector
+
+def _collector_parser() -> argparse.ArgumentParser:
+    """collector/run's own parser, caught as its main() builds it."""
+    from collector import __main__ as collector_main
+
+    class Caught(Exception):
+        pass
+
+    parsers = []
+
+    def catch(self, args=None, namespace=None):
+        parsers.append(self)
+        raise Caught
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(argparse.ArgumentParser, "parse_args", catch)
+        with pytest.raises(Caught):
+            collector_main.main([])
+    return parsers[0]
+
+
+class TestTheCollectorStepsTheyGive:
+    """The collector runs on a Mac nobody is looking at. A step that leaves it
+    out leaves it reading Facebook for a watch that takes nothing in, or
+    failing every pass on a passphrase it was never given."""
+
+    ALL = (*DOCS, "collector/README.md")
+
+    @pytest.mark.parametrize("doc", ALL)
+    def test_every_collector_command_is_one_it_takes(self, doc):
+        parser = _collector_parser()
+        commands = [c.split() for c in re.findall(r"collector/run((?: [a-z-]+| --[a-z-]+)+)",
+                                                  text(doc))]
+        assert commands or doc == "HOW-IT-WORKS.md", f"{doc} names no collector command"
+        for words in commands:
+            try:
+                parser.parse_args(words)
+            except SystemExit:
+                pytest.fail(f"{doc}: collector/run {' '.join(words)} is not a command it takes")
+
+    def section(self, title):
+        return flat("README.md").split(f"## {title}")[1].split(" ## ")[0]
+
+    def test_stopping_the_watch_stops_the_collector(self):
+        stop = self.section("Stopping it")
+        assert "`collector/run uninstall`" in stop
+        assert "`collector/run forget`" in stop
+
+    def test_a_new_passphrase_reaches_the_collector(self):
+        bullet = flat("README.md").split("**Changing the passphrase.**")[1].split(" - **")[0]
+        assert "`collector/run setup --secrets`" in bullet
+
+    def test_updating_it_installs_the_versions_it_pins(self):
+        """`collector/run install` restarts it and installs nothing, so a pin
+        that moved left it on the old packages."""
+        update = flat("collector/README.md").split("To update:")[1].split(". ")[0]
+        assert "pip install -r requirements.txt -r collector/requirements.txt" in update
+        assert update.index("pip install") < update.index("collector/run install")

@@ -8,5 +8,13 @@
 # first place that showed was a hand-run of the script printing
 # `GitHub said: {"message":"..."}}` - which reads as a bug in the thing being
 # handed over.
+#
+# With FAKE_RECORD set it also writes down how it was called: its arguments,
+# one to a line, then what it was given on its input, so a test can see
+# where the token went. Its input is read only then, so a run without it
+# never waits on a terminal.
+if [ -n "${FAKE_RECORD:-}" ]; then
+  { printf '%s\n' "$@"; printf '%s\n' '--- input'; cat; } > "$FAKE_RECORD"
+fi
 body=${FAKE_BODY-'{}'}
 printf '%s\n%s' "$body" "${FAKE_CODE:-204}"

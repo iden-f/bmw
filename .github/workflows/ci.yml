@@ -7,17 +7,23 @@ on:
   pull_request:
   workflow_dispatch:
 
+# Read only. This runs whatever the test requirements install, and a token
+# that could push would let one of them change the code a check runs with
+# the passphrase.
+permissions:
+  contents: read
+
 jobs:
   test:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
         python: ['3.10', '3.11', '3.12']
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: ${{ matrix.python }}
           cache: pip
@@ -25,7 +31,26 @@ jobs:
             requirements.txt
             requirements-dev.txt
       - run: pip install -r requirements.txt -r requirements-dev.txt
-      - run: python -m pytest -q
+      # One leg drives a real browser, so the page, the locked site and the
+      # collector are tested on every push, not only where a browser happens
+      # to be installed.
+      - name: Install a browser
+        if: matrix.python == '3.11'
+        run: python -m playwright install --with-deps chromium
+      - name: Test
+        env:
+          # There, a browser test that finds no browser fails rather than
+          # skipping, so a green run means the page was opened.
+          REQUIRE_BROWSER: ${{ matrix.python == '3.11' && '1' || '' }}
+        run: python -m pytest -q
+      # One of the dates and zones scripts/time-gate.sh runs, on another leg:
+      # already the new year here, still the old one in UTC.
+      - name: Test on another day, in another zone
+        if: matrix.python == '3.10'
+        env:
+          TZ: Pacific/Kiritimati
+          AUTOTRADER_NOW: '2027-01-01T00:01:00Z'
+        run: python -m pytest -q
       - name: Command-line smoke test
         run: |
           python -m autotrader --config /tmp/c.json --state /tmp/s.json list

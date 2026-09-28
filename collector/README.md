@@ -56,6 +56,9 @@ collector/run setup
    Repository access: only your watch's repository. Permissions:
    **Contents: Read and write**, nothing else. Pick an expiry date and put it
    in your calendar: when it expires the collector stops and the bot says so.
+   This token can change the code your checks run with the passphrase, so
+   guard it as you guard the passphrase: it lives in this Mac's Keychain and
+   nowhere else.
 2. **Your passphrase**: the one in the `WATCH_PASSPHRASE` secret, which also
    unlocks the dashboard. The collector uses it to read your searches and to
    seal what it sends.
@@ -102,7 +105,9 @@ Facebook separately (`collector/run login` on it too).
 | `collector/run uninstall` | Stop it, and stop it starting at login |
 | `collector/run forget` | Remove the service, the Keychain items and the browser profile |
 
-To update: `git pull`, then `collector/run install` to restart it.
+To update: `git pull`, then
+`.venv/bin/pip install -r requirements.txt -r collector/requirements.txt` for
+any new versions it pins, then `collector/run install` to restart it.
 
 Its log is `~/Library/Application Support/AutoTrader Watch/collector.log`.
 Everything it keeps (settings, the browser profile, a small memory of which

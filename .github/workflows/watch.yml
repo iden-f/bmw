@@ -14,10 +14,13 @@ on:
   push:
     branches: [main]
     paths: ['control/**']
-  # An outside timer can ask for a check (scripts/keep-time.sh), and the
-  # Marketplace collector sends what it read, sealed (collector/).
+  # The Marketplace collector sends what it read, sealed (collector/).
+  # `check` is taken from an outside timer that still asks this way.
   repository_dispatch:
     types: [check, marketplace]
+  # By hand, or by an outside timer (scripts/keep-time.sh) through the same
+  # button's API. Starting a workflow needs a token that can only start one;
+  # repository_dispatch needs one that can also change the code it runs.
   workflow_dispatch:
     inputs:
       dry_run:
@@ -28,6 +31,10 @@ on:
         description: 'Treat this as a scheduled check (stand down if one ran recently)'
         type: boolean
         default: false
+      from:
+        description: 'The name of the outside timer asking. Leave it empty.'
+        type: string
+        default: ''
 
 concurrency:
   group: autotrader-watch
@@ -50,7 +57,7 @@ jobs:
       # The branch as it is now, not the commit the event fired on. A run
       # queued behind another would otherwise check out change files that
       # the other run already read and tidied away.
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           ref: ${{ github.ref }}
 
@@ -64,7 +71,7 @@ jobs:
             echo "stop=1" >> "$GITHUB_OUTPUT"
           fi
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         if: ${{ !steps.guard.outputs.stop }}
         with:
           python-version: '3.11'
@@ -101,9 +108,10 @@ jobs:
           REPO_VISIBILITY:     ${{ github.event.repository.visibility }}
           RUN_TRIGGER:         ${{ github.event_name }}
           DISPATCH_TYPE:       ${{ github.event.action }}
+          DRY_RUN:             ${{ inputs.dry_run }}
           AUTOTRADER_SCHEDULED: ${{ (github.event_name == 'schedule'
             || github.event_name == 'repository_dispatch'
-            || inputs.automatic) && '1' || '' }}
+            || inputs.automatic || inputs.from) && '1' || '' }}
           TELEGRAM_BOT_TOKEN:  ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID:    ${{ secrets.TELEGRAM_CHAT_ID }}
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
@@ -117,18 +125,23 @@ jobs:
           TWILIO_TO:           ${{ secrets.TWILIO_TO }}
         run: |
           set +e
+          # Whatever a caller sent arrives through the environment or the
+          # event file, never pasted into this script.
+          if [ "$DRY_RUN" = true ]; then dry=--dry-run; else dry=; fi
           {
             python -m autotrader --no-colour setup --non-interactive
             if [ -d control ]; then python -m autotrader --no-colour control control; fi
-            # Read from the event file, never interpolated into this script.
             if [ "$RUN_TRIGGER" = repository_dispatch ] && [ "$DISPATCH_TYPE" = marketplace ]; then
               python -m autotrader --no-colour marketplace ingest
               echo "$?" > "$RUNNER_TEMP/ingest"
             fi
-            python -m autotrader --no-colour run ${{ inputs.dry_run && '--dry-run' || '' }}
+            python -m autotrader --no-colour run $dry
             echo "$?" > "$RUNNER_TEMP/status"
-            if [ "${{ inputs.dry_run }}" != "true" ]; then
+            if [ -z "$dry" ]; then
               python -m autotrader --no-colour events --notify
+              # The first check after Monday 14:00 UTC sends the week, so a
+              # dropped firing delays it rather than losing it.
+              python -m autotrader --no-colour weekly --notify --if-due
             fi
           } > run.log 2>&1
           status=$(cat "$RUNNER_TEMP/status")
@@ -160,7 +173,9 @@ jobs:
           git commit -q -m "Tidy up after a check [skip ci]"
           for attempt in 1 2 3 4 5; do
             git rebase --abort 2>/dev/null || true
-            if git pull -q --rebase origin "$GITHUB_REF_NAME" && \
+            # --autostash: the check restamps docs/sw.js when the page
+            # changed without it, and a pull refuses a changed tracked file.
+            if git pull -q --rebase --autostash origin "$GITHUB_REF_NAME" && \
                git push -q origin "HEAD:$GITHUB_REF_NAME"; then
               exit 0
             fi

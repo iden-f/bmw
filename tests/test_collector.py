@@ -22,16 +22,12 @@ from autotrader import vault as V
 from autotrader.config import Config
 from autotrader.state import State
 
+from .helpers import need_browser, playwright_or_skip
 from .test_marketplace import SEARCH_URL, api_reply, item_page, node, search_page
 
-pytest.importorskip("playwright.sync_api", reason="playwright is not installed")
+playwright_or_skip()
 
 PHRASE = "a long enough test passphrase"
-
-
-def _browser_path() -> str | None:
-    found = sorted(Path("/opt/pw-browsers").glob("chromium-*/chrome-linux/chrome"))
-    return str(found[0]) if found else None
 
 
 SCROLL_JS = """
@@ -140,9 +136,7 @@ def _serve(handler):
 
 @pytest.fixture
 def world(tmp_path, monkeypatch):
-    chrome = _browser_path()
-    if not chrome:
-        pytest.skip("no bundled chromium to drive")
+    chrome = need_browser()
     from collector import settings as S
     from collector.github import GitHub
 

@@ -1763,28 +1763,35 @@ def _write_the_run_down(cfg: Config, state: State, report: "RunReport",
 
 
 # Which timer started this check, named so a person can find it. An outside
-# repository_dispatch caller names itself in client_payload.from, and that
-# name reaches the dashboard, so it is limited to lowercase letters, digits,
-# dot and dash, at most 24 characters.
+# timer names itself: in client_payload.from on a repository_dispatch, or in
+# the `from` input when it starts the workflow the way its Run workflow
+# button does (scripts/keep-time.sh). That name reaches the dashboard, so it
+# is limited to lowercase letters, digits, dot and dash, at most 24
+# characters.
 _TRIGGER_FROM = re.compile(r"[^a-z0-9.\-]+")
 
 
 def _trigger_of(env: dict[str, str]) -> str:
     how = str(env.get("RUN_TRIGGER") or "").strip() or "manual"
-    if how != "repository_dispatch":
+    if how not in ("repository_dispatch", "workflow_dispatch"):
         return how
-    who = _TRIGGER_FROM.sub("", _caller_name(env).strip().lower())
-    return f"{how}:{who[:24]}" if who else how
+    who = _TRIGGER_FROM.sub("", _caller_name(env, how).strip().lower())[:24]
+    if not who:
+        return how
+    # A named workflow_dispatch is a timer, not a person at the button, and
+    # is counted as the outside timer it is.
+    return f"repository_dispatch:{who}"
 
 
-def _caller_name(env: dict[str, str]) -> str:
-    """client_payload.from, read from the event file rather than passed in
-    the step's environment, which Actions prints in its public log."""
+def _caller_name(env: dict[str, str], how: str) -> str:
+    """The name an outside timer gave, read from the event file rather than
+    passed in the step's environment, which Actions prints in its public log."""
     if env.get("RUN_TRIGGER_FROM"):
         return str(env["RUN_TRIGGER_FROM"])
     try:
         event = json.loads(Path(env.get("GITHUB_EVENT_PATH") or "").read_text(encoding="utf-8"))
-        return str((event.get("client_payload") or {}).get("from") or "")
+        part = "inputs" if how == "workflow_dispatch" else "client_payload"
+        return str((event.get(part) or {}).get("from") or "")
     except (OSError, ValueError, AttributeError):
         return ""
 

@@ -1,6 +1,5 @@
 import json
 import os
-import time
 
 from autotrader.archive import archive_listing, prune, size_report
 from autotrader.listing import Listing
@@ -66,12 +65,17 @@ def test_dry_run_deletes_nothing(tmp_path):
 
 
 def test_a_folder_with_no_stamp_is_dated_by_when_it_was_written(tmp_path):
+    """Both folders dated by the bot's clock, which prune measures against:
+    with AUTOTRADER_NOW set (scripts/time-gate.sh), the host's is another day."""
+    from autotrader import clock
+    now = clock.now().timestamp()
     folder = tmp_path / "old"; folder.mkdir()
-    (tmp_path / "new").mkdir()
-    long_ago = time.time() - 3 * 365 * 86400
+    new = tmp_path / "new"; new.mkdir()
+    long_ago = now - 3 * 365 * 86400
     os.utime(folder, (long_ago, long_ago))
+    os.utime(new, (now, now))
     assert prune({"keep_days": 30, "keep_last": 0}, root=tmp_path) == ["old"]
-    assert (tmp_path / "new").exists()
+    assert new.exists()
 
 
 def test_size_report_separates_pages_from_photos(tmp_path):

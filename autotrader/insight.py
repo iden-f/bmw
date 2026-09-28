@@ -9,7 +9,7 @@ be run over a fixture and checked.
 from __future__ import annotations
 
 import statistics
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any, Iterable
 
 from . import clock, words
@@ -694,6 +694,36 @@ def minutes_spent(runs: list[dict[str, Any]], window_hours: int = 24,
 
 
 # ---------------------------------------------------------------- the week
+
+# The digest is owed from Monday at this hour, UTC, and the first check after
+# it sends it. One firing at the hour would lose the week whenever GitHub
+# dropped that firing; a check that finds it owed sends it late instead.
+WEEKLY_HOUR = 14
+
+
+def weekly_due(sent: str | None, began: str | None,
+               now: datetime | None = None) -> str | None:
+    """The week whose digest is owed now, as "2026-W40", or None.
+
+    ``sent`` is the week last sent. ``began`` is when the watch first checked
+    successfully: one that began after this week's hour has no week to report
+    on yet, so its first digest is the next Monday's.
+    """
+    now = (now or clock.now()).astimezone(timezone.utc)
+    monday = (now - timedelta(days=now.weekday())).replace(
+        hour=WEEKLY_HOUR, minute=0, second=0, microsecond=0)
+    if now < monday:
+        return None
+    year, week, _ = now.isocalendar()
+    label = f"{year}-W{week:02d}"
+    if sent == label:
+        return None
+    if not sent:
+        start = _dt(began)
+        if start is None or start > monday:
+            return None
+    return label
+
 
 def weekly(entries: Iterable[dict[str, Any]], runs: list[dict[str, Any]],
            days: int = 7, now: datetime | None = None) -> dict[str, Any]:

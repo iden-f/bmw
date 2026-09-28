@@ -363,6 +363,10 @@ class TestAnOutsideTimerCannotDoubleScrape:
         marker = step["env"]["AUTOTRADER_SCHEDULED"]
         assert "repository_dispatch" in marker
         assert "schedule" in marker
+        # A timer that starts the workflow names itself, and a name alone
+        # makes it one: a hosted cron job that left `automatic` out of its
+        # body would otherwise read the site on every firing.
+        assert "inputs.from" in marker
 
     def test_a_named_outside_timer_still_counts_as_a_schedule(self):
         """The name must not stop it counting. Matching the whole string

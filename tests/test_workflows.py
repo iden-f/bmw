@@ -500,3 +500,284 @@ def test_publish_dashboard_never_changes_the_passphrase():
     from autotrader import vault as V
     text = (HERE / "pages.yml").read_text()
     assert V.ENV_PREVIOUS not in re.sub(r"#.*", "", text)
+
+
+# ---------------------------------------------------- what reaches a script
+
+def _run_scripts(doc: dict):
+    for name, job in (doc.get("jobs") or {}).items():
+        for step in job.get("steps") or []:
+            if isinstance(step.get("run"), str):
+                yield f"{name}: {step.get('name') or step['run'].splitlines()[0]}", step["run"]
+
+
+@pytest.mark.parametrize("path", WORKFLOWS, ids=lambda p: p.name)
+def test_nothing_a_caller_sends_is_pasted_into_a_script(path: Path):
+    """`${{ }}` is pasted into a script's text before the shell reads it, so a
+    value someone else chose - a dispatch's input, an event's field - is
+    code there. Anyone with a token that can start the check chooses its
+    inputs. Values reach a script through `env:`, where they stay values."""
+    for where, script in _run_scripts(_load(path)):
+        assert "${{" not in script, f"{path.name}: {where} pastes an expression"
+
+
+@pytest.mark.parametrize("path", WORKFLOWS, ids=lambda p: p.name)
+def test_every_workflow_says_what_its_token_may_do(path: Path):
+    """Without a `permissions` block the token gets the repository's
+    default, which may be read and write."""
+    assert "permissions" in _load(path), f"{path.name} leaves its token at the default"
+
+
+def test_the_tests_cannot_push():
+    """ci.yml installs unpinned test requirements on every push. With a token
+    that could push, one of them could change the code the next check runs
+    with the passphrase."""
+    perms = _load(HERE / "ci.yml")["permissions"]
+    assert perms == {"contents": "read"}, perms
+
+
+@pytest.mark.parametrize("path", WORKFLOWS, ids=lambda p: p.name)
+def test_secrets_reach_only_the_steps_that_use_them(path: Path):
+    """A secret in a job's `env` is in every step's, the checkout and the
+    install of other people's code included."""
+    doc = _load(path)
+    assert "secrets." not in str(doc.get("env") or ""), f"{path.name}: workflow env"
+    for name, job in (doc.get("jobs") or {}).items():
+        assert "secrets." not in str(job.get("env") or ""), f"{path.name}: job {name}"
+
+
+#: The first release of each action that runs on Node 24. GitHub has retired
+#: Node 20, which the releases before these run on.
+NODE_24 = {"actions/checkout": 5, "actions/setup-python": 6}
+
+
+@pytest.mark.parametrize("path", WORKFLOWS, ids=lambda p: p.name)
+def test_no_action_runs_on_a_retired_node(path: Path):
+    used = re.findall(r"uses:\s*([\w.-]+/[\w.-]+)@v(\d+)", path.read_text(encoding="utf-8"))
+    assert used, f"{path.name} uses no action"
+    for action, major in used:
+        if action in NODE_24:
+            assert int(major) >= NODE_24[action], f"{path.name}: {action}@v{major}"
+
+
+# ------------------------------------------------- running a step's script
+
+#: Stands in for python: writes down how it was called, and fails for any
+#: word in SHIM_FAIL.
+_PYTHON = r"""#!/bin/sh
+printf '%s\n' "$*" >> "$SHIM_CALLS"
+case " $* " in
+  *" vault pull "*) mkdir -p vault && : > vault/meta.json ;;
+  *" vault paths "*) echo config.json ;;
+esac
+for failing in ${SHIM_FAIL:-}; do
+  case " $* " in *" $failing "*) exit 1 ;; esac
+done
+exit 0
+"""
+
+
+def _step(path: Path, name: str) -> dict:
+    for job in (_load(path).get("jobs") or {}).values():
+        for step in job.get("steps") or []:
+            if step.get("name") == name:
+                return step
+    raise AssertionError(f"{path.name} has no step named {name!r}")
+
+
+def _run_step(path: Path, name: str, cwd: Path, tmp_path: Path, **env):
+    """A step's own script, run as GitHub runs it (`bash -e`), with python
+    and sleep stood in for. Returns the result and each call to python."""
+    import os
+    import subprocess
+    shims = tmp_path / "shims"
+    shims.mkdir(exist_ok=True)
+    for program, body in (("python", _PYTHON), ("sleep", "#!/bin/sh\nexit 0\n")):
+        (shims / program).write_text(body)
+        (shims / program).chmod(0o755)
+    calls = tmp_path / "calls.txt"
+    calls.write_text("")
+    script = tmp_path / "step.sh"
+    script.write_text(_step(path, name)["run"])
+    environ = {**os.environ, "PATH": f"{shims}{os.pathsep}{os.environ['PATH']}",
+               "SHIM_CALLS": str(calls), "RUNNER_TEMP": str(tmp_path), **env}
+    out = subprocess.run(["bash", "-e", str(script)], cwd=cwd, env=environ,
+                         capture_output=True, text=True, timeout=120)
+    return out, calls.read_text().splitlines()
+
+
+class TestTheCheckStep:
+    def test_it_sends_the_week_after_the_check(self, tmp_path):
+        """The weekly digest rides on the check: every one asks whether the
+        week is owed, so no one dropped firing can lose it."""
+        out, calls = _run_step(WATCH, "Check", tmp_path, tmp_path,
+                               DRY_RUN="false", RUN_TRIGGER="schedule")
+        assert out.returncode == 0, out.stdout + out.stderr
+        bot = [c.split("--no-colour ", 1)[-1] for c in calls]
+        assert bot.index("run") < bot.index("events --notify") \
+            < bot.index("weekly --notify --if-due"), bot
+
+    def test_a_dry_run_sends_nothing(self, tmp_path):
+        out, calls = _run_step(WATCH, "Check", tmp_path, tmp_path,
+                               DRY_RUN="true", RUN_TRIGGER="workflow_dispatch")
+        assert out.returncode == 0, out.stdout + out.stderr
+        assert any(c.endswith("run --dry-run") for c in calls), calls
+        assert not any("--notify" in c for c in calls), calls
+
+    def test_a_dry_run_that_is_not_a_boolean_is_a_word_not_a_command(self, tmp_path):
+        """Pasted into the script, `true; touch pwned` ran; through env it
+        is only a value that is not "true"."""
+        out, calls = _run_step(WATCH, "Check", tmp_path, tmp_path,
+                               DRY_RUN="true; touch pwned", RUN_TRIGGER="workflow_dispatch")
+        assert out.returncode == 0, out.stdout + out.stderr
+        assert not (tmp_path / "pwned").exists()
+
+
+class TestTheWatchdogStep:
+    def test_a_crash_fails_the_run_once_the_vault_is_saved(self, tmp_path):
+        """`events` finishes with 0 whenever it ran. It was followed by
+        `|| true`, so a crash left the job green, sent no alarm and showed
+        nothing - the one thing that reports silence failing silently."""
+        out, calls = _run_step(HERE / "events.yml", "Look for silence", tmp_path,
+                               tmp_path, SHIM_FAIL="events")
+        assert out.returncode == 1, out.stdout + out.stderr
+        assert "::error::" in out.stdout, out.stdout
+        assert any("vault seal" in c for c in calls), calls
+        assert any("vault push --lease" in c for c in calls), calls
+
+    def test_a_watchdog_that_ran_is_green(self, tmp_path):
+        out, calls = _run_step(HERE / "events.yml", "Look for silence", tmp_path, tmp_path)
+        assert out.returncode == 0, out.stdout + out.stderr
+        assert "::error::" not in out.stdout
+
+    def test_it_says_nothing_private_when_it_fails(self, tmp_path):
+        out, _ = _run_step(HERE / "events.yml", "Look for silence", tmp_path,
+                           tmp_path, SHIM_FAIL="events")
+        assert out.stdout.count("\n") <= 2, out.stdout
+
+
+def _fires(cron: str) -> list[int]:
+    """The minutes of the day a daily cron line fires on."""
+    minute, hour, day, month, weekday = cron.split()
+    assert (day, month, weekday) == ("*", "*", "*"), f"not daily: {cron!r}"
+
+    def field(text: str, span: int) -> list[int]:
+        if text == "*":
+            return list(range(span))
+        if text.startswith("*/"):
+            return list(range(0, span, int(text[2:])))
+        return [int(v) for v in text.split(",")]
+    return sorted(h * 60 + m for h in field(hour, 24) for m in field(minute, 60))
+
+
+def test_the_silence_alarm_comes_soon_after_the_silence():
+    """No check for six hours raises the alarm, and only when the watchdog
+    looks. Looking every six hours let it come twelve hours after the last
+    check, and eighteen when GitHub dropped one firing."""
+    from autotrader.config import DEFAULTS
+    silent = float(DEFAULTS["health"]["silent_after_hours"]) * 60
+    doc = _load(HERE / "events.yml")
+    on = doc.get(True) or doc.get("on")
+    fires = sorted(m for entry in on["schedule"] for m in _fires(entry["cron"]))
+    gaps = [(b - a) % 1440 or 1440 for a, b in zip(fires, fires[1:] + fires[:1])]
+    assert max(gaps) <= silent / 3, (
+        f"the watchdog looks up to {max(gaps)} minutes apart, so the alarm for "
+        f"{silent:.0f} minutes of silence can come {silent + max(gaps):.0f} after it")
+
+
+class TestTheTidyUp:
+    """The Save step commits the change files it read away, then pulls and
+    pushes. A check restamps docs/sw.js when the page changed without its
+    stamp, and `git pull --rebase` refuses a changed tracked file: every
+    check then failed to push, five times over."""
+
+    def git(self, cwd, *args):
+        import subprocess
+        return subprocess.run(["git", "-C", str(cwd), "-c", "user.name=t",
+                               "-c", "user.email=t@example.com", *args],
+                              check=True, capture_output=True, text=True).stdout
+
+    def test_a_restamped_page_does_not_stop_the_push(self, tmp_path):
+        import subprocess
+        origin, work, other = tmp_path / "origin.git", tmp_path / "work", tmp_path / "other"
+        subprocess.run(["git", "init", "-q", "--bare", "-b", "main", str(origin)], check=True)
+        subprocess.run(["git", "clone", "-q", str(origin), str(work)], check=True,
+                       capture_output=True)
+        (work / "docs").mkdir()
+        (work / "docs" / "sw.js").write_text("const BUILD = 'old';\n")
+        (work / "control").mkdir()
+        (work / "control" / "change.enc").write_text("sealed\n")
+        self.git(work, "add", "-A")
+        self.git(work, "commit", "-q", "-m", "a change from the page")
+        self.git(work, "push", "-q", "origin", "HEAD:main")
+        # Someone pushes while the check runs, so the tidy-up has to pull.
+        subprocess.run(["git", "clone", "-q", str(origin), str(other)], check=True,
+                       capture_output=True)
+        (other / "README.md").write_text("more\n")
+        self.git(other, "add", "-A")
+        self.git(other, "commit", "-q", "-m", "meanwhile")
+        self.git(other, "push", "-q", "origin", "HEAD:main")
+        (work / "docs" / "sw.js").write_text("const BUILD = 'new';\n")
+
+        out, _ = _run_step(WATCH, "Save", work, tmp_path, GITHUB_REF_NAME="main")
+        assert out.returncode == 0, out.stdout + out.stderr
+        assert self.git(origin, "log", "-1", "--format=%s", "main").startswith("Tidy up")
+        tree = self.git(origin, "ls-tree", "-r", "--name-only", "main").split()
+        assert "control/change.enc" not in tree and "README.md" in tree, tree
+        # The stamp the check wrote is still there for Publish to use.
+        assert (work / "docs" / "sw.js").read_text() == "const BUILD = 'new';\n"
+
+
+# ------------------------------------------------------ the browser tests
+
+class TestTheBrowserTestsRunInCI:
+    """No step installed a browser, so every test that opens the page, the
+    locked site or the collector skipped on GitHub's runners - 150 of the 165
+    in those files - and a green Tests run said nothing about the page it
+    then published."""
+
+    def ci(self):
+        return _load(HERE / "ci.yml")
+
+    def test_one_leg_installs_a_browser_and_requires_it(self):
+        job = self.ci()["jobs"]["test"]
+        legs = [str(v) for v in job["strategy"]["matrix"]["python"]]
+        install = [s for s in job["steps"] if "playwright install" in str(s.get("run", ""))]
+        assert len(install) == 1, "no step installs a browser"
+        leg = re.search(r"matrix\.python == '([\d.]+)'", str(install[0].get("if"))).group(1)
+        assert leg in legs, (leg, legs)
+        suite = [s for s in job["steps"] if str(s.get("run", "")).startswith("python -m pytest")
+                 and "AUTOTRADER_NOW" not in (s.get("env") or {})]
+        assert len(suite) == 1, suite
+        required = str((suite[0].get("env") or {}).get("REQUIRE_BROWSER"))
+        assert f"matrix.python == '{leg}'" in required, required
+
+    def test_a_current_playwright_install_is_found(self, tmp_path, monkeypatch):
+        """A current Playwright unpacks Chrome for Testing into chrome-linux64;
+        only chrome-linux was looked for."""
+        import sys
+        import types
+
+        from . import helpers
+        for build in ("chromium-1194/chrome-linux", "chromium-1234/chrome-linux64"):
+            (tmp_path / build).mkdir(parents=True)
+            (tmp_path / build / "chrome").write_text("")
+        monkeypatch.setattr(helpers, "BROWSERS", tmp_path)
+        # And Playwright has no build of its own here.
+        def no_driver():
+            raise RuntimeError("no driver")
+        broken = types.ModuleType("playwright.sync_api")
+        broken.sync_playwright = no_driver
+        monkeypatch.setitem(sys.modules, "playwright.sync_api", broken)
+        assert helpers.browser_path.__wrapped__() == str(
+            tmp_path / "chromium-1234" / "chrome-linux64" / "chrome")
+
+    def test_where_one_is_required_a_missing_browser_fails(self, monkeypatch):
+        from . import helpers
+        monkeypatch.setattr(helpers, "browser_path", lambda: None)
+        monkeypatch.setenv(helpers.REQUIRE_BROWSER, "1")
+        with pytest.raises(pytest.fail.Exception):
+            helpers.need_browser()
+        monkeypatch.delenv(helpers.REQUIRE_BROWSER)
+        with pytest.raises(pytest.skip.Exception):
+            helpers.need_browser()

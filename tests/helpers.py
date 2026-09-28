@@ -1,5 +1,6 @@
 """Test doubles shared by the runner and failure-mode suites."""
 
+import functools
 from pathlib import Path
 
 from autotrader import notifiers as _notifiers
@@ -179,3 +180,73 @@ def watch_config(where, tmp_path, monkeypatch):
     else:
         raise ValueError(where)
     return Config.load(target)
+
+
+# ----------------------------------------------------------- a real browser
+
+#: Set, a browser test that finds no browser fails rather than skipping. CI
+#: sets it on the leg that installs one, so a green run there means the page,
+#: the locked site and the collector were really driven, not skipped.
+REQUIRE_BROWSER = "REQUIRE_BROWSER"
+
+#: Where the sandbox this suite grew up in keeps Playwright's browsers.
+BROWSERS = Path("/opt/pw-browsers")
+
+
+def playwright_or_skip():
+    """playwright.sync_api, for a module that drives a browser; the module is
+    skipped without it, unless a browser was required."""
+    import importlib
+    import os
+
+    import pytest
+    if os.environ.get(REQUIRE_BROWSER):
+        return importlib.import_module("playwright.sync_api")
+    return pytest.importorskip("playwright.sync_api",
+                               reason="playwright is not installed")
+
+
+def _revision(path: Path) -> int:
+    digits = path.parent.parent.name.rsplit("-", 1)[-1]
+    return int(digits) if digits.isdigit() else -1
+
+
+@functools.lru_cache(maxsize=1)
+def browser_path() -> str | None:
+    """A Chromium for Playwright to drive, or None.
+
+    First the one Playwright installed for itself (`python -m playwright
+    install chromium`, as CI does), the build it was made for. Then any under
+    /opt/pw-browsers, newest first, in either layout: an older Playwright
+    unpacks Chromium into chrome-linux, a newer one Chrome for Testing into
+    chrome-linux64. The finders looked only in chrome-linux, so a current
+    install was never found and every browser test skipped wherever an old
+    build had not been left lying about.
+    """
+    try:
+        from playwright.sync_api import sync_playwright
+        with sync_playwright() as p:
+            own = p.chromium.executable_path
+        if own and Path(own).is_file():
+            return own
+    except Exception:            # noqa: BLE001 - no playwright, or no driver
+        pass
+    found = sorted(BROWSERS.glob("chromium-*/chrome-linux*/chrome"),
+                   key=_revision, reverse=True)
+    return str(found[0]) if found else None
+
+
+def need_browser() -> str:
+    """The browser a test drives: a skip without one, or a failure where one
+    was required."""
+    import os
+
+    import pytest
+    path = browser_path()
+    if path:
+        return path
+    why = ("no Chromium for Playwright to drive "
+           "(python -m playwright install chromium)")
+    if os.environ.get(REQUIRE_BROWSER):
+        pytest.fail(f"{why}, and {REQUIRE_BROWSER} is set", pytrace=False)
+    pytest.skip(why)

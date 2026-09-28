@@ -8,6 +8,8 @@ pytest>=8,<9
 PyYAML>=6,<7
 # tests/test_dashboard_layout.py opens the published page in a real browser,
 # because every layout fault this project has shipped was one where the CSS
-# said the right thing and the browser did something else. The suite skips
-# itself when playwright or a browser is missing, so CI without one still runs.
+# said the right thing and the browser did something else. The browser tests
+# skip themselves when playwright or a browser is missing, so the suite runs
+# anywhere; CI installs a browser on one leg and sets REQUIRE_BROWSER there,
+# so on that leg they fail rather than skip.
 playwright>=1.40
