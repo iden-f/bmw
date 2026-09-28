@@ -164,6 +164,24 @@ def test_the_published_site_is_a_single_commit_of_ciphertext(repo):
     assert "data.json" not in names
 
 
+def test_the_site_carries_a_worker_stamped_for_its_page(repo):
+    """A check's tidy-up sets its stamp on docs/sw.js aside, and may pull a
+    newer page; a worker published with a stale stamp keeps an installed
+    app on the old page."""
+    from autotrader.dashboard import stamp_worker
+    work = repo["work"]
+    vault_cli("pull")
+    vault_cli("open")
+    docs = work / "docs"
+    docs.mkdir(exist_ok=True)
+    (docs / "index.html").write_text("<!doctype html>")
+    (docs / "sw.js").write_text("const BUILD = 'stale';\nself.addEventListener('fetch', () => {});\n")
+    assert vault_cli("site", str(work / "site")) == 0
+    published = (work / "site" / "sw.js").read_text()
+    assert "stale" not in published
+    assert f"const BUILD = '{stamp_worker(docs)}';" in published
+
+
 class TestTheSiteFolder:
     """`vault site` starts by deleting its folder, and `vault publish` pushes
     all of one to a public branch. HOW-IT-WORKS calls docs/ "the whole

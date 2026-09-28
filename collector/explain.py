@@ -2,7 +2,8 @@
 
 ``explain`` reads every search the way a pass does, opens no listing page,
 sends nothing, and says where each car went and why: another model, hidden
-by a rule (and which), or kept. It sorts them with the bot's own code
+by a rule (and which), or kept. What a pass already found on a car's own
+page counts, as it does in every batch. It sorts them with the bot's own code
 (marketplace.judge), so what it prints is what the bot would do.
 
 ``--capture`` also keeps what each page received, in this Mac's own folder
@@ -17,6 +18,7 @@ Mac can reach without the repository's secrets: in practice, ntfy.
 
 from __future__ import annotations
 
+import copy
 import json
 import re
 from datetime import datetime, timezone
@@ -27,7 +29,7 @@ from autotrader import marketplace as M
 
 from . import settings as S
 from .browser import Browser
-from .cycle import Keyring, read
+from .cycle import Keyring, load_memory, read
 from .github import GitHub
 
 
@@ -48,9 +50,12 @@ def explain(settings: S.Settings, *, github: GitHub | None = None,
         if not browser.signed_in():
             out["session"] = "signed_out"
             return out
-        # A throwaway memory: explaining must not change which cars the next
-        # real pass thinks it has already seen.
-        parts, out["session"] = read(cfg, plan, browser, settings, {},
+        # A copy of this Mac's memory, thrown away after: explaining must not
+        # change which cars the next real pass thinks it has already seen,
+        # and must judge each car with what its own page already said, as
+        # every batch the bot takes in does.
+        parts, out["session"] = read(cfg, plan, browser, settings,
+                                     copy.deepcopy(load_memory()),
                                      details=False, pages=pages)
     owned: set[str] = set()
     for item, part in zip(plan, parts):
@@ -108,9 +113,10 @@ def explain_text(result: dict[str, Any]) -> str:
         lines += [f"Facebook: {result['session']}. Run collector/run login, sign in, "
                   f"close the window, and try again.", ""]
     if result["searches"]:
-        lines += ["Each car is judged from the search results alone. A real pass also",
-                  "opens the page of a car on your list once, and what it finds there",
-                  "(the exact kilometres, a rebuilt title) can still hide it.", ""]
+        lines += ["Each car is judged from the search results, and from what a real",
+                  "pass already found on its own page. A real pass also opens the page",
+                  "of a car on your list once, and what it finds there (the exact",
+                  "kilometres, a rebuilt title) can still hide a car not opened yet.", ""]
     kept_anywhere = result.get("kept_anywhere") or set()
     for s in result["searches"]:
         j: M.Judged = s["judged"]

@@ -371,8 +371,9 @@ class TestTheRuleAPersonIsMostLikelyToChange:
             # own, so a global one reaches it.
             for where in ([{"search": "beta"}] if kind is list
                           else [{"search": "beta"}, {}]):
-                # A distance needs somewhere to measure from.
-                cfg = cfg_with(filters={"near": "K1P 1J1"})
+                # A distance needs somewhere to measure from. Not the place
+                # set: a near written nowhere would read as applied.
+                cfg = cfg_with(filters={"near": "K1P"})
                 out = control.apply(cfg, state_with(), [{
                     "action": "set-rule", "rule": name, "value": value, **where}])
                 assert out.changed, f"{name}={value!r} {where}: {out.rejected}"

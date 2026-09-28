@@ -339,6 +339,38 @@ def a_pass(home, browser, **kw):
                       browser_factory=lambda s: browser, **kw)
 
 
+class TestExplainSeesWhatAPassFound:
+    """explain read with a memory of its own, so what a pass had found on a
+    car's own page was left out: a car the bot hides for its rebuilt title
+    was listed as on your list."""
+
+    def test_a_car_its_page_hid_is_hidden_there_too(self, tmp_path, monkeypatch):
+        from collector.explain import explain, explain_text
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        watch_config(repo, exclude_keywords=["rebuilt"])
+        vault = V.Vault.unlock(repo, {V.ENV_KEY: PHRASE}, create=True)
+        vault.seal_file(repo / "config.json", "config.enc")
+        monkeypatch.setenv("COLLECTOR_HOME", str(tmp_path / "home"))
+        monkeypatch.setenv(S.ENV_PASSPHRASE, PHRASE)
+        monkeypatch.setenv("COLLECTOR_NO_KEYCHAIN", "1")
+        github = FakeGitHub({p.name: p.read_bytes() for p in (repo / "vault").iterdir()
+                             if p.is_file()})
+        cycle.once(settings(), github=github,
+                   browser_factory=lambda s: FakeBrowser(status="REBUILT"))
+        [car] = M.open_batch(vault.key, github.sent[-1])["searches"][0]["listings"]
+        assert car["title_status"] == "Rebuilt", "the bot hides it"
+        kept = cycle.load_memory()
+        result = explain(settings(), github=github,
+                         browser_factory=lambda s: FakeBrowser(status="REBUILT"))
+        [search] = result["searches"]
+        assert [l.id for l, _ in search["judged"].hidden] == ["fb-200000001"]
+        assert search["judged"].kept == []
+        assert "hidden by a rule (1):" in explain_text(result)
+        assert cycle.load_memory() == kept, "explaining changes nothing it keeps"
+        assert len(github.sent) == 1
+
+
 class TestHoldingOff:
     """After Facebook signs the collector out or asks the account to confirm
     who it is, every read would land on the same page again."""
@@ -362,6 +394,22 @@ class TestHoldingOff:
         sent = home.last()
         assert sent["polled"] is False and sent["session"] == "signed_out"
         assert "signed the collector out" in sent["note"]
+
+    def test_the_bot_is_told_when_the_batch_that_found_it_was_lost(
+            self, home, tmp_path, monkeypatch):
+        sink = Capture()
+        use_channels(monkeypatch, runner_mod, [sink])
+        bot = Config.defaults(tmp_path / "bot.json")
+        state = State(path=tmp_path / "bot-state.json")
+        home.github.refuse = True
+        with pytest.raises(GitHubError):
+            a_pass(home, FakeBrowser(signed_in=False))
+        home.github.refuse = False
+        for _ in range(4):
+            a_pass(home, FakeBrowser())
+            assert home.last()["polled"] is False
+            M.ingest(bot, state, home.last(), env={})
+        assert len(sink.alerts_matching("sign in again")) == 1
 
     def test_once_now_reads_and_clears_it(self, home):
         a_pass(home, FakeBrowser(session={"search": "checkpoint"}))

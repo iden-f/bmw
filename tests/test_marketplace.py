@@ -577,6 +577,19 @@ class TestSignedOut:
         watch.send(part(watch.sid, rec("100000001")))
         assert len(watch.sink.alerts_matching("watched again")) == 1
 
+    def test_a_held_check_in_still_raises_it(self, watch):
+        """The collector holds off after a sign-out and only checks in, saying
+        why. Only the batch that found it could raise the alarm, so when that
+        one never arrived (a refused send, a run GitHub dropped) nothing said
+        so for the twelve hours of the hold."""
+        for _ in range(3):
+            watch.send(session="signed_out", polled=False)
+        assert len(watch.sink.alerts_matching("sign in again")) == 1
+        watch.send(polled=False)
+        assert watch.sink.alerts_matching("watched again") == []
+        watch.send(part(watch.sid, rec("100000001")))
+        assert len(watch.sink.alerts_matching("watched again")) == 1
+
     def test_each_computer_is_told_about_on_its_own(self, watch):
         def standby(*parts, **kw):
             b = batch(*parts, host="collector-b", **kw)

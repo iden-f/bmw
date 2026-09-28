@@ -1046,11 +1046,13 @@ def _session_alarm(cfg, state: State, report, heard: dict[str, Any],
     """Say once when Facebook stops letting a collector in, and once when
     it lets it back in. Every batch in between is the same news.
 
-    Only a batch that opened the browser says how the session is: an
+    Only a batch that opened the browser says the session is fine: an
     overnight check-in or a standby standing by carries "ok" without having
-    asked Facebook anything. Each computer signs in on its own, so each is
-    told about on its own, and a standby reading while the primary is
-    signed out does not count as the primary being back.
+    asked Facebook anything. A check-in that holds off after a sign-out
+    still says so, and raises the alarm too: the batch that found it may
+    never have arrived. Each computer signs in on its own, so each is told
+    about on its own, and a standby reading while the primary is signed out
+    does not count as the primary being back.
     """
     from . import notifiers
     section = _section(state)
@@ -1059,7 +1061,7 @@ def _session_alarm(cfg, state: State, report, heard: dict[str, Any],
         # A warning, not a failure: every batch until the owner signs in
         # would otherwise fail its workflow run and email them about it.
         report.warnings.append(f"Marketplace: {SESSION_WORDS[session]}.")
-    if not heard["polled"]:
+    if not heard["polled"] and session not in SESSION_WORDS:
         return
     told = section.get("session_told")
     if not isinstance(told, dict):

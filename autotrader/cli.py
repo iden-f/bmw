@@ -301,8 +301,13 @@ def cmd_set(args: argparse.Namespace) -> int:
     cfg.set(args.key, value)
     # Switching a channel back on clears why it was switched off, or setup
     # would read it as still retired (see provision.ensure_notifications).
+    # Switching one off says so, as the dashboard's switch does, or setup
+    # would switch the only one back on at the next check.
     channel = re.fullmatch(r"notifications\.channels\.(\w+)\.enabled", args.key)
-    if channel and value:
+    if channel and value is False:
+        cfg.set(f"notifications.channels.{channel.group(1)}.disabled_reason",
+                "Switched off from the command line")
+    elif channel and value:
         (cfg.get(f"notifications.channels.{channel.group(1)}") or {}).pop(
             "disabled_reason", None)
     cfg.save()
@@ -1166,13 +1171,17 @@ def cmd_vault(args: argparse.Namespace) -> int:
             if why:
                 print(_bad(f"refusing to build the site in {args.dir}: {why}"))
                 return 1
-            from .dashboard import find_secrets
+            from .dashboard import find_secrets, stamp_worker
             data = root / "docs" / "data.json"
             if data.is_file():
                 leaks = find_secrets(json.loads(data.read_text(encoding="utf-8")))
                 if leaks:
                     print(_bad("refusing to publish: credential-shaped data in the payload"))
                     return 1
+            # The worker stamped for the page as it is now: a check's tidy-up
+            # sets its stamp aside and may pull a newer page, and a worker
+            # whose stamp is stale keeps an installed app on the old page.
+            stamp_worker(root / "docs")
             counts = vault.publish(root / "docs", Path(args.dir))
             (Path(args.dir) / ".nojekyll").touch()
             print(f"site: built, {_many(counts['photos'], 'photo')}")

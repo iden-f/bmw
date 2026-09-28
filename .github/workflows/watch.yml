@@ -171,11 +171,16 @@ jobs:
           fi
           if git diff --cached --quiet; then exit 0; fi
           git commit -q -m "Tidy up after a check [skip ci]"
+          # The check restamps docs/sw.js when the page changed without it,
+          # and a pull refuses a changed tracked file. Set aside, not
+          # stashed: a stash meeting a newer sw.js from main leaves conflict
+          # markers in it. `vault site` stamps it from what the pull brought.
+          if [ -n "$(git ls-files -- docs/sw.js)" ]; then
+            git checkout -q -- docs/sw.js
+          fi
           for attempt in 1 2 3 4 5; do
             git rebase --abort 2>/dev/null || true
-            # --autostash: the check restamps docs/sw.js when the page
-            # changed without it, and a pull refuses a changed tracked file.
-            if git pull -q --rebase --autostash origin "$GITHUB_REF_NAME" && \
+            if git pull -q --rebase origin "$GITHUB_REF_NAME" && \
                git push -q origin "HEAD:$GITHUB_REF_NAME"; then
               exit 0
             fi

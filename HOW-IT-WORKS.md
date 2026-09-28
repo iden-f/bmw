@@ -39,9 +39,9 @@ reliable, private, and easy to read. Setup and everyday use are in the
 8. **Tidy `main`.** The `control/` files this check read are removed, applied
    or refused; every private path (`vault paths` lists them) is kept out of
    git; and a `BUDGET-STOP` the budget guard wrote is committed.
-9. **Publish.** If the dashboard's data changed, `vault site site` builds the
-   site and `vault publish site` replaces `gh-pages` with a single commit of
-   it.
+9. **Publish.** If the dashboard's data changed, `vault site site` stamps
+   the service worker for the page as it now is and builds the site, and
+   `vault publish site` replaces `gh-pages` with a single commit of it.
 
 A search that fails still saves what the others found; the job is marked
 failed at the end instead.
@@ -238,7 +238,8 @@ the bot stays the only writer of the watch's data.
    person takes. When Facebook signs the collector out or asks the account
    to confirm who it is, the pass stops there, opens no listing page, and
    the passes after it only check in for 12 hours or until
-   `collector/run login`.
+   `collector/run login`. Each check-in still says why, and raises the
+   sign-in alarm if the batch that found it never arrived.
 3. **The batch.** `{"v", "id", "at", "host", "role", "polled", "session",
    "settings", "next_at", "last_failure", "searches": [...]}`, sealed like everything else with the name
    `marketplace` and padded to 4 KiB, sent as `repository_dispatch` of type

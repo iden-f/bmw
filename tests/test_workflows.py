@@ -697,7 +697,9 @@ class TestTheTidyUp:
                                "-c", "user.email=t@example.com", *args],
                               check=True, capture_output=True, text=True).stdout
 
-    def test_a_restamped_page_does_not_stop_the_push(self, tmp_path):
+    def _meanwhile(self, tmp_path, changed):
+        """A check that restamped docs/sw.js, and a push to main while it ran,
+        of ``changed``: {path: text}. Returns the check's clone and origin."""
         import subprocess
         origin, work, other = tmp_path / "origin.git", tmp_path / "work", tmp_path / "other"
         subprocess.run(["git", "init", "-q", "--bare", "-b", "main", str(origin)], check=True)
@@ -713,19 +715,41 @@ class TestTheTidyUp:
         # Someone pushes while the check runs, so the tidy-up has to pull.
         subprocess.run(["git", "clone", "-q", str(origin), str(other)], check=True,
                        capture_output=True)
-        (other / "README.md").write_text("more\n")
+        for name, text in changed.items():
+            (other / name).write_text(text)
         self.git(other, "add", "-A")
         self.git(other, "commit", "-q", "-m", "meanwhile")
         self.git(other, "push", "-q", "origin", "HEAD:main")
         (work / "docs" / "sw.js").write_text("const BUILD = 'new';\n")
+        return work, origin
 
+    def test_a_restamped_page_does_not_stop_the_push(self, tmp_path):
+        work, origin = self._meanwhile(tmp_path, {"README.md": "more\n"})
         out, _ = _run_step(WATCH, "Save", work, tmp_path, GITHUB_REF_NAME="main")
         assert out.returncode == 0, out.stdout + out.stderr
         assert self.git(origin, "log", "-1", "--format=%s", "main").startswith("Tidy up")
         tree = self.git(origin, "ls-tree", "-r", "--name-only", "main").split()
         assert "control/change.enc" not in tree and "README.md" in tree, tree
-        # The stamp the check wrote is still there for Publish to use.
-        assert (work / "docs" / "sw.js").read_text() == "const BUILD = 'new';\n"
+
+    def test_nor_does_a_page_changed_on_main_meanwhile(self, tmp_path):
+        """Stashed, the check's stamp met main's newer one: the pull left
+        conflict markers in sw.js and exited 0, Publish sent a worker that
+        does not parse, and a push that failed then could never be retried."""
+        work, origin = self._meanwhile(
+            tmp_path, {"docs/sw.js": "const BUILD = 'newer';\n"})
+        out, _ = _run_step(WATCH, "Save", work, tmp_path, GITHUB_REF_NAME="main")
+        assert out.returncode == 0, out.stdout + out.stderr
+        assert self.git(work, "ls-files", "-u") == ""
+        assert "<<<<<<<" not in (work / "docs" / "sw.js").read_text()
+        assert self.git(origin, "log", "-1", "--format=%s", "main").startswith("Tidy up")
+        assert self.git(origin, "show", "main:docs/sw.js") == "const BUILD = 'newer';\n"
+
+    def test_the_site_it_publishes_is_stamped_from_the_page(self):
+        """The tidy-up sets the check's stamp aside, and may pull a newer
+        page: `vault site` stamps the worker it builds the site from
+        (tests/test_vault_cycle.py)."""
+        step = _step(WATCH, "Publish the dashboard")["run"]
+        assert "vault site site" in step
 
 
 # ------------------------------------------------------ the browser tests

@@ -34,7 +34,7 @@ CONTENT_TYPES = {
 }
 
 
-def _handler(config_path: Path, state_path: Path):
+def _handler(config_path: Path, state_path: Path, host: str = "127.0.0.1"):
     class Handler(BaseHTTPRequestHandler):
         server_version = "AutoTraderUI"
 
@@ -66,16 +66,16 @@ def _handler(config_path: Path, state_path: Path):
             A page on another site can point its own name at 127.0.0.1 (DNS
             rebinding) and then read this server as its own origin; the Host
             header still carries that name. An IP address cannot be pointed
-            anywhere else, so any IP is accepted, and localhost.
+            anywhere else, so any IP is accepted, and localhost, and the name
+            `ui --host` was given, which is the address it opens. Any port:
+            a forwarded one (ssh -L, a container's mapping) is named as the
+            browser opened it, and a rebinding page's name is refused anyway.
             """
             try:
-                where = urlsplit("//" + self.headers.get("Host", ""))
-                name, port = where.hostname or "", where.port
+                name = urlsplit("//" + self.headers.get("Host", "")).hostname or ""
             except ValueError:
                 return False
-            if (port or 80) != self.server.server_port:
-                return False
-            if name == "localhost":
+            if name and name in ("localhost", host.lower()):
                 return True
             try:
                 ipaddress.ip_address(name)
@@ -138,7 +138,7 @@ def serve(host: str = "127.0.0.1", port: int = 8765,
         return 2
 
     try:
-        httpd = ThreadingHTTPServer((host, port), _handler(config_path, state_path))
+        httpd = ThreadingHTTPServer((host, port), _handler(config_path, state_path, host))
     except OSError as exc:
         print(f"Could not listen on {host}:{port} - {exc}")
         print("Try a different port: python -m autotrader ui --port 8899")

@@ -162,9 +162,10 @@ sends nothing. Each car is one line: its title, the model Facebook's own
 fields give (when they give one), the model the bot read, price, kilometres
 (`~` when Marketplace rounded them, as in "45K km"), place, seller, photo and
 age, followed by the rule that hid it, if one did. It sorts cars with the
-bot's own code, from the search results alone: a real pass also opens the
-page of a car on your list once, and what it finds there (the exact
-kilometres, a rebuilt title) can still hide it.
+bot's own code, from the search results and from what a real pass already
+found on a car's own page, as the bot does. A real pass also opens the page
+of a car on your list once, and what it finds there (the exact kilometres,
+a rebuilt title) can still hide a car not opened yet.
 
 It waits while a pass is using the browser, and a pass waits for it, since
 only one browser can use the collector's profile at a time.
