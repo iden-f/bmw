@@ -16,10 +16,15 @@ requests package.
 
 from __future__ import annotations
 
+import copy
 import json
+import math
 import re
 from dataclasses import dataclass, field
 from typing import Any
+
+from . import geo
+from .urls import describe_search, normalise_search_url
 
 ACTIONS = ("set-rule", "add-search", "remove-search", "mute-listing",
            "unmute-listing", "shortlist", "unshortlist", "dismiss",
@@ -63,6 +68,12 @@ _PLACE_SLUG = re.compile(r"^[a-z0-9][a-z0-9-]{1,40}$")
 _PLACE = re.compile(r"^(?:[A-Za-z]\d[A-Za-z](?:\s?\d[A-Za-z]\d)?"
                     r"|[A-Za-z][A-Za-z .'-]{1,40}(?:,\s*[A-Za-z .]{2,30})?)$")
 AUTOTRADER_LINK = re.compile(r"^https://(www\.)?autotrader\.ca/", re.I)
+# What a refusal suggests instead of a place the bot cannot find.
+_PLACES_THAT_WORK = ("a Canadian postcode (K1P 1J1), or a city and province "
+                     "with a comma between them (Toronto, ON)")
+# The two price-drop floors are a search's own settings, or the global ones
+# under notifications, not filters: that is where Config.rules_for reads them.
+_DROP_FLOORS = ("price_drop_min_pct", "price_drop_min_abs")
 
 
 class Rejected(Exception):
@@ -140,8 +151,11 @@ def parse(body: str) -> list[dict[str, Any]]:
 def _number(value: Any, name: str, kind: type) -> Any:
     try:
         out = kind(value)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
+        # OverflowError: int() of an infinity, which JSON's 1e999 is.
         raise Rejected(f"{name} needs a number; got {value!r}.") from None
+    if not math.isfinite(out):
+        raise Rejected(f"{name} needs a number; got {value!r}.")
     low, high = RULE_BOUNDS.get(name, (float("-inf"), float("inf")))
     if not low <= out <= high:
         # Not :g, which would show a person "1e+07".
@@ -199,8 +213,14 @@ def _rule_value(name: str, value: Any) -> Any:
         if not _PLACE.match(text):
             raise Rejected(
                 f"{text!r} does not look like somewhere I can measure from. "
-                f"Use a Canadian postcode (K1P 1J1) or a city and province "
-                f"(Toronto, ON).")
+                f"Use {_PLACES_THAT_WORK}.")
+        # A place the bot cannot find would switch the distance rule off
+        # without a word: every car would be kept, and the page would still
+        # show the rule.
+        if geo.locate_reference(text) is None:
+            raise Rejected(
+                f"{text!r} is not a place I can find, so I could not measure "
+                f"from it. Use {_PLACES_THAT_WORK}.")
         return text
     return _number(value, name, kind)
 
@@ -215,6 +235,22 @@ def _find_search(cfg, wanted: str):
     return None
 
 
+@dataclass
+class _Batch:
+    """What the instructions planned so far will have done.
+
+    Each instruction is checked against the config as it is, and these, so
+    two instructions in one change cannot each pass a check that together
+    they fail.
+    """
+    added: set[str] = field(default_factory=set)       # search links
+    removed: set[str] = field(default_factory=set)     # search ids
+    # The place and the distance set by this change, by search id; None is
+    # the global rule.
+    near: dict[str | None, Any] = field(default_factory=dict)
+    radius: dict[str | None, Any] = field(default_factory=dict)
+
+
 def apply(cfg, state, items: list[dict[str, Any]]) -> Outcome:
     """Carry out a parsed instruction set, or none of it.
 
@@ -223,36 +259,105 @@ def apply(cfg, state, items: list[dict[str, Any]]) -> Outcome:
     """
     out = Outcome()
     planned: list[tuple[str, Any]] = []
+    batch = _Batch()
 
     for item in items:
         action = item["action"]
         try:
-            planned.append((action, _plan(cfg, state, item)))
+            planned.append((action, _plan(cfg, state, item, batch)))
         except Rejected as exc:
             out.rejected.append(f"`{action}`: {exc}")
+    out.rejected += _whole_set_problems(cfg, batch)
 
     if out.rejected:
         return out                        # whole or nothing
 
-    for action, work in planned:
-        out.applied.append(work())
+    # A write that fails part-way through, for a reason no check above
+    # foresaw, must not leave the first half written: both files are copied
+    # first and put back.
+    before = copy.deepcopy(cfg.data), copy.deepcopy(state.data)
+    try:
+        for action, work in planned:
+            out.applied.append(work())
+    except Exception as exc:
+        for live, saved in zip((cfg.data, state.data), before):
+            live.clear()
+            live.update(saved)
+        out.applied = []
+        if not isinstance(exc, (Rejected, ValueError)):
+            raise
+        out.rejected.append(f"`{action}`: {exc}")
+        return out
     out.changed = bool(out.applied)
     return out
 
 
-def _plan(cfg, state, item: dict[str, Any]):
+def _whole_set_problems(cfg, batch: _Batch) -> list[str]:
+    """What is wrong with the change taken as a whole, once each part passed."""
+    problems = []
+    left = len(cfg.searches) + len(batch.added) - len(batch.removed)
+    if batch.removed and left < 1:
+        problems.append(
+            "`remove-search`: that is the only search there is; removing it "
+            "would leave the bot watching nothing." if len(cfg.searches) == 1
+            else "`remove-search`: that removes every search, which would "
+                 "leave the bot watching nothing.")
+
+    # A distance needs a place to measure from. Without one the rule is
+    # kept and does nothing, and every car it should hide is kept.
+    if all(v is None for v in batch.radius.values()):
+        return problems
+    lacking = []
+    for search in cfg.searches:
+        if search.id in batch.removed:
+            continue
+        own = search.filters or {}
+        own_radius = batch.radius.get(search.id, own.get("max_distance_km"))
+        radius = own_radius if own_radius is not None else batch.radius.get(
+            None, cfg.get("filters.max_distance_km"))
+        # Only a distance this change sets is judged here; one already
+        # saved is the page's to point out.
+        if radius is None or not (search.id in batch.radius
+                                  or (None in batch.radius and own_radius is None)):
+            continue
+        near = (batch.near.get(search.id, own.get("near"))
+                or batch.near.get(None, cfg.get("filters.near")))
+        if not near or geo.locate_reference(str(near)) is None:
+            lacking.append(search.name)
+    if lacking:
+        problems.append(
+            f"`set-rule`: max_distance_km needs a place to measure from, and "
+            f"{', '.join(repr(n) for n in lacking)} "
+            f"{'has' if len(lacking) == 1 else 'have'} none I can find: set "
+            f"near first, to {_PLACES_THAT_WORK}.")
+    return problems
+
+
+def _plan(cfg, state, item: dict[str, Any], batch: _Batch | None = None):
     """Validate one instruction and return something that performs it."""
     action = item["action"]
+    batch = batch if batch is not None else _Batch()
 
     if action == "set-rule":
         search = _find_search(cfg, item.get("search"))
         if item.get("search") and not search:
             raise Rejected(f"there is no search called {item['search']!r}.")
+        if search and search.id in batch.removed:
+            raise Rejected(f"{search.name!r} is removed by this same change.")
         name = str(item.get("rule") or "")
         value = _rule_value(name, item.get("value"))
         if name == "aliases" and not search:
             raise Rejected("aliases belong to one search: say which.")
-        where = f"searches.{search.id}.filters.{name}" if search else f"filters.{name}"
+        scope = search.id if search else None
+        if name == "near":
+            batch.near[scope] = value
+        if name == "max_distance_km":
+            batch.radius[scope] = value
+        if name in _DROP_FLOORS:
+            where = (f"searches.{search.id}.{name}" if search
+                     else f"notifications.{name}")
+        else:
+            where = f"searches.{search.id}.filters.{name}" if search else f"filters.{name}"
         label = f"{name} = {value!r}" + (f" on {search.name}" if search else " everywhere")
 
         def do():
@@ -260,9 +365,16 @@ def _plan(cfg, state, item: dict[str, Any]):
                 raw = cfg.data.setdefault("searches", [])
                 for row in raw:
                     if row.get("id") == search.id:
-                        filters = row.setdefault("filters", {})
-                        filters.pop(name, None) if value is None else filters.update({name: value})
+                        # A drop floor is a setting of the search itself.
+                        held = row if name in _DROP_FLOORS else row.setdefault("filters", {})
+                        held.pop(name, None) if value is None else held.update({name: value})
                         break
+            elif name in _DROP_FLOORS:
+                # Cleared, the global floor goes back to its default rather
+                # than to nothing, which would pass every drop.
+                from .config import DEFAULTS
+                cfg.set(f"notifications.{name}",
+                        DEFAULTS["notifications"][name] if value is None else value)
             else:
                 if value is None:
                     (cfg.data.get("filters") or {}).pop(name, None)
@@ -277,10 +389,23 @@ def _plan(cfg, state, item: dict[str, Any]):
         if not AUTOTRADER_LINK.match(url):
             raise Rejected("a search link has to be an https://www.autotrader.ca/ "
                            "address; got " + (url[:80] or "nothing") + ".")
+        # The same reading the command line's `add` gives: a single car's
+        # page or the home page is a link, but not a list of results.
+        summary = describe_search(url)
+        if not summary.valid:
+            raise Rejected((summary.problems or ["that is not a search."])[0])
+        wanted = normalise_search_url(url)
+        for existing in cfg.searches:
+            if existing.url == wanted and existing.id not in batch.removed:
+                raise Rejected(f"that search is already being watched as "
+                               f"{existing.name!r}.")
+        if wanted in batch.added:
+            raise Rejected("that search is added twice in this change.")
+        batch.added.add(wanted)
         name = str(item.get("name") or "").strip()[:80]
 
         def do():
-            search = cfg.add_search(url, name, strict=False)
+            search = cfg.add_search(url, name)
             return f"added the search {search.name!r}"
         return do
 
@@ -288,9 +413,11 @@ def _plan(cfg, state, item: dict[str, Any]):
         search = _find_search(cfg, item.get("search"))
         if not search:
             raise Rejected(f"there is no search called {item.get('search')!r}.")
-        if len(cfg.searches) <= 1:
-            raise Rejected("that is the only search there is; removing it "
-                           "would leave the bot watching nothing.")
+        if search.id in batch.removed:
+            raise Rejected(f"{search.name!r} is removed twice in this change.")
+        # Whether anything is left to watch is settled over the whole change,
+        # in _whole_set_problems.
+        batch.removed.add(search.id)
 
         def do():
             cfg.remove_search(search.id)
@@ -349,21 +476,30 @@ def _plan(cfg, state, item: dict[str, Any]):
 
         def do():
             cfg.set(f"notifications.channels.{channel}.enabled", on)
+            # Why a channel is off is kept beside it, so the page can say so
+            # and setup does not switch it back on (provision.py).
+            if on:
+                cfg.data["notifications"]["channels"][channel].pop("disabled_reason", None)
+            else:
+                cfg.set(f"notifications.channels.{channel}.disabled_reason",
+                        "Switched off from the dashboard")
             return f"turned {channel} {'on' if on else 'off'}"
         return do
 
     if action == "set-marketplace":
-        return _plan_marketplace(cfg, item)
+        return _plan_marketplace(cfg, item, batch)
 
     raise Rejected("I do not know how to do that.")   # unreachable via parse()
 
 
-def _plan_marketplace(cfg, item: dict[str, Any]):
+def _plan_marketplace(cfg, item: dict[str, Any], batch: _Batch):
     """Marketplace on or off for one search, or one of its shared settings."""
     if item.get("search") is not None or "enabled" in item:
         search = _find_search(cfg, item.get("search"))
         if not search:
             raise Rejected(f"there is no search called {item.get('search')!r}.")
+        if search.id in batch.removed:
+            raise Rejected(f"{search.name!r} is removed by this same change.")
         on = item.get("enabled")
         if not isinstance(on, bool):
             raise Rejected("enabled has to be true or false.")

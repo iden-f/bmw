@@ -164,6 +164,21 @@ class TestRetirement:
         cfg = Config.load(bench.path / "config.json")
         assert cfg.active_channels({}) == ["ntfy"]
 
+    def test_a_retired_ntfy_is_not_set_up_again(self, bench, monkeypatch):
+        """ntfy itself retired is not self-healing: setup switched it back on
+        at the next firing, it failed twice and was retired again, for ever,
+        warning "no channel was configured" each time round."""
+        class DeadTopic(Dead):
+            name = "ntfy"
+        self._wire(bench, monkeypatch, [DeadTopic({}, {}, {})])
+        bench.run(); bench.run(search_html=self._with_new_car(bench))
+        assert not Config.load(bench.path / "config.json").active_channels({})
+
+        later = bench.run(search_html=self._with_new_car(bench, "19_13999002_"))
+        assert not any(w.startswith("setup:") for w in later.warnings), later.warnings
+        ntfy = Config.load(bench.path / "config.json").get("notifications.channels.ntfy")
+        assert ntfy["enabled"] is False and ntfy["disabled_reason"]
+
 
 class TestASecretNeverReachesTheLog:
     """A connection error names the address it was sending to, and for

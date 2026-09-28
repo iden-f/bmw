@@ -1,12 +1,14 @@
-"""A tiny local server so the dashboard can save settings directly.
+"""A local, read-only viewer of the dashboard.
 
-The same ``docs/index.html`` is used everywhere. Served from here it finds
-``api/health`` and switches into read-write mode; opened from GitHub Pages or
-from disk it stays read-only and offers copy/download instead.
+It serves the page in ``docs/`` with a ``data.json`` built on each request
+from config.json and state.json, so the dashboard can be read on this
+computer without publishing anything. It writes nothing: changes go through
+the published, locked dashboard (see control.py).
 """
 
 from __future__ import annotations
 
+import ipaddress
 import json
 import logging
 import os
@@ -14,7 +16,7 @@ import threading
 import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urlsplit
 
 from . import dashboard
 from .config import Config, ConfigError
@@ -23,7 +25,6 @@ from .state import State
 log = logging.getLogger(__name__)
 
 DOCS = Path(__file__).resolve().parent.parent / "docs"
-MAX_BODY = 2_000_000
 
 CONTENT_TYPES = {
     ".html": "text/html; charset=utf-8", ".json": "application/json; charset=utf-8",
@@ -47,8 +48,8 @@ def _handler(config_path: Path, state_path: Path):
             self.send_header("Content-Type", content_type)
             self.send_header("Content-Length", str(len(body)))
             self.send_header("Cache-Control", "no-store")
-            # This server edits local files, so it refuses to be embedded or
-            # read cross-origin by a page in another tab.
+            # What it serves is every car and the ntfy topic, so it refuses
+            # to be embedded by a page in another tab.
             self.send_header("X-Frame-Options", "DENY")
             self.send_header("X-Content-Type-Options", "nosniff")
             self.end_headers()
@@ -59,14 +60,28 @@ def _handler(config_path: Path, state_path: Path):
             self._send(status, json.dumps(payload).encode("utf-8"),
                        "application/json; charset=utf-8")
 
-        def _same_origin(self) -> bool:
-            """Reject writes initiated by another site (basic CSRF guard)."""
-            origin = self.headers.get("Origin")
-            if not origin:
-                return True  # curl and friends send no Origin
-            host = urlparse(origin).netloc
-            return host in {self.headers.get("Host", ""), f"127.0.0.1:{self.server.server_port}",
-                            f"localhost:{self.server.server_port}"}
+        def _addressed_here(self) -> bool:
+            """Whether the request names this computer, not some website.
+
+            A page on another site can point its own name at 127.0.0.1 (DNS
+            rebinding) and then read this server as its own origin; the Host
+            header still carries that name. An IP address cannot be pointed
+            anywhere else, so any IP is accepted, and localhost.
+            """
+            try:
+                where = urlsplit("//" + self.headers.get("Host", ""))
+                name, port = where.hostname or "", where.port
+            except ValueError:
+                return False
+            if (port or 80) != self.server.server_port:
+                return False
+            if name == "localhost":
+                return True
+            try:
+                ipaddress.ip_address(name)
+            except ValueError:
+                return False
+            return True
 
         # ---------------- routes ----------------
 
@@ -74,13 +89,11 @@ def _handler(config_path: Path, state_path: Path):
             self.do_GET()
 
         def do_GET(self) -> None:  # noqa: N802
+            if not self._addressed_here():
+                return self._json(403, {"error": "open this at http://127.0.0.1"})
             route = urlparse(self.path).path
             if route in ("/", "/index.html"):
                 return self._file(DOCS / "index.html")
-            if route == "/api/health":
-                return self._json(200, {"ok": True, "live": True,
-                                        "config": str(config_path),
-                                        "state": str(state_path)})
             if route in ("/data.json", "/api/data"):
                 try:
                     cfg = Config.load(config_path)
@@ -95,33 +108,6 @@ def _handler(config_path: Path, state_path: Path):
             except ValueError:
                 return self._json(403, {"error": "outside the docs directory"})
             return self._file(candidate)
-
-        def do_POST(self) -> None:  # noqa: N802
-            route = urlparse(self.path).path
-            if route != "/api/config":
-                return self._json(404, {"error": "no such endpoint"})
-            if not self._same_origin():
-                return self._json(403, {"error": "cross-origin write refused"})
-            try:
-                length = int(self.headers.get("Content-Length") or 0)
-            except ValueError:
-                return self._json(400, {"error": "bad Content-Length"})
-            if length <= 0 or length > MAX_BODY:
-                return self._json(413, {"error": "body missing or too large"})
-            try:
-                payload = json.loads(self.rfile.read(length).decode("utf-8"))
-            except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-                return self._json(400, {"error": f"not valid JSON: {exc}"})
-            if not isinstance(payload, dict):
-                return self._json(400, {"error": "expected a JSON object"})
-            try:
-                cfg = Config(payload, config_path)
-                cfg.normalise()
-                cfg.save(config_path)
-            except (ConfigError, OSError) as exc:
-                return self._json(400, {"error": str(exc)})
-            log.info("saved %s (%d search(es))", config_path, len(cfg.data.get("searches", [])))
-            return self._json(200, {"ok": True, "searches": len(cfg.data.get("searches", []))})
 
         def _file(self, path: Path) -> None:
             if not path.is_file():

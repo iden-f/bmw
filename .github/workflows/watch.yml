@@ -47,7 +47,12 @@ jobs:
       # runs-on above.
       REPO_RUNNER: ubuntu-latest
     steps:
+      # The branch as it is now, not the commit the event fired on. A run
+      # queued behind another would otherwise check out change files that
+      # the other run already read and tidied away.
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.ref }}
 
       # Written by the bot when this month's runner minutes are projected to
       # run out. Delete the file to resume.

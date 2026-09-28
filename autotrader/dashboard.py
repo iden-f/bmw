@@ -10,6 +10,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import os
 import re
 from pathlib import Path
 from typing import Any
@@ -69,12 +70,20 @@ def _area_of(filters: dict[str, Any]) -> dict[str, Any] | None:
     out: dict[str, Any] = {"provinces": provinces}
     if near and radius:
         out.update(geo.summary(near, radius))
+        if not out["resolved"]:
+            # filters.check keeps every car when it cannot place `near`.
+            out["enforced"] = False
+            out["why"] = (f"the bot cannot find {near}, so it has nowhere to "
+                          f"measure from; set near to a postcode like K1P 1J1")
     elif near:
         out["reference"] = near
         out["text"] = f"near {near}"
     elif radius:
+        # A distance with no place to measure from is not applied at all.
         out["radius_km"] = radius
         out["text"] = f"within {radius:,} km"
+        out["enforced"] = False
+        out["why"] = "no place is set to measure from; set near to a postcode like K1P 1J1"
     if provinces and "text" not in out:
         out["text"] = "in " + ", ".join(provinces)
     return out
@@ -98,9 +107,18 @@ def _subscribe_qr(server: str, topic: str) -> str:
 
 def build_payload(cfg: Config, state: State, env: dict[str, str] | None = None
                   ) -> dict[str, Any]:
-    """Assemble everything the dashboard needs, with nothing secret in it."""
-    # Normalised once: the local UI server and the dashboard command pass None.
-    env = env or {}
+    """Assemble everything the dashboard needs, with nothing secret in it.
+
+    ``env`` is the environment the channels are judged in. The local UI
+    server and the dashboard command (which Publish dashboard runs) have no
+    secrets and pass None: the channels are then judged by the secret names
+    the last check recorded as present, or the page would say no channel is
+    on for an owner whose alerts go to Telegram.
+    """
+    repo = _repo_slug(env if env is not None else dict(os.environ))
+    if env is None:
+        env = {name: "1" for name in (state.data.get("secrets_present") or [])
+               if isinstance(name, str)}
     limit = int(cfg.get("dashboard.max_listings", 500) or 500)
 
     # Where distance is measured from, per search. A search with no distance
@@ -321,7 +339,7 @@ def build_payload(cfg: Config, state: State, env: dict[str, str] | None = None
         },
         "version": 3,
         # Where a change from the dashboard is committed.
-        "repo": _repo_slug(env),
+        "repo": repo,
         # The last few changes sent from the dashboard, and what became of them.
         "changes": state.data.get("changes") or [],
         "marketplace": _marketplace(cfg, state),
@@ -470,7 +488,9 @@ def _repo_slug(env: dict[str, str] | None) -> str:
                              capture_output=True, text=True, timeout=5).stdout
     except (OSError, Exception):  # noqa: BLE001 - absence is an answer
         return ""
-    match = re.search(r"github\.com[:/]([^/]+/[^/.\s]+)", url or "")
+    # A name may hold dots (owner/car.watch); only a final ".git" is not
+    # part of it.
+    match = re.search(r"github\.com[:/]([^/\s]+/[^/\s]+?)(?:\.git)?/?\s*$", url or "")
     return match.group(1) if match else ""
 
 

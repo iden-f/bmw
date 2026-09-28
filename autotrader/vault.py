@@ -511,6 +511,58 @@ class Vault:
         return hashed_name(self.name_key, f"photo/{filename}")
 
 
+# ------------------------------------------------------------------ the site
+
+#: What Vault.publish writes beside the page's own files.
+SITE_EXTRAS = {"lock.json", "data.enc", ".nojekyll"}
+
+
+def unsafe_site_dir(root: Path | str, out: Path | str) -> str:
+    """Why the site must not be built in ``out``, or "" when it may be.
+
+    Building starts by deleting ``out``. Typed as ``docs`` or ``.`` by
+    mistake, that would delete the page, or the working copy.
+    """
+    root, out = Path(root).resolve(), Path(out).resolve()
+    if out == root or out in root.parents:
+        return "that folder holds the whole repository"
+    for kept in ("docs", str(VAULT_DIR), ".git"):
+        if out == root / kept or root / kept in out.parents:
+            return f"that is part of {kept}/"
+    if out.exists() and not out.is_dir():
+        return "that is a file"
+    if out.is_dir() and any(out.iterdir()) and not (out / "lock.json").is_file():
+        return "that folder is not one `vault site` built"
+    return ""
+
+
+def unpublishable(out: Path | str) -> str:
+    """Why ``out`` must not be published, or "" when it may be.
+
+    Everything in it goes to a public branch, so it may hold only what
+    Vault.publish writes: the page, its icons and ciphertext. `vault
+    publish docs` would otherwise put the plaintext data on the web.
+    """
+    out = Path(out)
+    if not (out / "lock.json").is_file():
+        return "`vault site` did not build it (it has no lock.json)"
+    for path in out.rglob("*"):
+        parts = path.relative_to(out).parts
+        if parts == (THUMBS_DIR,) and path.is_dir():
+            continue
+        if len(parts) == 1 and path.is_file() and (
+                parts[0] in SITE_FILES or parts[0] in SITE_EXTRAS
+                or parts[0].startswith("icon")):
+            continue
+        if (len(parts) == 2 and parts[0] == THUMBS_DIR and path.is_file()
+                and parts[1].endswith(".bin")):
+            continue
+        # Not named: this is printed in a public log, and a photo is named
+        # for its listing.
+        return "it holds files `vault site` does not write"
+    return ""
+
+
 # ------------------------------------------------------------------ branches
 
 def _git(root: Path, *args: str, env: dict[str, str] | None = None) -> str:

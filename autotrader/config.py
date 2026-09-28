@@ -72,6 +72,17 @@ CHANNEL_SECRETS: dict[str, dict[str, Any]] = {
     },
 }
 
+
+def secrets_present(env: dict[str, str]) -> list[str]:
+    """The names of the channel secrets set in ``env``, never their values.
+
+    A check records these, so a dashboard built later without the secrets
+    (Publish dashboard, the local `ui`) can still say which channels are on.
+    """
+    return sorted({name for spec in CHANNEL_SECRETS.values()
+                   for name in spec["required"] if (env.get(name) or "").strip()})
+
+
 DEFAULTS: dict[str, Any] = {
     "version": 2,
     "searches": [],

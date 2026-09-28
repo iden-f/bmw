@@ -36,10 +36,13 @@ jobs:
 
       - run: pip install -q -r requirements.txt
 
+      # Not given WATCH_PASSPHRASE_PREVIOUS: this copy of the vault is never
+      # saved, so re-encrypting it here would publish a page under a key, and
+      # an ntfy topic, that the next check replaces. A check changes the
+      # passphrase, and publishes the page once it has.
       - name: Build and publish
         env:
           WATCH_PASSPHRASE: ${{ secrets.WATCH_PASSPHRASE }}
-          WATCH_PASSPHRASE_PREVIOUS: ${{ secrets.WATCH_PASSPHRASE_PREVIOUS }}
         run: |
           set -e
           if [ -z "$WATCH_PASSPHRASE" ]; then
@@ -51,7 +54,10 @@ jobs:
             echo "Nothing to publish until the first check has run."
             exit 0
           fi
-          python -m autotrader vault open
+          if ! python -m autotrader vault open; then
+            echo "::notice::WATCH_PASSPHRASE does not open the vault yet. If the passphrase is changing, the next check re-encrypts it and publishes the page."
+            exit 0
+          fi
           python -m autotrader --no-colour dashboard > /dev/null 2>&1
           python -m autotrader vault site site
           python -m autotrader vault publish site

@@ -115,7 +115,7 @@ All in `autotrader/`, in the order the data moves.
 **`config`** (settings in `config.json`, secrets only from the environment),
 **`listing`** (the car record), **`lock`** (one check at a time), **`clock`**
 (one clock, settable in tests), **`words`** (plurals and durations, defined
-once), **`ui`** (a local server that lets the page save settings).
+once), **`ui`** (a local, read-only viewer for the page).
 
 ## Reading only the results
 
@@ -267,9 +267,10 @@ token. So a change is a file:
    the repository owner made it.
 3. `python -m autotrader control control` decrypts each file and applies it
    whole or refuses it whole. A file sealed with any other key, an unsealed
-   file, an id already applied, or a change older than 14 days is refused.
-   Each outcome, with its reason, is kept in state and shown under **Your
-   recent changes** on the Searches tab.
+   file, or a change older than 14 days is refused. Each outcome, with its
+   reason, is kept in state and shown under **Your recent changes** on the
+   Searches tab. An id already read is skipped and not recorded again: a
+   check queued behind the one that read the file can still find it.
 4. The check removes the files it read from `main`.
 
 Valid actions: `set-rule`, `add-search`, `remove-search`, `mute-listing`,

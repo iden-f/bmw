@@ -180,15 +180,24 @@ def _fold(text: str) -> str:
     """Normalise a place name: accents, punctuation and case all removed.
 
     "Montréal", "MONTREAL" and "Montreal" are one place; "St. Catharines" and
-    "St Catharines" are one place.
+    "St Catharines" are one place, and so are "St. John's" and "St Johns".
     """
     stripped = unicodedata.normalize("NFKD", str(text or ""))
     stripped = "".join(c for c in stripped if not unicodedata.combining(c))
     stripped = stripped.lower().replace("&", " and ")
+    stripped = re.sub(r"['\u2019]", "", stripped)
     stripped = re.sub(r"\bsaint\b", "st", stripped)
     stripped = re.sub(r"\bste\.?\b", "ste", stripped)
     stripped = re.sub(r"[^a-z0-9\- ]+", " ", stripped)
     return re.sub(r"\s+", " ", stripped).strip()
+
+
+# The table is written the way places are spelled ("saint john"), and every
+# lookup folds the name it is given first ("st john"), so the keys are folded
+# the same way once, here. Otherwise a place spelled with "Saint" could never
+# be found.
+CITIES = {prov: {_fold(name): point for name, point in places.items()}
+          for prov, places in CITIES.items()}
 
 
 def distance_km(a: tuple[float, float], b: tuple[float, float]) -> float:

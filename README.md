@@ -179,7 +179,7 @@ falls through to the global value.
 | Rule | What it does |
 |---|---|
 | `min_price`, `max_price`, `min_year`, `max_year`, `max_mileage_km` | Bounds. |
-| `near`, `max_distance_km` | Where you are and how far you would drive. AutoTrader does not reliably apply the distance in a link, so the bot measures it from each listing's city. A car it cannot place is never hidden. |
+| `near`, `max_distance_km` | Where you are and how far you would drive. AutoTrader does not reliably apply the distance in a link, so the bot measures it from each listing's city. A car it cannot place is never hidden. `near` is a postcode or a city and province (`Toronto, ON`); a distance with no `near`, or a place the bot cannot find, is refused. |
 | `provinces` | A region list, when a radius is the wrong shape. |
 | `models` | The model the search is for, e.g. `["Civic"]`. A result that is a different model is discarded, not hidden. |
 | `aliases` | Other spellings that also count as the model, e.g. `["Civik"]`, for a seller who writes it some way the matching does not catch. Set it on the Searches tab under **Also counts as**. |
@@ -293,7 +293,7 @@ python -m autotrader list                # what is being watched
 python -m autotrader doctor              # config, links, channels, stored data
 python -m autotrader doctor --live       # fetch the site and show what the parser read
 python -m autotrader run --dry-run       # a whole check that changes and sends nothing
-python -m autotrader ui                  # the dashboard, able to save settings
+python -m autotrader ui                  # the dashboard, read-only, from these files
 python -m autotrader test-notify         # a sample alert to every channel
 python -m autotrader verify --limit 10   # re-read cars from the site and compare
 python -m autotrader weekly              # the weekly digest, printed

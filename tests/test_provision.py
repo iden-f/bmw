@@ -2,7 +2,7 @@
 import json
 import re
 
-
+import pytest
 
 from autotrader.config import Config
 from autotrader.provision import (MOVED_NOTICE, bootstrap, ensure_dashboard_url,
@@ -62,6 +62,61 @@ class TestFirstRunNotifications:
         topic = cfg.get("notifications.channels.ntfy.topic")
         assert not ensure_notifications(cfg, {})["changed"]
         assert cfg.get("notifications.channels.ntfy.topic") == topic
+
+
+class TestAChannelSwitchedOffStaysOff:
+    """ntfy switched off, by the owner or for failing, was switched straight
+    back on by the next setup whenever it was the only channel. A retired
+    one then failed twice, was retired again, and so on for ever, with a
+    "no channel was configured" warning every time round."""
+
+    RETIRED = "Switched off automatically after 2 runs: HTTP 403"
+
+    def _off(self, tmp_path, reason):
+        cfg = Config.defaults(tmp_path / "config.json")
+        cfg.set("notifications.channels.ntfy.topic", "autotrader-example-topic")
+        cfg.set("notifications.channels.ntfy.enabled", False)
+        if reason:
+            cfg.set("notifications.channels.ntfy.disabled_reason", reason)
+        return cfg
+
+    @pytest.mark.parametrize("reason", [RETIRED, "Switched off from the dashboard"])
+    def test_with_a_reason_it_is_left_off(self, tmp_path, reason):
+        cfg = self._off(tmp_path, reason)
+        result = ensure_notifications(cfg, {})
+        assert not result["changed"] and reason in result["reason"]
+        assert cfg.active_channels({}) == []
+
+    def test_without_one_it_is_switched_on_and_says_so(self, tmp_path):
+        cfg = self._off(tmp_path, "")
+        result = ensure_notifications(cfg, {})
+        assert result["changed"] and "switched on" in result["reason"]
+        assert cfg.active_channels({}) == ["ntfy"]
+
+    def test_switching_it_on_clears_a_stale_reason(self, tmp_path):
+        """A reason left beside a channel that is on reads as a fault."""
+        cfg = self._off(tmp_path, self.RETIRED)
+        cfg.set("notifications.channels.ntfy.enabled", "auto")
+        cfg.set("notifications.channels.ntfy.topic", "")
+        assert ensure_notifications(cfg, {})["changed"]
+        assert "disabled_reason" not in cfg.get("notifications.channels.ntfy")
+
+    def test_a_new_topic_from_the_command_line_brings_it_back(self, tmp_path):
+        from autotrader import cli
+        cfg = self._off(tmp_path, self.RETIRED)
+        cfg.save()
+        assert cli.main(["--config", str(cfg.path), "setup", "--new-topic"]) == 0
+        ntfy = Config.load(cfg.path).get("notifications.channels.ntfy")
+        assert ntfy["enabled"] is True and "disabled_reason" not in ntfy
+
+    def test_so_does_switching_it_on_by_hand(self, tmp_path):
+        from autotrader import cli
+        cfg = self._off(tmp_path, self.RETIRED)
+        cfg.save()
+        assert cli.main(["--config", str(cfg.path), "set",
+                         "notifications.channels.ntfy.enabled", "true"]) == 0
+        assert "disabled_reason" not in Config.load(cfg.path).get(
+            "notifications.channels.ntfy")
 
 
 class TestMovingTheTopic:

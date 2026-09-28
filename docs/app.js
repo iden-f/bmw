@@ -2025,13 +2025,16 @@ function renderSearches() {
     const kv = el('dl', 'kv');
     const area = s.area?.text;
     // The model and area the bot enforces itself are shown, so every rule
-    // applied is visible somewhere on the page.
+    // applied is visible somewhere on the page. A distance with no place the
+    // bot can measure from keeps every car, and says so.
     const models = [].concat(s.rules?.filters?.models ?? []);
     kv.innerHTML =
       `<dt>Watching</dt><dd>${esc(searchWords(s))}
          · <a href="${esc(s.url)}" rel="noopener" target="_blank">open on autotrader.ca</a></dd>` +
       (models.length ? `<dt>Model</dt><dd>${esc(models.join(', '))} <span class="note" style="margin:0">— a backstop. The site does honour the model, and the bot reads only the results it declares, so this rule has nothing left to turn away</span></dd>` : '') +
-      (area ? `<dt>Area</dt><dd>${esc(area)} <span class="note" style="margin:0">— enforced here, because the site ignores it</span></dd>` : '') +
+      (area ? `<dt>Area</dt><dd>${esc(area)} ${s.area.enforced === false
+        ? `<span class="warnt">— not applied: ${esc(s.area.why || 'there is no place to measure from')}</span>`
+        : '<span class="note" style="margin:0">— enforced here, because the site ignores it</span>'}</dd>` : '') +
       `<dt>Last read</dt><dd>${h.last_ok
           ? `${stamp(h.last_ok)} · ${h.last_count || 0} listing${(h.last_count || 0) === 1 ? '' : 's'}`
             + (h.not_this_car
@@ -2273,6 +2276,83 @@ function rulesEditor(s) {
   return box;
 }
 
+/* A pasted link read the way the bot reads it (describe_search in urls.py),
+   or the reason the bot would refuse it (add-search in control.py), so the
+   page never offers a change the next check turns down. */
+function readSearchLink(raw) {
+  let url;
+  try { url = new URL(raw); } catch {
+    return { error: `That is not a web address yet — it should
+      start with <span class="mono">https://</span>.` };
+  }
+  // The whole name, not its ending: notautotrader.ca ends the same way.
+  if (!/^(www\.)?autotrader\.ca$/i.test(url.host) || url.username || url.password) {
+    return { error: `That is a link to <b>${esc(url.host || raw)}</b>, not
+      www.autotrader.ca. Open the search there and copy its address.` };
+  }
+  if (url.protocol !== 'https:') {
+    return { error: `The bot takes only addresses that start with
+      <span class="mono">https://</span>. Copy this one again from the address bar.` };
+  }
+  const path = url.pathname;
+  const seg = path.split('/').filter(Boolean).map(part => {
+    try { return decodeURIComponent(part.replace(/\+/g, ' ')); } catch { return part; }
+  });
+  if (!seg.length) {
+    return { error: `That is the autotrader.ca home page. Run a search there first,
+      then copy the address of the results.` };
+  }
+  if (/[_/-]\d{5,}(?:[_/]|$)/.test(path)
+      || /\/offers?\/[^/]*?[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}/i.test(path)) {
+    return { error: `That is one car's page, not a search. Run the search on
+      autotrader.ca first, then copy the address of the results.` };
+  }
+
+  const bits = [];
+  let city = '';
+  if (/^(cars|autos)$/i.test(seg[0])) {
+    // /cars/<make>/<model>/, and on the newer platform va_<trim>, reg_<province>
+    // and cit_<city> after them.
+    const province = /^(ab|bc|mb|nb|nl|ns|nt|nu|on|pe|qc|sk|yt)$/i;
+    const tagged = /^(va|reg|cit|mcat)_/i;
+    const rest = seg.slice(1);
+    const car = [];
+    while (car.length < 2 && rest.length && !province.test(rest[0]) && !tagged.test(rest[0])) {
+      car.push(rest.shift());
+    }
+    for (const part of rest) {
+      if (/^va_./i.test(part)) car.push(part.slice(3));
+      else if (/^cit_./i.test(part)) city = part.slice(4);
+    }
+    if (car.length) bits.push(car.join(' ').replace(/[-_+]+/g, ' ').toUpperCase());
+  }
+  const q = url.searchParams;
+  const int = v => /^\s*[-+]?\d+\s*$/.test(v || '') ? parseInt(v, 10) : null;
+  // Each figure from the older range parameter or, failing that, the
+  // newer platform's own.
+  const range = (name, low, high) => {
+    const [a, b] = (q.get(name) || '').split(',');
+    return [int(a) ?? int(q.get(low)), int(b) ?? int(q.get(high))];
+  };
+  const [y0, y1] = range('yRng', 'modelyearfrom', 'modelyearto');
+  if (y0 && y1) bits.push(`${y0}–${y1}`);
+  else if (y0) bits.push(`${y0} or newer`);
+  else if (y1) bits.push(`up to ${y1}`);
+  const [p0, p1] = range('pRng', 'pricefrom', 'priceto');
+  if (p0 && p1) bits.push(`${money(p0)}–${money(p1)}`);
+  else if (p1) bits.push(`under ${money(p1)}`);
+  else if (p0) bits.push(`over ${money(p0)}`);
+  const odo = int((q.get('odRng') || '').split(',')[1]) ?? int(q.get('kmto'))
+    ?? int(q.get('mileageto'));
+  if (odo) bits.push(`under ${km(odo)} km`);
+  const place = (q.get('loc') || '').trim() || (q.get('zip') || '').trim() || city;
+  const radius = [int(q.get('prx')), int(q.get('zipr'))].find(r => r > 0);
+  if (place) bits.push(`near ${place}` + (radius ? ` (${num(radius)} km)` : ''));
+  // Sent as the browser wrote it back, which is how the bot's own check
+  // (AUTOTRADER_LINK) expects to see it.
+  return { words: bits.join(' · '), href: url.href };
+}
+
 /* Paste a link and see what it would watch, before committing to it. The
    page is static and cannot write to the repository, so it reads the link
    back and offers the change as a GitHub link (see "the ask" below). */
@@ -2292,33 +2372,18 @@ function pasteALink() {
   sec.querySelector('#paste').addEventListener('input', e => {
     const raw = e.target.value.trim();
     if (!raw) { out.innerHTML = ''; return; }
-    let url;
-    try { url = new URL(raw); } catch {
-      out.innerHTML = `<p class="why err">That is not a web address yet — it should
-        start with <span class="mono">https://</span>.</p>`;
+    const read = readSearchLink(raw);
+    if (read.error) {
+      out.innerHTML = `<p class="why err">${read.error}</p>`;
       return;
     }
-    if (!/autotrader\.ca$/i.test(url.hostname.replace(/^www\./, ''))) {
-      out.innerHTML = `<p class="why err">That is a link to
-        <b>${esc(url.hostname)}</b>, not autotrader.ca.</p>`;
-      return;
-    }
-    const q = url.searchParams;
-    const bits = [];
-    const seg = url.pathname.split('/').filter(Boolean);
-    if (seg[0] === 'cars' && seg[1]) bits.push(seg.slice(1, 3).join(' ').toUpperCase());
-    const yr = q.get('yRng');
-    if (yr) bits.push(yr.replace('%2C', ',').replace(',', '–'));
-    const pr = q.get('pRng');
-    if (pr) bits.push('price ' + pr.replace(',', '–'));
-    if (q.get('loc')) bits.push('near ' + q.get('loc'));
     out.innerHTML = `
-      <p class="why"><b>Reads as:</b> ${bits.length ? esc(bits.join(' · ')) : 'every car on that page'}.
+      <p class="why"><b>Reads as:</b> ${read.words ? esc(read.words) : 'every car on that page'}.
         The bot re-reads the link itself on every check, so anything it did not
         understand here is still applied by the site.</p>`;
     const bar = el('div', 'bar');
     bar.appendChild(askButton('Add this search', 'Add a search',
-      [{ action: 'add-search', url: raw }]));
+      [{ action: 'add-search', url: read.href }]));
     bar.appendChild(el('span', 'note', CHANGE_NOTE));
     out.appendChild(bar);
   });

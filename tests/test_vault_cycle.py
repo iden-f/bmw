@@ -164,6 +164,64 @@ def test_the_published_site_is_a_single_commit_of_ciphertext(repo):
     assert "data.json" not in names
 
 
+class TestTheSiteFolder:
+    """`vault site` starts by deleting its folder, and `vault publish` pushes
+    all of one to a public branch. HOW-IT-WORKS calls docs/ "the whole
+    site", so `vault publish docs` is an easy slip: it would have put the
+    plaintext data and photos on the web, and `vault site docs` deleted the
+    page before building from nothing."""
+
+    def _docs(self, work):
+        vault_cli("pull")
+        vault_cli("open")
+        docs = work / "docs"
+        (docs / "thumbs").mkdir(parents=True, exist_ok=True)
+        (docs / "index.html").write_text("<!doctype html>")
+        (docs / "data.json").write_text('{"listings": [{"title": "A car"}]}')
+        (docs / "thumbs" / "19_12345678_.webp").write_bytes(b"photo")
+        return docs
+
+    @staticmethod
+    def _tree(folder):
+        return sorted(str(p.relative_to(folder)) for p in folder.rglob("*"))
+
+    @pytest.mark.parametrize("action", ["site", "publish"])
+    @pytest.mark.parametrize("where", ["docs", ".", "vault", ".."])
+    def test_a_folder_that_is_not_a_site(self, repo, action, where, capsys):
+        work = repo["work"]
+        docs = self._docs(work)
+        before = self._tree(docs)
+        assert vault_cli(action, where) == 1
+        assert self._tree(docs) == before
+        remote = git(work, "ls-remote", "--heads", "origin", V.SITE_BRANCH)
+        assert not remote, "something was published"
+        assert "19_12345678_" not in capsys.readouterr().out
+
+    def test_a_site_with_something_added_to_it(self, repo):
+        work = repo["work"]
+        self._docs(work)
+        assert vault_cli("site", str(work / "site")) == 0
+        (work / "site" / "data.json").write_text('{"listings": []}')
+        assert vault_cli("publish", str(work / "site")) == 1
+        assert not git(work, "ls-remote", "--heads", "origin", V.SITE_BRANCH)
+
+    def test_a_folder_it_did_not_build_is_not_emptied(self, repo, tmp_path):
+        work = repo["work"]
+        self._docs(work)
+        mine = tmp_path / "mine"
+        mine.mkdir()
+        (mine / "notes.txt").write_text("keep me")
+        assert vault_cli("site", str(mine)) == 1
+        assert (mine / "notes.txt").read_text() == "keep me"
+
+    def test_a_site_it_built_is_rebuilt_and_published(self, repo):
+        work = repo["work"]
+        self._docs(work)
+        assert vault_cli("site", str(work / "site")) == 0
+        assert vault_cli("site", str(work / "site")) == 0
+        assert vault_cli("publish", str(work / "site")) == 0
+
+
 def test_without_a_passphrase_nothing_opens(repo, monkeypatch):
     monkeypatch.delenv(V.ENV_KEY)
     vault_cli("pull")
@@ -218,16 +276,54 @@ class TestChangesFromThePage:
         assert state["listings"]["abc-123"]["you"]["shortlisted"] is True
         assert state["changes"][0]["ok"] is True
 
-    def test_the_same_change_twice_is_refused_the_second_time(self, repo):
+    def test_the_same_change_twice_is_read_once(self, repo):
+        """A check queued behind the one that read a change checks out the
+        commit its event fired on, which still holds the file. That second
+        reading showed a red "Refused" above the real "Applied", for a change
+        that had worked. It is skipped instead: never applied again, and
+        not recorded as anything."""
         work = repo["work"]
         vault, control = self._setup(work)
         body = envelope(self.SHORTLIST)
         self._drop(control, "a.enc", vault.key, body)
         assert cli.main(["control", "control"]) == 0
+        # Since then the owner took the car off the shortlist.
+        state = self._state(work)
+        state["listings"]["abc-123"]["you"] = {}
+        (work / "state.json").write_text(json.dumps(state))
+
         (control / "a.enc").unlink()
         self._drop(control, "b.enc", vault.key, body)      # replayed under a new name
+        assert cli.main(["control", "control"]) == 0
+        state = self._state(work)
+        assert not state["listings"]["abc-123"]["you"], "applied a second time"
+        assert [c["ok"] for c in state["changes"]] == [True]
+
+    def test_a_change_that_fails_unexpectedly_does_not_lose_the_others(
+            self, repo, monkeypatch):
+        """Everything is saved after the last file, and the Save step then
+        removes every change file. A failure nobody planned for in one file
+        used to stop the command before that save, so the changes already
+        applied - and reported as applied - were lost with it."""
+        from autotrader import control as C
+        work = repo["work"]
+        vault, control = self._setup(work)
+        self._drop(control, "a.enc", vault.key, envelope(self.SHORTLIST))
+        self._drop(control, "b.enc", vault.key, envelope(
+            [{"action": "note", "listing": "abc-123", "text": "boom"}]))
+        real = C.apply
+
+        def apply(cfg, state, items):
+            if items[0]["action"] == "note":
+                raise KeyError("something nobody planned for")
+            return real(cfg, state, items)
+        monkeypatch.setattr(C, "apply", apply)
+
         assert cli.main(["control", "control"]) == 1
-        assert "already applied" in self._state(work)["changes"][0]["text"]
+        state = self._state(work)
+        assert state["listings"]["abc-123"]["you"]["shortlisted"] is True
+        assert [c["ok"] for c in state["changes"]] == [False, True]
+        assert state["changes"][0]["text"] == "failed (KeyError)"
 
     def test_an_old_change_is_refused(self, repo):
         work = repo["work"]

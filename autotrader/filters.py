@@ -16,6 +16,10 @@ from .listing import Listing
 
 log = logging.getLogger(__name__)
 
+# Places already reported as unplaceable, so the warning is logged once per
+# place rather than once for every car of every search.
+_UNPLACED: set[str] = set()
+
 
 @dataclass
 class Verdict:
@@ -140,7 +144,9 @@ def check(listing: Listing, filters: dict[str, Any] | None) -> Verdict:
     if near and radius:
         reference = geo.locate_reference(near)
         if reference is None:
-            log.warning("cannot place %r, so distance is not being enforced", near)
+            if near not in _UNPLACED:
+                _UNPLACED.add(near)
+                log.warning("cannot place %r, so distance is not being enforced", near)
         else:
             far, away = geo.too_far(listing.location, listing.province,
                                     reference, radius)

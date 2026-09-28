@@ -479,3 +479,24 @@ class TestTheWorkflowTellsTheBotWhatItNeedsToKnow:
         step = [s for s in self.watch()["jobs"]["check"]["steps"]
                 if s.get("id") == "bot"][0]
         assert "github.event.repository.visibility" in step["env"]["REPO_VISIBILITY"]
+
+
+class TestWhatAQueuedRunSees:
+    def test_the_check_reads_the_branch_as_it_is_when_it_starts(self):
+        """Runs queue behind each other. Checking out the commit its event
+        fired on, a queued run found change files the run before it had
+        already read and tidied away, and refused them as replays."""
+        doc = yaml.safe_load(WATCH.read_text())
+        checkout = [s for s in doc["jobs"]["check"]["steps"]
+                    if str(s.get("uses", "")).startswith("actions/checkout@")]
+        assert checkout, "no checkout step"
+        assert (checkout[0].get("with") or {}).get("ref") == "${{ github.ref }}"
+
+
+def test_publish_dashboard_never_changes_the_passphrase():
+    """Only the check saves the vault. Publish dashboard re-encrypting its
+    throwaway copy published a page, and an ntfy topic, that the next check
+    replaced, and an owner who subscribed from it heard nothing."""
+    from autotrader import vault as V
+    text = (HERE / "pages.yml").read_text()
+    assert V.ENV_PREVIOUS not in re.sub(r"#.*", "", text)

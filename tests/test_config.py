@@ -131,3 +131,55 @@ class TestTheDefaultsAgreeWithEachOther:
         source = inspect.getsource(runner.run)
         assert 'health.min_interval_minutes' in source, \
             "the removal grace must read the deduplication floor, not its own"
+
+
+class TestTheSetCommand:
+    """`set` turns what was typed into the JSON type it obviously is."""
+
+    URL = "https://www.autotrader.ca/cars/honda/civic/?rcp=25"
+
+    @pytest.fixture
+    def path(self, tmp_path):
+        cfg = Config.defaults(tmp_path / "config.json")
+        cfg.add_search(self.URL, "Civic")
+        cfg.save()
+        return tmp_path / "config.json"
+
+    def _set(self, path, *args):
+        from autotrader import cli
+        assert cli.main(["--config", str(path), "set", *args]) == 0
+        return Config.load(path)
+
+    def test_a_place_keeps_its_comma(self, path):
+        """Every comma used to make a list, so "Toronto, ON" was stored as
+        two places and read back everywhere as "['Toronto', 'ON']"."""
+        cfg = self._set(path, "near", "Toronto, ON", "--search", "Civic")
+        assert cfg.searches[0].filters["near"] == "Toronto, ON"
+        assert self._set(path, "filters.near", "Toronto, ON").get("filters.near") \
+            == "Toronto, ON"
+
+    def test_a_rule_that_holds_names_is_still_a_list(self, path):
+        cfg = self._set(path, "include_keywords", "manual,sunroof", "--search", "Civic")
+        assert cfg.searches[0].filters["include_keywords"] == ["manual", "sunroof"]
+        cfg = self._set(path, "filters.exclude_sellers", "A Dealer, Another")
+        assert cfg.get("filters.exclude_sellers") == ["A Dealer", "Another"]
+
+    def test_a_search_price_drop_floor_is_the_one_it_reads(self, path):
+        """Written into the search's filters, where nothing reads it."""
+        cfg = self._set(path, "price_drop_min_abs", "500", "--search", "Civic")
+        assert cfg.rules_for(cfg.searches[0])["price_drop_min_abs"] == 500
+
+
+def test_a_bare_command_runs_against_the_files_it_was_given(tmp_path, monkeypatch):
+    """With no command a check runs; the --config and --state typed before
+    it were dropped on the way, and it read and wrote ./config.json."""
+    import sys
+    from autotrader import cli
+    seen = {}
+    monkeypatch.setattr(cli, "cmd_run", lambda args: seen.update(
+        config=args.config, state=args.state) or 0)
+    config, state = tmp_path / "elsewhere.json", tmp_path / "kept.json"
+    monkeypatch.setattr(sys, "argv", ["autotrader", "--config", str(config),
+                                      "--state", str(state)])
+    assert cli.main() == 0
+    assert seen == {"config": str(config), "state": str(state)}

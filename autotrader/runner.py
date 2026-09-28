@@ -22,7 +22,7 @@ from . import archive as archive_mod
 from . import thumbs as thumbs_mod
 from . import dashboard, diagnose, filters, invariants, notifiers
 from . import provision, render, shape, validate
-from .config import Config
+from .config import Config, secrets_present
 from .enrich import detail_from_html, enrich, page_identifies
 from .http import BlockedError, BudgetExhausted, FetchError, Fetcher
 from .listing import Listing, on_marketplace
@@ -886,6 +886,9 @@ def run(cfg: Config | None = None, state: State | None = None, *,
     # Make the bot reachable before doing anything else, so a fresh install
     # works without being configured first.
     if not dry_run:
+        # Which channel secrets this check was given, by name only, for a
+        # dashboard built later without them (see dashboard.build_payload).
+        state.data["secrets_present"] = secrets_present(env)
         try:
             report.provisioned = provision.bootstrap(cfg, env)
             for step in report.provisioned.get("steps", []):

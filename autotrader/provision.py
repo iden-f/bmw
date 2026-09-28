@@ -54,12 +54,24 @@ def ensure_notifications(cfg: Config, env: dict[str, str] | None = None
         return {"changed": False, "reason": f"already reachable via {', '.join(active)}",
                 "channels": active}
 
-    topic = str(cfg.get("notifications.channels.ntfy.topic") or "").strip()
+    ntfy = cfg.get("notifications.channels.ntfy", {}) or {}
+    topic = str(ntfy.get("topic") or "").strip()
+    why_off = str(ntfy.get("disabled_reason") or "").strip()
+    if topic and ntfy.get("enabled") is False and why_off:
+        # Switched off on purpose, or retired for failing (runner.py). Setting
+        # it up again would switch it back on every firing, and a retired one
+        # would fail and be retired again for ever. The Status tab says why.
+        return {"changed": False, "reason": f"ntfy is switched off: {why_off}",
+                "channels": []}
+
+    reason = "no channel was on, so ntfy was switched on"
     if not topic:
         topic = generate_topic()
         cfg.set("notifications.channels.ntfy.topic", topic)
+        reason = "no channel was configured, so ntfy was set up"
     cfg.set("notifications.channels.ntfy.enabled", True)
-    return {"changed": True, "reason": "no channel was configured, so ntfy was set up",
+    cfg.data["notifications"]["channels"]["ntfy"].pop("disabled_reason", None)
+    return {"changed": True, "reason": reason,
             "topic": topic, "url": subscribe_url(cfg), "channels": ["ntfy"]}
 
 

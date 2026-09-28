@@ -352,24 +352,32 @@ class TestTheRuleAPersonIsMostLikelyToChange:
 
         The value used is the midpoint of each rule's own bounds, so adding a
         rule with a range this test knows nothing about still exercises it.
+        And "Applied" has to mean applied: the rule the checks read comes out
+        with the new value, on one search and everywhere. Two of these once
+        went where nothing reads them, and said "Applied" anyway.
         """
         for name, kind in control.RULE_TYPES.items():
-            where = {}
             if kind is bool:
                 value = True
             elif kind is str:
                 value = "K1P 1J1"
             elif kind is list:
-                # A list rule belongs to one search.
                 value = ["Example Model"]
-                where = {"search": cfg_with().searches[0].id}
             else:
                 low, high = control.RULE_BOUNDS[name]
                 value = kind((low + high) / 2)
-            cfg, st = cfg_with(), state_with()
-            out = control.apply(cfg, st, [{"action": "set-rule", "rule": name,
-                                           "value": value, **where}])
-            assert out.changed, f"{name}={value!r}: {out.rejected}"
+            # A list rule belongs to one search. Beta has no rules of its
+            # own, so a global one reaches it.
+            for where in ([{"search": "beta"}] if kind is list
+                          else [{"search": "beta"}, {}]):
+                # A distance needs somewhere to measure from.
+                cfg = cfg_with(filters={"near": "K1P 1J1"})
+                out = control.apply(cfg, state_with(), [{
+                    "action": "set-rule", "rule": name, "value": value, **where}])
+                assert out.changed, f"{name}={value!r} {where}: {out.rejected}"
+                rules = cfg.rules_for(cfg.searches[1])
+                seen = rules[name] if name in rules else rules["filters"].get(name)
+                assert seen == value, f"{name} {where}: set {value!r}, reads {seen!r}"
 
     def test_every_numeric_rule_has_bounds(self):
         """A rule with no bounds accepts a billion, which is not a rule."""
@@ -462,3 +470,210 @@ class TestTakingAMarkBack:
             assert undo.replace("un", "", 1).rstrip("-listing") in action \
                 or action.replace("un", "", 1) in undo \
                 or {action, undo} == {"dismiss", "undismiss"}, (key, action, undo)
+
+
+class TestAChangeIsCheckedWhole:
+    """Each instruction was checked against the config as it stood, and
+    some of the checks ran only while writing. A duplicate search, found
+    part-way through the writes, left the rule before it applied while the
+    page said "Refused"; two removals each left one search, and together
+    left none."""
+
+    OTHER = "https://www.autotrader.ca/cars/toyota/corolla/"
+
+    @pytest.mark.parametrize("url, why", [
+        ("https://www.autotrader.ca/a/honda/civic/ottawa/ontario/5_64123456_20230101/",
+         "single car"),
+        ("https://www.autotrader.ca/offers/honda-civic-si-"
+         "00000000-0000-4000-8000-000000000042", "single car"),
+        ("https://www.autotrader.ca/", "home page"),
+    ])
+    def test_a_link_that_is_not_a_list_of_results(self, url, why):
+        cfg, st = cfg_with(), state_with()
+        out = control.apply(cfg, st, [{"action": "add-search", "url": url}])
+        assert not out.changed and why in out.rejected[0], out.rejected
+        assert len(cfg.searches) == 2
+
+    def test_a_search_already_watched_leaves_the_rest_unwritten(self):
+        cfg, st = cfg_with(), state_with()
+        out = control.apply(cfg, st, [
+            {"action": "set-rule", "search": "Alpha", "rule": "max_price", "value": 30000},
+            {"action": "add-search", "url": "https://www.autotrader.ca/cars/audi/rs6/"}])
+        assert not out.changed and "Beta" in out.rejected[0], out.rejected
+        assert cfg.data["searches"][0]["filters"]["max_price"] == 50000
+        assert len(cfg.searches) == 2
+
+    def test_the_same_search_twice_in_one_change(self):
+        cfg, st = cfg_with(), state_with()
+        out = control.apply(cfg, st, [{"action": "add-search", "url": self.OTHER},
+                                      {"action": "add-search", "url": self.OTHER + "?utm_source=x"}])
+        assert not out.changed and "twice" in out.rejected[0]
+        assert len(cfg.searches) == 2
+
+    def test_removing_every_search_in_one_change(self):
+        cfg, st = cfg_with(), state_with()
+        out = control.apply(cfg, st, [{"action": "remove-search", "search": "Alpha"},
+                                      {"action": "remove-search", "search": "Beta"}])
+        assert not out.changed and "watching nothing" in " ".join(out.rejected)
+        assert [s.id for s in cfg.searches] == ["alpha", "beta"]
+
+    def test_swapping_the_only_search_for_another(self):
+        """Judged over the whole change, the last search can be replaced."""
+        cfg = cfg_with(searches=[{"id": "only", "name": "Only", "enabled": True,
+                                  "url": "https://www.autotrader.ca/cars/", "filters": {}}])
+        out = control.apply(cfg, state_with(), [
+            {"action": "remove-search", "search": "Only"},
+            {"action": "add-search", "url": self.OTHER, "name": "Gamma"}])
+        assert out.changed, out.rejected
+        assert [s.name for s in cfg.searches] == ["Gamma"]
+
+    def test_a_rule_on_a_search_this_change_removes(self):
+        cfg, st = cfg_with(), state_with()
+        out = control.apply(cfg, st, [
+            {"action": "remove-search", "search": "Beta"},
+            {"action": "set-rule", "search": "Beta", "rule": "max_price", "value": 1000}])
+        assert not out.changed and "removed by this same change" in out.rejected[0]
+
+    @pytest.mark.parametrize("failure", [ValueError, RuntimeError])
+    def test_a_write_that_fails_part_way_is_undone(self, failure, monkeypatch):
+        """Whatever the checks miss, the first half of a change is not kept."""
+        ID = "00000000-0000-4000-8000-000000000042"
+        cfg, st = cfg_with(), state_with(ID)
+
+        def broken(search_id):
+            raise failure("the disk said no")
+        monkeypatch.setattr(cfg, "remove_search", broken)
+        change = [{"action": "set-rule", "search": "Alpha", "rule": "max_price",
+                   "value": 30000},
+                  {"action": "shortlist", "listing": ID},
+                  {"action": "remove-search", "search": "Beta"}]
+        if failure is ValueError:
+            out = control.apply(cfg, st, change)
+            assert not out.changed and not out.applied
+            assert "the disk said no" in out.rejected[0]
+        else:
+            with pytest.raises(RuntimeError):
+                control.apply(cfg, st, change)
+        assert cfg.data["searches"][0]["filters"]["max_price"] == 50000
+        assert not st.listings[ID].get("you")
+
+
+class TestANumberThatIsNotOne:
+    """JSON's 1e999 is infinity, and int() of it raised OverflowError past
+    every refusal, out of the command, with the other changes unsaved."""
+
+    @pytest.mark.parametrize("value", [
+        float("inf"), float("-inf"), float("nan"), "inf", "nan", "Infinity", 1e999])
+    @pytest.mark.parametrize("rule", ["max_year", "price_drop_min_pct", "max_price"])
+    def test_is_refused_rather_than_raised(self, rule, value):
+        cfg, st = cfg_with(), state_with()
+        out = control.apply(cfg, st, [{"action": "set-rule", "rule": rule,
+                                       "value": value}])
+        assert not out.changed and "number" in out.rejected[0], out.rejected
+
+    def test_as_the_page_would_never_write_it(self):
+        items = control.parse('[{"action": "set-rule", "rule": "max_year", "value": 1e999},'
+                              ' {"action": "set-marketplace", "setting": "radius_km",'
+                              ' "value": Infinity}]')
+        out = control.apply(cfg_with(), state_with(), items)
+        assert len(out.rejected) == 2 and not out.changed
+
+
+class TestADistanceNeedsAPlace:
+    """The page offers "Within km" and no box for where from. A distance
+    with no place was applied and did nothing: filters.check measures only
+    from `near`, so every car was kept while the Searches tab said the rule
+    was "enforced here"."""
+
+    def _distance(self, cfg, *extra, **where):
+        return control.apply(cfg, state_with(), [
+            *extra, {"action": "set-rule", "rule": "max_distance_km", "value": 100,
+                     **where}])
+
+    def test_with_no_place_it_is_refused_and_says_what_to_set(self):
+        cfg = cfg_with()
+        out = self._distance(cfg, search="Alpha")
+        assert not out.changed
+        assert "near" in out.rejected[0] and "Alpha" in out.rejected[0]
+        assert "max_distance_km" not in cfg.data["searches"][0]["filters"]
+
+    def test_a_place_on_the_search_or_everywhere_will_do(self):
+        cfg = cfg_with()
+        cfg.data["searches"][0]["filters"]["near"] = "K1P 1J1"
+        assert self._distance(cfg, search="Alpha").changed
+        assert self._distance(cfg_with(filters={"near": "Toronto, ON"}), search="Beta").changed
+
+    @pytest.mark.parametrize("first", [True, False])
+    def test_the_place_can_come_in_the_same_change(self, first):
+        near = {"action": "set-rule", "search": "Alpha", "rule": "near", "value": "K1P 1J1"}
+        radius = {"action": "set-rule", "search": "Alpha", "rule": "max_distance_km",
+                  "value": 100}
+        cfg = cfg_with()
+        out = control.apply(cfg, state_with(), [near, radius] if first else [radius, near])
+        assert out.changed, out.rejected
+
+    def test_everywhere_names_each_search_with_nowhere_to_measure_from(self):
+        cfg = cfg_with()
+        cfg.data["searches"][0]["filters"]["near"] = "K1P 1J1"
+        out = self._distance(cfg)
+        assert not out.changed and "Beta" in out.rejected[0] and "Alpha" not in out.rejected[0]
+
+    def test_clearing_it_needs_no_place(self):
+        cfg = cfg_with()
+        cfg.data["searches"][0]["filters"]["max_distance_km"] = 100
+        out = control.apply(cfg, state_with(), [{"action": "set-rule", "search": "Alpha",
+                                                 "rule": "max_distance_km", "value": None}])
+        assert out.changed
+
+    @pytest.mark.parametrize("place", ["Ottawa ON", "Anytown, ON", "Nowhere Special"])
+    def test_a_place_the_bot_cannot_find_is_refused(self, place):
+        """It passed the pattern, then filters.check could not place it and
+        kept every car, logging so once per car on every run."""
+        cfg = cfg_with()
+        out = control.apply(cfg, state_with(), [{"action": "set-rule", "search": "Alpha",
+                                                 "rule": "near", "value": place}])
+        assert not out.changed and "K1P 1J1" in out.rejected[0], out.rejected
+        assert "near" not in cfg.data["searches"][0]["filters"]
+
+
+class TestThePriceDropFloors:
+    """RULE_TYPES accepted both, and they were written into filters, where
+    nothing reads them: "Applied", and the floor stayed where it was."""
+
+    def test_on_one_search(self):
+        cfg = cfg_with()
+        out = control.apply(cfg, state_with(), [
+            {"action": "set-rule", "search": "Alpha", "rule": "price_drop_min_abs",
+             "value": 5000}])
+        assert out.changed
+        assert cfg.rules_for(cfg.searches[0])["price_drop_min_abs"] == 5000
+        assert cfg.rules_for(cfg.searches[1])["price_drop_min_abs"] != 5000
+
+    def test_everywhere_and_back_to_the_default(self):
+        from autotrader.config import DEFAULTS
+        cfg = Config.from_data(cfg_with().data)
+        control.apply(cfg, state_with(), [{"action": "set-rule",
+                                           "rule": "price_drop_min_pct", "value": 10}])
+        assert cfg.rules_for(cfg.searches[1])["price_drop_min_pct"] == 10
+        control.apply(cfg, state_with(), [{"action": "set-rule",
+                                           "rule": "price_drop_min_pct", "value": None}])
+        assert (cfg.rules_for(cfg.searches[1])["price_drop_min_pct"]
+                == DEFAULTS["notifications"]["price_drop_min_pct"])
+
+
+class TestWhyAChannelIsOff:
+    """Setup switches ntfy back on when nothing else can reach the owner,
+    unless it knows the owner switched it off (provision.py)."""
+
+    def test_switching_one_off_says_who_did(self):
+        cfg = cfg_with()
+        control.apply(cfg, state_with(), [{"action": "set-channel", "channel": "ntfy",
+                                           "enabled": False}])
+        assert "dashboard" in cfg.get("notifications.channels.ntfy.disabled_reason")
+
+    def test_switching_it_back_on_clears_the_reason(self):
+        cfg = cfg_with()
+        cfg.set("notifications.channels.ntfy.disabled_reason", "Switched off automatically")
+        control.apply(cfg, state_with(), [{"action": "set-channel", "channel": "ntfy",
+                                           "enabled": True}])
+        assert "disabled_reason" not in cfg.get("notifications.channels.ntfy")

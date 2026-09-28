@@ -86,7 +86,9 @@ def cmd_run(args: argparse.Namespace) -> int:
             else:
                 print(f"   {DIM}  {detail}{RESET}")
     if not args.dry_run:
-        written = dashboard.write(cfg, state)
+        # The channel secrets are in this environment; without them the page
+        # would say that no channel is on.
+        written = dashboard.write(cfg, state, dict(os.environ))
         if written:
             print(f"   dashboard data written to {written}")
     return 0 if report.ok else 1
@@ -211,8 +213,12 @@ def cmd_enable(args: argparse.Namespace) -> int:
     return 1
 
 
-def _coerce(text: str) -> Any:
-    """Turn a command-line value into the JSON type it obviously is."""
+def _coerce(text: str, names: bool = True) -> Any:
+    """Turn a command-line value into the JSON type it obviously is.
+
+    With ``names`` false a comma is part of the text: "Toronto, ON" is one
+    place, not a list of two.
+    """
     lowered = text.strip().lower()
     if lowered in {"true", "yes", "on"}:
         return True
@@ -228,19 +234,23 @@ def _coerce(text: str) -> Any:
         return float(text)
     except ValueError:
         pass
-    if "," in text:
+    if names and "," in text:
         return [part.strip() for part in text.split(",") if part.strip()]
     return text
 
 
 _NAME_LISTS = {"models", "aliases", "include_keywords", "exclude_keywords",
                "exclude_sellers", "provinces"}
+# A search's own price-drop floors sit beside its filters, not in them:
+# that is where Config.rules_for reads them.
+_SEARCH_SETTINGS = {"price_drop_min_pct", "price_drop_min_abs"}
 
 
 def cmd_set(args: argparse.Namespace) -> int:
     """Change one setting, globally or for a single search."""
     cfg = Config.load(args.config)
-    value = _coerce(args.value)
+    # Only a rule that holds names is a list; any other value keeps its commas.
+    value = _coerce(args.value, names=args.key.rsplit(".", 1)[-1] in _NAME_LISTS)
 
     if args.search:
         matches = [s for s in cfg.searches
@@ -263,13 +273,22 @@ def cmd_set(args: argparse.Namespace) -> int:
                 if args.key in _NAME_LISTS and value is not None \
                         and not isinstance(value, list):
                     value = [str(value)]
-                raw.setdefault("filters", {})[args.key] = value
+                if args.key in _SEARCH_SETTINGS:
+                    raw[args.key] = value
+                else:
+                    raw.setdefault("filters", {})[args.key] = value
         cfg.save()
         print(_ok(f"{target.name}: {args.key} = {value!r}"))
         return 0
 
     before = cfg.get(args.key, "<unset>")
     cfg.set(args.key, value)
+    # Switching a channel back on clears why it was switched off, or setup
+    # would read it as still retired (see provision.ensure_notifications).
+    channel = re.fullmatch(r"notifications\.channels\.(\w+)\.enabled", args.key)
+    if channel and value:
+        (cfg.get(f"notifications.channels.{channel.group(1)}") or {}).pop(
+            "disabled_reason", None)
     cfg.save()
     print(_ok(f"{args.key}: {before!r} -> {value!r}"))
     return 0
@@ -900,7 +919,7 @@ def cmd_control(args: argparse.Namespace) -> int:
     cfg = Config.load(args.config)
     state = State.load(args.state)
     key = None
-    refused = applied = 0
+    refused = applied = skipped = 0
     for path, from_dir in files:
         try:
             body = path.read_text(encoding="utf-8")
@@ -914,8 +933,21 @@ def cmd_control(args: argparse.Namespace) -> int:
                     "only sealed changes sent from the dashboard are accepted here")
             outcome = control.apply(cfg, state, control.parse(body))
             text, ok = outcome.comment(), bool(outcome.changed)
+        except AlreadyRead:
+            # A check queued behind the one that read this file can still
+            # find it in its checkout. It was dealt with then, so it is
+            # neither applied again nor recorded as refused.
+            print("a change already read; skipped")
+            skipped += 1
+            continue
         except (control.Rejected, V.VaultError, ValueError, OSError) as exc:
             text, ok = str(exc), False
+        except Exception as exc:  # noqa: BLE001 - see below
+            # The changes before this one are saved below whatever this was,
+            # and the Save step removes every change file, so this one is
+            # recorded rather than lost. Only the kind of failure: the text of
+            # an unplanned one could hold anything.
+            text, ok = f"failed ({type(exc).__name__})", False
         state.record_change(ok=ok, text=text)
         print(text)
         applied += ok
@@ -923,7 +955,8 @@ def cmd_control(args: argparse.Namespace) -> int:
     if not args.dry_run:
         cfg.save()
         state.save()
-    print(f"{_many(applied, 'change')} applied, {refused} refused")
+    print(f"{_many(applied, 'change')} applied, {refused} refused"
+          + (f", {skipped} already read" if skipped else ""))
     return 1 if refused else 0
 
 
@@ -996,19 +1029,24 @@ def cmd_marketplace(args: argparse.Namespace) -> int:
         print(f"   {line}")
     if not args.dry_run:
         state.save()
-        dashboard.write(cfg, state)
+        dashboard.write(cfg, state, dict(os.environ))
     return 0 if report.ok else 1
 
 
 CHANGE_MAX_AGE_DAYS = 14
 
 
+class AlreadyRead(Exception):
+    """A sealed change whose id an earlier check already read."""
+
+
 def _open_envelope(state: State, sealed: bytes) -> str:
     """The instructions inside a sealed change, once it is known to be new.
 
-    The page wraps them as {"id", "at", "changes"}. A change already applied,
-    or older than CHANGE_MAX_AGE_DAYS, is refused: the sealed file stays in
-    the repository's public history and could be committed again.
+    The page wraps them as {"id", "at", "changes"}. A change already read is
+    skipped (AlreadyRead), whatever became of it then, and one older than
+    CHANGE_MAX_AGE_DAYS is refused: the sealed file stays in the repository's
+    public history and could be committed again.
     """
     from datetime import timedelta
     from . import clock, control
@@ -1024,7 +1062,7 @@ def _open_envelope(state: State, sealed: bytes) -> str:
         raise control.Rejected("the sealed change has no id")
     seen = state.data.setdefault("change_ids", [])
     if change_id in seen:
-        raise control.Rejected("this change was already applied once")
+        raise AlreadyRead(change_id)
     made = clock.parse(envelope.get("at"))
     if made is None:
         raise control.Rejected("the sealed change has no time")
@@ -1069,6 +1107,10 @@ def cmd_vault(args: argparse.Namespace) -> int:
             return 0
 
         if args.action == "publish":
+            why = V.unsafe_site_dir(root, args.dir) or V.unpublishable(args.dir)
+            if why:
+                print(_bad(f"refusing to publish {args.dir}: {why}"))
+                return 1
             V.push_branch(root, V.SITE_BRANCH, Path(args.dir), "Publish")
             print("site: published")
             return 0
@@ -1104,6 +1146,10 @@ def cmd_vault(args: argparse.Namespace) -> int:
             return 0
 
         if args.action == "site":
+            why = V.unsafe_site_dir(root, args.dir)
+            if why:
+                print(_bad(f"refusing to build the site in {args.dir}: {why}"))
+                return 1
             from .dashboard import find_secrets
             data = root / "docs" / "data.json"
             if data.is_file():
@@ -1161,6 +1207,7 @@ def cmd_setup(args: argparse.Namespace) -> int:
         topic = provision.generate_topic()
         cfg.set("notifications.channels.ntfy.topic", topic)
         cfg.set("notifications.channels.ntfy.enabled", True)
+        cfg.data["notifications"]["channels"]["ntfy"].pop("disabled_reason", None)
         cfg.save()
         print(_ok(f"new ntfy topic: {topic}"))
         print(f"   subscribe at {BOLD}{provision.subscribe_url(cfg)}{RESET}")
@@ -1299,7 +1346,7 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("dashboard", help="regenerate docs/data.json")
     p.set_defaults(func=cmd_dashboard)
 
-    p = sub.add_parser("ui", help="open the settings and dashboard UI in a browser")
+    p = sub.add_parser("ui", help="open the dashboard, read-only, from the local files")
     p.add_argument("--host", default="127.0.0.1")
     p.add_argument("--port", type=int, default=8765)
     p.add_argument("--no-browser", action="store_true")
@@ -1391,7 +1438,10 @@ def main(argv: list[str] | None = None) -> int:
     )
     if not getattr(args, "func", None):
         # Bare invocation is the common case in CI: just do a run.
-        args = parser.parse_args((argv or []) + ["run"])
+        # sys.argv when argv is None, or the --config and --state typed on
+        # the command line would be dropped here.
+        args = parser.parse_args(
+            (sys.argv[1:] if argv is None else list(argv)) + ["run"])
     try:
         return int(args.func(args) or 0)
     except ConfigError as exc:

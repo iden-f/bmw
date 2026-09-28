@@ -339,3 +339,92 @@ class TestADeduplicatedFiringDoesNotBlankTheWarnings:
         assert health["drift"] == ["jsonld stopped matching"]
         assert health["budget"]["used"] == 32
         assert health["diagnostics"] == ["diagnostics/shape.json"]
+
+
+class TestTheChannelsTheCheckCanUse:
+    """The page is built by commands that were given no secrets: the check
+    wrote it without passing its environment on, and Publish dashboard and
+    the local `ui` have none. Every channel set up by a secret then read as
+    missing, and the page told an owner whose alerts go to Telegram that
+    alerts go nowhere."""
+
+    TELEGRAM = {"TELEGRAM_BOT_TOKEN": "not-a-real-token", "TELEGRAM_CHAT_ID": "1"}
+
+    def test_a_check_publishes_what_its_secrets_switch_on(self, tmp_path, monkeypatch):
+        from autotrader import cli, runner
+        monkeypatch.chdir(tmp_path)
+        for name, value in self.TELEGRAM.items():
+            monkeypatch.setenv(name, value)
+        cfg, state = _payload(tmp_path)
+        cfg.save()
+        state.save()
+        monkeypatch.setattr(runner, "run", lambda *a, **k: runner.RunReport())
+        cli.main(["--config", str(cfg.path), "--state", str(state.path), "run",
+                  "--no-lock"])
+        published = json.loads((tmp_path / "docs" / "data.json").read_text())
+        assert published["notify"]["active"] == ["telegram"]
+        assert "not-a-real-token" not in json.dumps(published)
+
+    def test_the_check_records_which_secrets_it_had_by_name(self, bench, monkeypatch):
+        for name, value in self.TELEGRAM.items():
+            monkeypatch.setenv(name, value)
+        bench.run()
+        saved = (bench.path / "state.json").read_text()
+        assert json.loads(saved)["secrets_present"] == sorted(self.TELEGRAM)
+        assert "not-a-real-token" not in saved
+
+    def test_a_page_built_later_without_them_still_shows_them(self, tmp_path):
+        cfg, state = _payload(tmp_path)
+        state.data["secrets_present"] = sorted(self.TELEGRAM)
+        payload = build_payload(cfg, state)
+        assert payload["notify"]["active"] == ["telegram"]
+        assert payload["channels"]["telegram"]["missing"] == []
+        # An environment that is given is still the one believed.
+        assert build_payload(cfg, state, {})["notify"]["active"] == []
+
+
+class TestWhereAChangeIsSent:
+    """The page opens github.com/<repo>/new/main, so a wrong name is a 404
+    on every change button."""
+
+    @pytest.mark.parametrize("remote", [
+        "https://github.com/someone/car.watch.git\n",
+        "https://github.com/someone/car.watch\n",
+        "https://github.com/someone/car.watch/\n",
+        "git@github.com:someone/car.watch.git\n",
+    ])
+    def test_a_repository_name_with_a_dot_in_it(self, remote, monkeypatch):
+        import subprocess
+        from autotrader.dashboard import _repo_slug
+        monkeypatch.setattr(subprocess, "run", lambda *a, **k:
+                            subprocess.CompletedProcess(a, 0, stdout=remote))
+        assert _repo_slug({}) == "someone/car.watch"
+
+    def test_publish_dashboard_names_it_from_its_environment(self, tmp_path, monkeypatch):
+        """Publish dashboard passes no environment, but has GITHUB_REPOSITORY."""
+        monkeypatch.setenv("GITHUB_REPOSITORY", "someone/car.watch")
+        cfg, state = _payload(tmp_path)
+        assert build_payload(cfg, state)["repo"] == "someone/car.watch"
+
+
+class TestTheAreaSaysWhetherItIsApplied:
+    """The Searches tab says "enforced here" beside every area. A distance
+    with no place, or with a place the bot cannot find, is not enforced at
+    all: filters.check keeps every car."""
+
+    def _area(self, tmp_path, **rules):
+        cfg, state = _payload(tmp_path)
+        cfg.data["searches"][0].setdefault("filters", {}).update(rules)
+        return build_payload(cfg, state, {})["searches"][0]["area"]
+
+    def test_a_distance_with_no_place(self, tmp_path):
+        area = self._area(tmp_path, max_distance_km=100)
+        assert area["enforced"] is False and "no place" in area["why"]
+
+    def test_a_place_it_cannot_find(self, tmp_path):
+        area = self._area(tmp_path, max_distance_km=100, near="Anytown, ON")
+        assert area["enforced"] is False and "Anytown, ON" in area["why"]
+
+    def test_a_place_it_can(self, tmp_path):
+        area = self._area(tmp_path, max_distance_km=100, near="K1P 1J1")
+        assert area.get("enforced") is not False and area["resolved"]
