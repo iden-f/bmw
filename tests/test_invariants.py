@@ -14,7 +14,7 @@ from autotrader.config import Config
 from autotrader.runner import run
 from autotrader.state import State
 
-from .helpers import Capture, FakeFetcher, use_channels
+from .helpers import Capture, FakeFetcher, next_check, use_channels
 
 BASE = "https://www.autotrader.ca/cars/honda/civic"
 
@@ -361,6 +361,60 @@ class TestAScopeChangeIsABaseline:
         assert report.new == 9
         assert [c for batch in bench.sink.digests for c in batch]
 
+    def test_tightening_a_rule_does_not_quiet_a_car_that_is_new(self, bench):
+        """A stricter rule cannot reveal a car. Every rule but the models
+        rule hides a car it still records, so a change to one can only let
+        stored cars through, and only those are kept quiet."""
+        smaller = self._shrink(bench.html, 10)
+        bench.cfg.set("filters.max_price", 200000)
+        bench.cfg.save()
+        bench.run(smaller)
+        bench.sink.digests.clear()
+
+        bench.cfg.set("filters.max_price", 150000)
+        bench.cfg.save()
+        report = bench.run(bench.html)          # nine more cars appear
+        assert report.new > 0
+        sent = [c for batch in bench.sink.digests for c in batch if c.kind == "new"]
+        assert len(sent) == report.new, "a new car inside the rules is news"
+        assert not report.invariants
+
+    def test_loosening_one_announces_a_car_that_is_new_and_quiets_the_rest(self, bench):
+        smaller = self._shrink(bench.html, 10)
+        bench.cfg.set("filters.max_price", 85000)
+        bench.cfg.save()
+        bench.run(smaller)
+        bench.sink.digests.clear()
+
+        bench.cfg.set("filters.max_price", 200000)
+        bench.cfg.save()
+        report = bench.run(bench.html)
+        sent = [c for batch in bench.sink.digests for c in batch]
+        assert report.qualified > 0 and report.new == 9
+        assert sent and {c.kind for c in sent} == {"new"}, [c.kind for c in sent]
+        assert any("rules changed" in (e.get("quiet_reason") or "")
+                   for e in bench.state().listings.values())
+
+    def test_changing_the_models_rule_is_still_a_scope_change(self, bench):
+        bench.cfg.set("filters.models", ["Civic"])
+        bench.cfg.save()
+        bench.run()
+        bench.cfg.set("filters.models", ["Civic", "Accord"])
+        bench.cfg.save()
+        assert bench.run().baselines == ["Example search"]
+
+    def test_state_from_before_the_split_does_not_start_every_search_over(self, bench):
+        """It held one fingerprint of the link and every rule together."""
+        bench.run()
+        state = bench.state()
+        for health in state.data["searches"].values():
+            health.pop("rule_scope")
+            health["scope"] = "0123456789abcdef"
+        state.save()
+        report = bench.run()
+        assert report.baselines == []
+        assert all(h.get("rule_scope") for h in bench.state().data["searches"].values())
+
     def test_a_baseline_does_not_call_anything_removed(self, bench):
         """Narrowing a search must not announce the excluded cars as sold."""
         bench.run()
@@ -529,6 +583,88 @@ class TestAQueueThatNeverDrains:
 
         bench.run()                       # channels are back
         assert invariants.check(bench.cfg, bench.state()) == []
+
+
+class TestHowLongAnAlertHasWaited:
+    """Every run that held an alert again stamped it afresh, so an alert held
+    all night arrived saying "held 2 hours", and the stuck-queue rule above
+    could only ever fire when a test edited the stamp by hand."""
+
+    @staticmethod
+    def _down(monkeypatch):
+        from autotrader.notifiers import Notifier, Result
+
+        class Down(Notifier):
+            name = "down"
+
+            def _send(self, changes, run):
+                return Result("down", False, "HTTP 503 from the service")
+
+            def _send_text(self, subject, body):
+                return Result("down", False, "HTTP 503 from the service")
+
+        use_channels(monkeypatch, runner_mod, [Down({}, {}, {})])
+
+    def test_a_held_alert_keeps_the_time_it_was_first_owed(self, bench, monkeypatch):
+        monkeypatch.setattr(runner_mod.notifiers, "in_quiet_hours", lambda *a, **k: True)
+        next_check()
+        bench.run()
+        first = {lid: e["pending"]["since"] for lid, e in bench.state().listings.items()
+                 if e.get("pending")}
+        assert first
+        for _ in range(4):
+            next_check()
+            bench.run()
+        later = {lid: e["pending"]["since"] for lid, e in bench.state().listings.items()
+                 if e.get("pending")}
+        assert later == first
+
+    def test_quiet_hours_are_not_a_stuck_queue(self, bench, monkeypatch):
+        monkeypatch.setattr(runner_mod.notifiers, "in_quiet_hours", lambda *a, **k: True)
+        next_check()
+        bench.run()
+        next_check(13 * 60)
+        assert not bench.run().invariants
+
+    def test_a_day_of_failed_delivery_fails_the_run(self, bench, monkeypatch):
+        self._down(monkeypatch)
+        next_check()
+        bench.run()
+        broken = []
+        for _ in range(8):                    # sixteen hours, every check failing
+            next_check()
+            broken = bench.run().invariants
+        assert any("not delivered" in v for v in broken), broken
+
+    def test_and_the_alert_that_gets_through_says_how_late_it_is(self, bench, monkeypatch):
+        from autotrader import render
+        self._down(monkeypatch)
+        next_check()
+        bench.run()
+        for _ in range(4):
+            next_check()
+            bench.run()
+        use_channels(monkeypatch, runner_mod, [bench.sink])
+        next_check()
+        bench.run()
+        delivered = [c for batch in bench.sink.digests for c in batch]
+        assert delivered
+        assert all(render._held_note(c).startswith("held 10 hours")
+                   for c in delivered), [render._held_note(c) for c in delivered]
+
+    def test_a_long_first_digest_draining_is_not_a_stuck_queue(self, bench):
+        """Twelve cars a run, from one search of many: some wait past the
+        twelve hours, and every run is delivering."""
+        bench.cfg.set("notifications.max_listings_per_message", 1)
+        bench.cfg.save()
+        next_check()
+        bench.run()
+        for _ in range(7):
+            next_check()
+            report = bench.run()
+            assert not report.invariants, report.invariants
+        assert any(e.get("pending") for e in bench.state().listings.values()), \
+            "the test needs a queue still draining past twelve hours"
 
 
 class TestAnOwedAlertSurvives:
@@ -734,7 +870,7 @@ class TestARuleThatStopsApplying:
         from autotrader import runner as runner_mod
         from autotrader.config import Config
         from autotrader.runner import run
-        from .helpers import Capture, FakeFetcher, use_channels
+        from .helpers import Capture, FakeFetcher, next_check, use_channels
 
         monkeypatch.chdir(tmp_path)
         cfg = Config.defaults(tmp_path / "config.json")

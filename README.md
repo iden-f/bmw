@@ -202,7 +202,8 @@ And for alerts, globally:
 A check is due every two hours. GitHub runs scheduled workflows on a
 best-effort basis and drops runs, often whole stretches of them, so **Check
 AutoTrader** fires every 30 minutes and a firing that lands within 90 minutes
-of the last check stands down without contacting AutoTrader. The Status tab
+of the last check stands down without contacting AutoTrader. A check the site
+turned away with an anti-bot page counts as the last check. The Status tab
 shows which two-hour windows had a check and what started each one.
 
 For a clock that does not depend on GitHub's scheduler, point an outside timer

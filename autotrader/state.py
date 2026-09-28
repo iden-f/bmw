@@ -338,6 +338,11 @@ class State:
             entry["price"] = old_price
             entry["price_source"] = old_source
             entry["price_disputed"] = listing.price
+            # And the card figure that page last answered for. Taking the
+            # new one would make the card look settled, so a check that
+            # failed once would never be asked again and the move be lost.
+            if existing.get("card_price") is not None:
+                entry["card_price"] = existing["card_price"]
         elif listing.price is not None and listing.price != old_price:
             history.append({"at": now, "price": listing.price})
             entry.pop("price_disputed", None)
@@ -425,8 +430,14 @@ class State:
             if entry is None:
                 continue
             entry["notified"] = False
+            # When the car was first owed, kept however often it is held
+            # again: that is how late the alert is, and what the stuck-queue
+            # check measures. Delivery clears it, so the next debt starts
+            # fresh.
+            since = ((entry.get("pending") or {}).get("since")
+                     or change.held_since or utcnow())
             entry["pending"] = {"kind": change.kind, "old_price": change.old_price,
-                                "new_price": change.new_price, "since": utcnow()}
+                                "new_price": change.new_price, "since": since}
 
     def heard_price(self, listing_id: str) -> int | None:
         """The price you were last told this car costs.
@@ -768,6 +779,11 @@ class State:
             if entry.get("search_id") not in keep_ids and entry.get("status") == "active":
                 entry["status"] = "gone"
                 entry["removed_at"] = utcnow()
+                # Quiet from here, so an alert still waiting for it goes too:
+                # kept, it contradicted the quiet mark and would have gone out
+                # about a car from a search you took away.
+                entry.pop("pending", None)
+                entry.pop("ride_along", None)
                 entry["quiet_reason"] = "the search that was watching this was removed"
                 entry["notified"] = True
                 released += 1

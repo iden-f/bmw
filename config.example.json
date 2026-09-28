@@ -95,6 +95,7 @@
     "enrich_limit": 25,
     "unpriced_rechecks": 3,
     "request_budget": 250,
+    "run_seconds": 720,
     "user_agent": "auto"
   },
   "archive": {

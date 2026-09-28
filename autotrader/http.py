@@ -57,7 +57,17 @@ BLOCK_MARKERS = (
 
 
 class FetchError(RuntimeError):
-    """A URL could not be fetched after retrying."""
+    """A URL could not be fetched after retrying.
+
+    ``status`` is the HTTP status the site answered with, or None when it
+    never answered (a timeout, a refused connection, a spent budget), so a
+    caller can tell a sold car's 404 from a bad day without reading the
+    message.
+    """
+
+    def __init__(self, message: str = "", status: int | None = None) -> None:
+        super().__init__(message)
+        self.status = status
 
 
 class BlockedError(FetchError):
@@ -106,6 +116,7 @@ class Fetcher:
         delay_ms: int = 1200,
         user_agent: str = "auto",
         budget: int = 0,
+        run_seconds: float = 0,
         session: requests.Session | None = None,
     ) -> None:
         self.timeout = max(5, int(timeout))
@@ -116,6 +127,13 @@ class Fetcher:
         # many pages x detail lookups) cannot become a crawl of someone else's
         # site.
         self.budget = max(0, int(budget))
+        # And on how long a run may spend asking. A slow or throttling site
+        # answers every request eventually, and four tries of thirty seconds
+        # at a couple of hundred pages outlasts the job's own time limit,
+        # which cancels it before anything is saved. Zero means no limit.
+        self.run_seconds = max(0.0, float(run_seconds or 0))
+        self._deadline = (time.monotonic() + self.run_seconds
+                          if self.run_seconds else None)
         self.session = session or requests.Session()
         self.session.headers.update({**BASE_HEADERS, "User-Agent": self.user_agent})
         self._last_request_at = 0.0
@@ -125,7 +143,12 @@ class Fetcher:
 
     @property
     def budget_left(self) -> int:
+        if self._out_of_time():
+            return 0
         return max(0, self.budget - self.spent) if self.budget else 1_000_000
+
+    def _out_of_time(self) -> bool:
+        return self._deadline is not None and time.monotonic() >= self._deadline
 
     def _spend(self) -> None:
         """Count a request against the budget, refusing once it runs out.
@@ -137,6 +160,11 @@ class Fetcher:
             raise BudgetExhausted(
                 f"this run has used its allowance of {self.budget} requests. "
                 "Raise scraping.request_budget, or lower max_pages/enrich_limit.")
+        if self._out_of_time():
+            raise BudgetExhausted(
+                f"this run has spent the {self.run_seconds / 60:.0f} minutes it "
+                "may take reading the site, which is answering slowly; the rest "
+                "waits for the next check. scraping.run_seconds sets the limit.")
         self.spent += 1
         self.stats["spent"] = self.spent
 
@@ -183,19 +211,23 @@ class Fetcher:
             text = raw.text or ""
 
             if raw.status_code in RETRY_STATUS:
-                last_error = FetchError(f"HTTP {raw.status_code} from {url}")
+                last_error = FetchError(f"HTTP {raw.status_code} from {url}",
+                                        status=raw.status_code)
                 continue
             if not (200 <= raw.status_code < 300):
-                last_error = FetchError(f"HTTP {raw.status_code} from {url}")
+                last_error = FetchError(f"HTTP {raw.status_code} from {url}",
+                                        status=raw.status_code)
                 break  # 404 and friends will not improve on retry.
             if looks_blocked(text, raw.status_code) and not allow_block:
                 self.stats["blocked"] += 1
                 last_error = BlockedError(
                     f"autotrader.ca served an anti-bot page for {url}. "
                     "This usually clears on its own; if it persists, slow the "
-                    "bot down (scraping.delay_ms) or run it less often."
-                )
-                continue
+                    "bot down (scraping.delay_ms) or run it less often.",
+                    status=raw.status_code)
+                # Not retried: the site is asking for fewer requests, and a
+                # second one seconds later is more.
+                break
             return Response(url=raw.url, status=raw.status_code, text=text,
                             elapsed_ms=elapsed)
 

@@ -49,10 +49,9 @@ class Site:
                 lid = key
                 break
         if lid in self.boom:
+            # As the real client raises it: the message and the status.
             from autotrader.http import FetchError
-            exc = FetchError("gone")
-            exc.status = 404
-            raise exc
+            raise FetchError(f"HTTP 404 from {url}", status=404)
         if lid in self.missing:
             return self._as_the_real_one_would(
                 url, "<html><body>This listing is no longer available</body></html>")
@@ -163,6 +162,38 @@ class TestWhatItReports:
         out = capsys.readouterr().out
         assert "gone from the site" in out
 
+    def test_a_404_from_the_real_client_is_a_car_gone(self, bench, monkeypatch, capsys):
+        """The stand-in above once set .status by hand on an error the real
+        client never gave one, so a sold car always read as unreadable."""
+        import requests
+
+        from autotrader import cli
+        from autotrader.http import Fetcher as Real
+
+        class Answers404:
+            headers = {}
+
+            def get(self, url, **kwargs):
+                response = requests.Response()
+                response.status_code = 404
+                response._content = b"<html>not here</html>"
+                response.url = url
+                return response
+
+            def close(self):
+                pass
+
+        def build(**kw):
+            real = Real(**{**kw, "delay_ms": 0, "retries": 0})
+            real.session = Answers404()
+            return real
+
+        monkeypatch.setattr(cli, "Fetcher", build)
+        assert main(["verify"]) == 0
+        out = capsys.readouterr().out
+        assert "gone from the site (HTTP 404)" in out, out
+        assert "2 gone, 0 unreadable" in out, out
+
     def test_a_page_that_says_it_is_gone_counts_as_gone(self, bench, monkeypatch, capsys):
         run(monkeypatch, Site(missing=["bbb"]))
         assert "gone" in capsys.readouterr().out
@@ -232,3 +263,23 @@ class TestThePageAsAPersonReadsIt:
         # ever decides whether the bot's own figure is present.
         assert _dollar_figures("$799/mo $99 down $60,000") == {60000}
         assert _dollar_figures("$1,299 bi-weekly") == {1299}
+
+
+class TestItLeavesMarketplaceAlone:
+    """This client is not a browser, and Facebook is only ever read by the
+    collector on a computer at home - slowly, as a person would."""
+
+    def test_no_marketplace_page_is_asked_for(self, bench, monkeypatch, capsys):
+        state = State.load(bench.path / "state.json")
+        state.record(Listing(
+            id="fb-1234567890",
+            url="https://www.facebook.com/marketplace/item/1234567890/",
+            title="Honda Civic", year=2018, make="Honda", model="Civic",
+            price=58000, search_id=bench.cfg.searches[0].id))
+        state.save()
+        site = Site()
+        assert run(monkeypatch, site) == 0
+        assert not [u for u in site.asked if "facebook.com" in u], site.asked
+        assert len(site.asked) == 2
+        out = capsys.readouterr().out
+        assert "1 on Marketplace (the collector reports those)" in out, out

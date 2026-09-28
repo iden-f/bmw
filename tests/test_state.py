@@ -50,6 +50,21 @@ def test_card_and_detail_prices_are_never_compared(tmp_path):
     assert "price_disputed" not in s.listings["1"]
 
 
+def test_a_disputed_card_keeps_the_card_figure_its_page_answered_for(tmp_path):
+    """The card moved and the listing page could not be read. Storing the new
+    card figure made the card look settled, so the page was never asked
+    again and the drop was lost for good."""
+    s = State(path=tmp_path / "state.json")
+    s.record(car(102199, price_source="detail", card_price=102199))
+    assert s.record(car(94000, price_source="search", card_price=94000)) is None
+    assert s.listings["1"]["price"] == 102199
+    assert s.listings["1"]["card_price"] == 102199, "the move must still look unsettled"
+    # Once the page answers, the move is a drop like any other.
+    change = s.record(car(94000, price_source="detail", card_price=94000))
+    assert change.kind == Change.PRICE_DROP
+    assert s.listings["1"]["card_price"] == 94000
+
+
 def test_price_history_accumulates(tmp_path):
     s = State(path=tmp_path / "state.json")
     for price in (100000, 96000, 92000):

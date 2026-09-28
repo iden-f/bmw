@@ -512,7 +512,10 @@ class EmailNotifier(Notifier):
             smtp.send_message(message, from_addr=user, to_addrs=recipients)
 
     def _send(self, changes: list[Change], run: dict[str, Any]) -> Result:
-        limit = max(self.limit, 20)
+        # The same cap as every other channel. The runner marks as told only
+        # the cars inside it and holds the rest for the next message, so an
+        # email that named more would name those cars twice.
+        limit = self.limit
         self._deliver(
             render.headline(changes),
             render.as_text(changes, limit=limit),

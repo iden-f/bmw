@@ -218,6 +218,14 @@ class TestStoppingRatherThanSpending:
         text = stop.read_text()
         assert "stopped checking" in text
         assert "Delete this file" in text, "a guard with no way out is a trap"
+        # It stops the checks, not the bill: every firing still starts a job.
+        assert "billed" in text and "disable the Check AutoTrader workflow" in text
+
+    def test_the_stop_alert_says_the_firings_are_still_billed(self, watcher):
+        self.spend_the_month(watcher, 400.0)
+        watcher.run()
+        [(_, body)] = [(s, b) for s, b in watcher.sink.alerts if "minutes are spent" in s]
+        assert "billed" in body and "Actions tab" in body
 
     def test_it_says_so_out_loud_once(self, watcher):
         """Silently stopping is the same failure as silently spending."""

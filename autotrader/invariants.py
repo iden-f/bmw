@@ -103,13 +103,18 @@ def check(cfg, state, report=None, payload: dict[str, Any] | None = None,
             "delivered at the same time", contradictory))
 
     # A queue that only grows means nothing is getting through, so the run
-    # says so rather than counting those alerts as handled.
+    # says so rather than counting those alerts as handled. Not while a
+    # channel is delivering: a long first digest drains twelve cars a run and
+    # can take longer than this, and not in quiet hours, which hold alerts on
+    # purpose.
     cutoff = (clock.now()
               - timedelta(hours=STUCK_QUEUE_HOURS)).isoformat(timespec="seconds")
     stranded = [lid for lid, e in listings.items()
                 if isinstance(e.get("pending"), dict)
                 and str(e["pending"].get("since") or "") < cutoff]
-    if stranded:
+    delivering = any(str((health or {}).get("last_ok") or "") >= cutoff
+                     for health in (state.data.get("channels") or {}).values())
+    if stranded and not delivering and not getattr(report, "quiet", False):
         out.append(_violation(
             "accounted-for", f"alerts queued for more than "
             f"{STUCK_QUEUE_HOURS} hours and still not delivered", stranded))

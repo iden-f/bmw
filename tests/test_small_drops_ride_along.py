@@ -185,6 +185,122 @@ class TestTheCapCannotTurnARiderIntoAnAlert:
         assert watch.sink.digests == [], "nothing new, so nothing sent"
 
 
+class TestQuietHoursCannotTurnARiderIntoAnAlert:
+    """Quiet hours held every change as owed, rider included, and a rider
+    that had lost its flag went out on its own once a cap left it behind."""
+
+    def quiet(self, monkeypatch, on):
+        monkeypatch.setattr(runner_mod.notifiers, "in_quiet_hours",
+                            lambda *a, **k: on)
+
+    def test_a_rider_held_through_quiet_hours_stays_a_rider(self, watch, monkeypatch):
+        watch.cfg.set("notifications.max_listings_per_message", 1)
+        watch.cfg.save()
+        dropped = drop_price(watch.html, CAR_PRICE, CAR_PRICE - 1000)
+        watch.run(dropped)
+        rider = watch.car_id(dropped, CAR_PRICE - 1000)
+
+        self.quiet(monkeypatch, True)
+        page, fresh = watch.with_a_new_car(dropped)
+        watch.run(page, minutes_later=240)
+        entry = watch.state().listings[rider]
+        assert entry.get("ride_along") and not entry.get("pending")
+
+        self.quiet(monkeypatch, False)
+        watch.run(page, minutes_later=480)
+        assert sent(watch)[0].listing.id == fresh
+        entry = watch.state().listings[rider]
+        assert entry.get("ride_along") and not entry.get("pending"), \
+            "the cap left it out, and it is still a rider"
+
+        watch.sink.digests.clear()
+        watch.run(page, minutes_later=600)
+        assert watch.sink.digests == [], "a small drop never buzzes the phone alone"
+
+    def test_after_quiet_hours_it_rides_with_the_held_new_car(self, watch, monkeypatch):
+        dropped = drop_price(watch.html, CAR_PRICE, CAR_PRICE - 1000)
+        watch.run(dropped)
+        self.quiet(monkeypatch, True)
+        page, fresh = watch.with_a_new_car(dropped)
+        watch.run(page, minutes_later=240)
+        self.quiet(monkeypatch, False)
+        watch.run(page, minutes_later=480)
+        digest = [(c.kind, c.rider) for c in sent(watch)]
+        assert digest == [(Change.NEW, False), (Change.PRICE_DROP, True)], digest
+
+    def test_every_channel_failing_keeps_a_rider_a_rider(self, watch, monkeypatch):
+        from autotrader.notifiers import Notifier, Result
+
+        class Down(Notifier):
+            name = "down"
+
+            def _send(self, changes, run):
+                return Result("down", False, "HTTP 503 from the service")
+
+        dropped = drop_price(watch.html, CAR_PRICE, CAR_PRICE - 1000)
+        watch.run(dropped)
+        use_channels(monkeypatch, runner_mod, [Down({}, {}, {})], [watch.sink])
+        page, _ = watch.with_a_new_car(dropped)
+        watch.run(page, minutes_later=240)
+        entry = watch.state().listings[watch.car_id(dropped, CAR_PRICE - 1000)]
+        assert entry.get("ride_along") and not entry.get("pending")
+
+
+class TestYourMarkStopsWhatIsWaiting:
+    """A mute or a dismiss from the dashboard was checked only when a change
+    was first found, so an alert already waiting, or a small drop held to
+    ride along, still went out about a car you had said no more about."""
+
+    def mark(self, watch, lid, how):
+        state = watch.state()
+        state.listings[lid].setdefault("you", {})[how] = True
+        state.save()
+
+    def test_a_dismissed_rider_does_not_ride(self, watch):
+        dropped = drop_price(watch.html, CAR_PRICE, CAR_PRICE - 1000)
+        watch.run(dropped)
+        rider = watch.car_id(dropped, CAR_PRICE - 1000)
+        self.mark(watch, rider, "dismissed")
+        page, fresh = watch.with_a_new_car(dropped)
+        report = watch.run(page, minutes_later=240)
+        assert [c.listing.id for c in sent(watch)] == [fresh]
+        entry = watch.state().listings[rider]
+        assert not entry.get("ride_along")
+        assert entry["quiet_reason"] == "you dismissed this car"
+        assert report.your_call == 1 and not report.invariants
+
+    def test_a_muted_car_takes_no_small_drop_along(self, watch):
+        self.mark(watch, watch.car_id(watch.html, CAR_PRICE), "muted")
+        dropped = drop_price(watch.html, CAR_PRICE, CAR_PRICE - 1000)
+        watch.run(dropped)
+        page, fresh = watch.with_a_new_car(dropped)
+        watch.run(page, minutes_later=240)
+        assert [c.listing.id for c in sent(watch)] == [fresh]
+
+    def test_a_muted_car_sends_nothing_about_a_big_drop(self, watch):
+        """The runner's own copy of the check. Replacing it with `if False`
+        passed every test in the suite."""
+        lid = watch.car_id(watch.html, CAR_PRICE)
+        self.mark(watch, lid, "muted")
+        report = watch.run(drop_price(watch.html, CAR_PRICE, CAR_PRICE - 5000))
+        assert watch.sink.digests == []
+        assert report.your_call == 1
+        assert watch.state().listings[lid]["quiet_reason"] == "you muted this car"
+
+    def test_an_alert_held_by_quiet_hours_is_not_sent_once_muted(self, watch, monkeypatch):
+        monkeypatch.setattr(runner_mod.notifiers, "in_quiet_hours", lambda *a, **k: True)
+        page, fresh = watch.with_a_new_car(watch.html)
+        watch.run(page)
+        assert watch.state().listings[fresh].get("pending")
+        self.mark(watch, fresh, "muted")
+        monkeypatch.setattr(runner_mod.notifiers, "in_quiet_hours", lambda *a, **k: False)
+        report = watch.run(page, minutes_later=240)
+        assert watch.sink.digests == []
+        entry = watch.state().listings[fresh]
+        assert not entry.get("pending") and entry["quiet_reason"] == "you muted this car"
+        assert not report.invariants
+
+
 class TestTheOrderIsTheSameEverywhere:
 
     def test_new_cars_first_then_drops_biggest_first_then_riders(self):

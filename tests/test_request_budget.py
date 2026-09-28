@@ -203,3 +203,120 @@ class TestPoliteness:
     def test_the_default_config_ships_a_budget(self):
         assert Config.defaults().get("scraping.request_budget", 0) > 0
         assert Config.defaults().get("scraping.delay_ms", 0) > 0
+
+
+class TestWhatAFailureSays:
+    def test_a_404_carries_its_status(self):
+        """So a caller can tell a sold car from a bad day without reading
+        the message."""
+        from autotrader.http import FetchError
+        f = fetcher()
+        f.session = OfflineSession(status=404)
+        with pytest.raises(FetchError) as caught:
+            f.get("https://www.autotrader.ca/offers/honda-civic-x")
+        assert caught.value.status == 404
+
+    def test_no_answer_at_all_has_no_status(self):
+        from autotrader.http import FetchError
+
+        class Refused(OfflineSession):
+            def get(self, url, **kwargs):
+                raise requests.ConnectionError("refused")
+
+        f = fetcher()
+        f.session = Refused()
+        with pytest.raises(FetchError) as caught:
+            f.get("https://www.autotrader.ca/cars/")
+        assert caught.value.status is None
+
+    def test_an_anti_bot_page_is_not_asked_for_again(self, monkeypatch):
+        """Retrying a block page is three more requests to a site that has
+        just asked for fewer."""
+        from autotrader.http import BlockedError
+        monkeypatch.setattr("autotrader.http.time.sleep", lambda s: None)
+        f = fetcher(retries=3)
+        f.session = OfflineSession(
+            body="<html><title>Pardon Our Interruption</title></html>")
+        with pytest.raises(BlockedError):
+            f.get("https://www.autotrader.ca/cars/")
+        assert f.session.calls == 1
+
+
+class SlowClock:
+    """The http module's clock, moved on by the site's slow answers."""
+
+    def __init__(self):
+        self.now = 1000.0
+
+    def monotonic(self):
+        return self.now
+
+    def sleep(self, seconds):
+        self.now += seconds
+
+
+class TestARunHasADeadline:
+    """A slow site answers every request eventually. Four tries of thirty
+    seconds at a couple of hundred pages outlasts the job's twenty minutes,
+    and a cancelled job saves nothing: not the state, not what it sent."""
+
+    def test_it_stops_asking_once_the_time_is_spent(self, monkeypatch):
+        from autotrader import http as http_mod
+        clock = SlowClock()
+        monkeypatch.setattr(http_mod, "time", clock)
+        f = fetcher(run_seconds=60)
+        f.get("https://www.autotrader.ca/cars/")
+        clock.now += 61
+        assert f.budget_left == 0
+        with pytest.raises(BudgetExhausted) as caught:
+            f.get("https://www.autotrader.ca/cars/")
+        assert "run_seconds" in str(caught.value)
+        assert f.session.calls == 1
+
+    def test_zero_means_no_deadline(self, monkeypatch):
+        from autotrader import http as http_mod
+        clock = SlowClock()
+        monkeypatch.setattr(http_mod, "time", clock)
+        f = fetcher(run_seconds=0)
+        clock.now += 10 ** 6
+        f.get("https://www.autotrader.ca/cars/")
+
+    def test_a_slow_site_ends_the_run_early_and_it_is_still_saved(
+            self, tmp_path, monkeypatch, fixture_html):
+        from autotrader import http as http_mod
+        from autotrader import runner as runner_mod
+        monkeypatch.chdir(tmp_path)
+        clock = SlowClock()
+        monkeypatch.setattr(http_mod, "time", clock)
+        cfg = Config.defaults(tmp_path / "c.json")
+        for i in range(4):
+            cfg.add_search(f"https://www.autotrader.ca/cars/honda/model-{i}/?rcp=15",
+                           f"Search {i}")
+        cfg.set("scraping.delay_ms", 0)
+        cfg.set("scraping.enrich_details", False)
+        cfg.set("scraping.run_seconds", 300)
+        cfg.set("archive.mode", "off")
+
+        class Slow(OfflineSession):
+            def get(self, url, **kwargs):
+                clock.now += 100              # every answer takes 100 seconds
+                return super().get(url, **kwargs)
+
+        built = []
+
+        def build(**kw):
+            real = Fetcher(**kw)
+            real.session = Slow(body=fixture_html("search_cards"))
+            built.append(real)
+            return real
+
+        monkeypatch.setattr(runner_mod, "Fetcher", build)
+        state = State.load(tmp_path / "s.json")
+        report = run(cfg, state, notify=False, env={})
+        assert built[0].run_seconds == 300, "the setting reaches the client"
+        assert report.budget_exhausted
+        assert report.searches_run < 4 and report.searches_failed == 0
+        assert built[0].session.calls <= 4
+        saved = State.load(tmp_path / "s.json")
+        assert saved.runs and saved.runs[0]["budget_exhausted"]
+        assert saved.listings, "what was read before the time ran out is kept"

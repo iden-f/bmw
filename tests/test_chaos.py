@@ -447,6 +447,42 @@ class TestConfirmingARemoval:
     def test_a_car_with_no_url_cannot_be_checked(self):
         assert _still_listed("", self._fetcher()) is None
 
+    # A car's own listing link, with the id a sold car's page no longer has.
+    ASKED = "https://www.autotrader.ca/a/honda/civic/ottawa/ontario/19_13166607_/"
+
+    def _landing(self, landed_at, body):
+        """A fetcher whose request was redirected to somewhere else."""
+        class Redirected:
+            stats = {"requests": 0}
+            budget_left = 100
+
+            def get(self, url, referer=None, allow_block=False):
+                return Response(url=landed_at, status=200, text=body, elapsed_ms=1)
+        return Redirected()
+
+    def test_a_redirect_to_a_results_page_is_not_still_listed(self, fixture_html):
+        """A results page parses as a car too, so a sold car that redirects
+        to one was confirmed as still listed every other run, for good."""
+        assert _still_listed(self.ASKED, self._landing(
+            "https://www.autotrader.ca/cars/honda/civic/",
+            fixture_html("search_2026_full"))) is False
+
+    def test_a_redirect_to_another_car_is_not_still_listed(self, archive_html):
+        assert _still_listed(self.ASKED, self._landing(
+            "https://www.autotrader.ca/a/honda/civic/ottawa/ontario/19_68819631_/",
+            archive_html("68819631"))) is False
+
+    def test_another_cars_page_at_this_cars_address_is_not_still_listed(self, archive_html):
+        """The page names itself: its og:url is another car's."""
+        assert _still_listed(self.ASKED, self._landing(
+            self.ASKED, archive_html("68819631"))) is False
+
+    def test_this_cars_own_page_under_a_new_slug_is_still_listed(self, archive_html):
+        """A seller who edits the ad changes the slug, not the id."""
+        assert _still_listed(self.ASKED, self._landing(
+            "https://www.autotrader.ca/a/honda/civic/toronto/ontario/19_13166607_/",
+            archive_html("13166607"))) is True
+
 
 class TestKnowingWhereTheResultsEnd:
     """"Complete" is what licenses a removal, so it must not be guessed."""
@@ -512,3 +548,37 @@ class TestKnowingWhereTheResultsEnd:
             "<html><body>nothing here</body></html>", self._page("89ab")])
         assert not result.complete
         assert len(result.listings) == 8
+
+
+class TestASmallWatchEmptiedAtOnce:
+    """The mass-removal check needed six cars, so a narrow watch was emptied
+    by two "no results" pages without one listing page being asked, and its
+    cars came back as relisted when the page recovered."""
+
+    def test_two_empty_pages_call_nothing_gone_while_the_cars_are_listed(
+            self, bench, fixture_html):
+        bench.run()
+        removed = 0
+        for _ in range(3):
+            report = bench.run(search_html=fixture_html("search_empty"))
+            removed += report.removed
+            assert any("all 3 watched cars are missing" in w for w in report.warnings)
+        assert removed == 0
+        assert bench.run().relisted == 0
+
+    def test_cars_that_really_went_are_still_called_gone(self, bench, fixture_html):
+        """Their pages answer 404, twice, and that is enough."""
+        class Sold(FakeFetcher):
+            def get(self, url, referer=None, allow_block=False):
+                if "/a/" in url:
+                    self.urls.append(url)
+                    raise FetchError(f"HTTP 404 from {url}", status=404)
+                return super().get(url, referer, allow_block)
+
+        bench.run()
+        removed = 0
+        for _ in range(4):
+            next_check()
+            removed += run(bench.cfg, State.load(bench.path / "state.json"),
+                           fetcher=Sold(fixture_html("search_empty"))).removed
+        assert removed == 3

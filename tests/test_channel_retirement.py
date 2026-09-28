@@ -111,6 +111,25 @@ class TestRetirement:
         body = next(b for s, b in bench.sink.alerts if "Switched off email" in s)
         assert "enabled" in body and "config.json" in body
 
+    def test_the_way_back_it_gives_is_one_that_exists(self, bench, monkeypatch):
+        """It sent the owner to a switch on the dashboard's Searches tab that
+        the page has never had. config.json is sealed in the vault, so the
+        way back is the vault's own round trip."""
+        import shlex
+
+        from autotrader.cli import build_parser
+        self._wire(bench, monkeypatch, [Dead({}, {}, {}), bench.sink])
+        bench.run(); bench.run(search_html=self._with_new_car(bench))
+        body = next(b for s, b in bench.sink.alerts if "Switched off email" in s)
+        assert "dashboard" not in body and "Searches tab" not in body
+        commands = [part.strip() for line in body.splitlines()
+                    for part in line.split("&&") if "python -m autotrader" in part]
+        assert any("set notifications.channels.email.enabled true" in c for c in commands)
+        assert any("vault push --lease" in c for c in commands)
+        for command in commands:
+            words = shlex.split(command)[3:]
+            build_parser().parse_args(words)       # exits if it is not a command
+
     def test_a_transient_failure_never_retires_a_channel(self, bench, monkeypatch):
         self._wire(bench, monkeypatch, [Flaky({}, {}, {}), bench.sink])
         for _ in range(5):

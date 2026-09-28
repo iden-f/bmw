@@ -147,6 +147,10 @@ DEFAULTS: dict[str, Any] = {
         # A ceiling on HTTP requests per run (search pages, detail pages and
         # photos), so a misconfigured crawl cannot hammer the site.
         "request_budget": 250,
+        # And on the seconds a run spends reading, so a slow site cannot keep
+        # it going past the job's 20-minute limit, which cancels the job
+        # before anything is saved.
+        "run_seconds": 720,
         "user_agent": "auto",
     },
     "archive": {
@@ -158,8 +162,9 @@ DEFAULTS: dict[str, Any] = {
         "keep_days": 730,
     },
     # What the bot may cost. budget.py counts wall-clock runner minutes as
-    # billable, projects the month, and writes BUDGET-STOP rather than
-    # spending past the ceiling.
+    # billable, projects the month, and writes BUDGET-STOP at the ceiling.
+    # That stops the checks, not the spending: each firing still starts a
+    # job and is billed about a minute until the workflow is disabled.
     "budget": {
         "enabled": True,
         # GitHub Free includes 2,000 minutes a month, Pro 3,000. Minutes are

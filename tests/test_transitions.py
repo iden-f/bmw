@@ -308,6 +308,64 @@ class TestOwnershipMovingBetweenSearches:
             assert e.get("quiet_reason"), f"{lid} went quiet with no reason"
 
 
+class TestHiddenGoneAndBackInside:
+    """hidden → gone → back inside the rules.
+
+    The row came back with no alert, no debt and no reason, so every run
+    after it failed its own books and nothing ever touched the row again.
+    """
+
+    def _hide_then_lose(self, b):
+        b.check([{"id": "a", "price": 38000, "km": 200000}, KEEP])
+        assert b.entry("a")["filtered"]
+        b.check([KEEP])
+        b.check([KEEP])
+        assert b.entry("a")["status"] == "gone"
+
+    def test_it_is_announced_as_now_within_your_rules(self, bench):
+        b = bench(filters=RULES)
+        self._hide_then_lose(b)
+        before = len(b.sink.digests)
+
+        # Same price, lower odometer: a relisting no price rule would call.
+        r = b.check([{"id": "a", "price": 38000, "km": 60000}, KEEP])
+        assert_books_balance(r, b.state())
+        sent = [(c.kind, c.listing.id) for d in b.sink.digests[before:] for c in d]
+        assert sent == [("qualified", uuid_for("a"))], sent
+        assert r.qualified == 1 and r.relisted == 0
+
+        r = b.check([{"id": "a", "price": 38000, "km": 60000}, KEEP])
+        assert_books_balance(r, b.state())
+
+    def test_with_that_switched_off_it_says_why_it_stayed_quiet(self, bench):
+        b = bench(filters=RULES)
+        b.cfg.set("notifications.notify_on.qualified", False)
+        b.cfg.save()
+        self._hide_then_lose(b)
+        r = b.check([{"id": "a", "price": 38000, "km": 60000}, KEEP])
+        assert_books_balance(r, b.state())
+        assert "switched off" in b.entry("a")["quiet_reason"]
+
+    def test_with_no_price_on_its_card_it_is_still_accounted_for(self, bench):
+        b = bench(filters=dict(RULES, require_price=True))
+        self._hide_then_lose(b)
+        r = b.check([{"id": "a", "price": None, "km": 60000}, KEEP])
+        assert_books_balance(r, b.state())
+        r = b.check([{"id": "a", "price": None, "km": 60000}, KEEP])
+        assert_books_balance(r, b.state())
+
+    def test_a_car_you_were_told_about_that_comes_back_says_why_it_is_quiet(self, bench):
+        """Relistings are off by default. Every branch sends or says why not."""
+        b = bench(filters=RULES)
+        b.check([{"id": "a", "price": 38000}, KEEP])
+        b.check([KEEP])
+        b.check([KEEP])
+        r = b.check([{"id": "a", "price": 38000}, KEEP])
+        assert_books_balance(r, b.state())
+        assert r.relisted == 1
+        assert "relistings are switched off" in b.entry("a")["quiet_reason"]
+
+
 class TestTheWholeCycleAtOnce:
     def test_a_car_through_every_state_keeps_its_books(self, bench):
         """Hidden, visible, call-for-price, priced, gone, back, gone."""

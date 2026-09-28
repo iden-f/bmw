@@ -404,6 +404,20 @@ class TestTheEmailIsHtmlNotEscapedHtml:
         assert "Black &amp; Gold" in html
 
 
+def _a_search_not_read_this_time(bench) -> str:
+    """A paused second search, to own cars no results page will show.
+
+    A car with no search is released as soon as a run tidies up, and one
+    owned by a search that is read but never returns it is called gone -
+    either of which now cancels an alert that was waiting for it.
+    """
+    search = bench.cfg.add_search("https://www.autotrader.ca/cars/honda/civic/?rcp=25&y=2018",
+                                  "Paused search")
+    bench.cfg.data["searches"][-1]["enabled"] = False
+    bench.cfg.save()
+    return search.id
+
+
 class TestTheOverflowPastTheDigestCapStaysOwed:
     """A digest names at most `max_listings_per_message` cars and ends
     "...and 8 more." The eight it did not name have not been told to you."""
@@ -416,7 +430,7 @@ class TestTheOverflowPastTheDigestCapStaysOwed:
         from autotrader.state import Change, State
 
         bench.cfg.set("notifications.max_listings_per_message", 12)
-        bench.cfg.save()
+        owner = _a_search_not_read_this_time(bench)
         bench.run()                      # baseline the search
 
         state = State.load(bench.path / "state.json")
@@ -425,7 +439,7 @@ class TestTheOverflowPastTheDigestCapStaysOwed:
             listing = Listing(id=f"ov{i}",
                               url=f"https://www.autotrader.ca/a/ov{i}",
                               title=f"Car {i}", price=40000 + i, year=2018,
-                              make="Honda", model="Civic")
+                              make="Honda", model="Civic", search_id=owner)
             # Recorded first: mark_notified stamps a stored row, and a change
             # about a car with no row would prove nothing either way.
             state.record(listing)
@@ -470,7 +484,7 @@ class TestTheOverflowPastTheDigestCapStaysOwed:
 
         cap = 5
         bench.cfg.set("notifications.max_listings_per_message", cap)
-        bench.cfg.save()
+        owner = _a_search_not_read_this_time(bench)
         bench.run()
 
         state = State.load(bench.path / "state.json")
@@ -479,7 +493,7 @@ class TestTheOverflowPastTheDigestCapStaysOwed:
             listing = Listing(id=f"tw{i}",
                               url=f"https://www.autotrader.ca/a/tw{i}",
                               title=f"Car {i}", price=40000 + i, year=2018,
-                              make="Honda", model="Civic")
+                              make="Honda", model="Civic", search_id=owner)
             state.record(listing)
             wanted.append(Change(Change.NEW, listing))
         state.defer(wanted)
@@ -506,3 +520,156 @@ class TestTheOverflowPastTheDigestCapStaysOwed:
         assert set(stamps) == ids, (
             "every car has to be named eventually; never named: "
             f"{sorted(ids - set(stamps))}")
+
+
+def _without(cards, listing_id):
+    """The captured results page with one car's card taken off it."""
+    head, *items = cards.split('<div class="result-item">')
+    return head + "".join('<div class="result-item">' + item for item in items
+                          if f"_{listing_id}_" not in item)
+
+
+class TestAHeldAlertIsStillWanted:
+    """Held alerts were sent as they were held. A mute or a dismiss made in
+    the meantime did not stop them, and a car that went while its alert
+    waited was still announced as a new listing."""
+
+    def _hold(self, bench, monkeypatch):
+        from autotrader import runner as runner_mod
+        monkeypatch.setattr(runner_mod.notifiers, "in_quiet_hours", lambda *a, **k: True)
+        bench.run()
+        monkeypatch.setattr(runner_mod.notifiers, "in_quiet_hours", lambda *a, **k: False)
+
+    def _mark(self, bench, marks):
+        from autotrader.state import State
+        state = State.load(bench.path / "state.json")
+        for lid, how in marks.items():
+            state.listings[lid].setdefault("you", {})[how] = True
+        state.save()
+
+    def test_a_mute_or_a_dismiss_cancels_what_is_waiting(self, bench, monkeypatch):
+        from autotrader.state import State
+        self._hold(bench, monkeypatch)
+        self._mark(bench, {"68819631": "muted", "13166607": "dismissed"})
+        report = bench.run()
+        sent = [c.listing.id for d in bench.sink.digests for c in d]
+        assert sent == ["13221555"], sent
+        assert report.your_call == 2 and not report.invariants
+        state = State.load(bench.path / "state.json")
+        assert state.listings["68819631"]["quiet_reason"] == "you muted this car"
+        assert state.listings["13166607"]["quiet_reason"] == "you dismissed this car"
+        assert not state.pending_changes()
+
+    def test_a_car_gone_while_its_alert_waited_is_not_announced(self, bench, monkeypatch):
+        from autotrader import runner as runner_mod
+        from autotrader.state import State
+        monkeypatch.setattr(runner_mod.notifiers, "in_quiet_hours", lambda *a, **k: True)
+        bench.run()
+        gone = _without(bench.cards, "68819631")
+        for _ in range(3):
+            report = bench.run(search_html=gone)
+            assert not report.invariants, report.invariants
+        entry = State.load(bench.path / "state.json").listings["68819631"]
+        assert entry["status"] == "gone" and not entry.get("pending")
+        assert "gone before the alert could be sent" in entry["quiet_reason"]
+
+        monkeypatch.setattr(runner_mod.notifiers, "in_quiet_hours", lambda *a, **k: False)
+        report = bench.run(search_html=gone)
+        sent = [(c.kind, c.listing.id) for d in bench.sink.digests for c in d]
+        assert sorted(sent) == [("new", "13166607"), ("new", "13221555")], sent
+        assert not report.invariants
+
+    def test_removing_a_search_cancels_what_it_was_owed(self, bench, monkeypatch):
+        """Released as quiet while still owed: the books said both at once,
+        and the run failed on it."""
+        from autotrader import runner as runner_mod
+        from autotrader.state import State
+        monkeypatch.setattr(runner_mod.notifiers, "in_quiet_hours", lambda *a, **k: True)
+        bench.run()
+        bench.cfg.remove_search(bench.cfg.searches[0].id)
+        bench.cfg.save()
+        report = bench.run()
+        assert not report.invariants, report.invariants
+        state = State.load(bench.path / "state.json")
+        assert not state.pending_changes()
+
+        monkeypatch.setattr(runner_mod.notifiers, "in_quiet_hours", lambda *a, **k: False)
+        bench.run()
+        assert bench.sink.digests == []
+
+
+class TestTheEmailNamesWhatTheRunnerMarks:
+    """Email showed twenty cars while the runner marked twelve as told, so
+    cars thirteen to twenty arrived again the next time as held alerts."""
+
+    def test_no_car_is_named_in_two_emails(self, bench, monkeypatch):
+        import re
+
+        from autotrader import runner as runner_mod
+        from autotrader.listing import Listing
+        from autotrader.notifiers import EmailNotifier
+        from autotrader.state import State
+
+        from .helpers import use_channels
+
+        class Outbox(EmailNotifier):
+            def __init__(self):
+                super().__init__({"enabled": True},
+                                 {"GMAIL_USER": "someone@example.com",
+                                  "GMAIL_APP_PASSWORD": "not-a-real-one"},
+                                 {"max_listings_per_message": 12})
+                self.texts = []
+
+            def _deliver(self, subject, text, html):
+                self.texts.append(text)
+
+        outbox = Outbox()
+        owner = _a_search_not_read_this_time(bench)
+        bench.run()
+        use_channels(monkeypatch, runner_mod, [outbox], [bench.sink])
+
+        state = State.load(bench.path / "state.json")
+        owed = []
+        for i in range(20):
+            listing = Listing(id=f"em{i}", url=f"https://www.autotrader.ca/a/em{i}",
+                              title=f"Honda Civic number {i:02d}", price=40000 + i,
+                              year=2018, make="Honda", model="Civic", search_id=owner)
+            state.record(listing)
+            owed.append(Change(Change.NEW, listing))
+        state.defer(owed)
+        state.save()
+
+        named = []
+        for minutes in (200, 400):
+            outbox.texts.clear()
+            bench.run(minutes_later=minutes)
+            [text] = outbox.texts
+            named.append(set(re.findall(r"number (\d\d)", text)))
+        first, second = named
+        assert len(first) == 12, sorted(first)
+        assert not first & second, f"named twice: {sorted(first & second)}"
+        assert len(first | second) == 20
+
+    def test_a_cap_of_zero_is_the_default_there_too(self, bench):
+        """Every channel reads zero as twelve; the runner read it as "no cap"
+        and marked every car told."""
+        from autotrader.listing import Listing
+        from autotrader.state import State
+
+        bench.cfg.set("notifications.max_listings_per_message", 0)
+        owner = _a_search_not_read_this_time(bench)
+        bench.run()
+        state = State.load(bench.path / "state.json")
+        owed = []
+        for i in range(20):
+            listing = Listing(id=f"zc{i}", url=f"https://www.autotrader.ca/a/zc{i}",
+                              title=f"Car {i}", price=40000 + i, year=2018,
+                              make="Honda", model="Civic", search_id=owner)
+            state.record(listing)
+            owed.append(Change(Change.NEW, listing))
+        state.defer(owed)
+        state.save()
+        bench.run(minutes_later=200)
+        after = State.load(bench.path / "state.json")
+        told = [c for c in owed if after.listings[c.listing.id].get("notified_at")]
+        assert len(told) == 12

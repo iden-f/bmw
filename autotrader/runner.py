@@ -23,12 +23,12 @@ from . import thumbs as thumbs_mod
 from . import dashboard, diagnose, filters, invariants, notifiers
 from . import provision, render, shape, validate
 from .config import Config
-from .enrich import detail_from_html, enrich
+from .enrich import detail_from_html, enrich, page_identifies
 from .http import BlockedError, BudgetExhausted, FetchError, Fetcher
 from .listing import Listing, on_marketplace
 from .parser import looks_like_no_results, parse_search_page
 from .state import HIDDEN_REASON_PREFIX, Change, State, utcnow
-from .urls import normalise_search_url, page_url
+from .urls import listing_id_from_url, normalise_search_url, page_url
 
 log = logging.getLogger(__name__)
 
@@ -43,6 +43,8 @@ class RunReport:
     searches_failed: int = 0
     requests_made: int = 0
     budget_exhausted: bool = False
+    # The site served an anti-bot page instead of a search this run.
+    blocked: bool = False
     # What started the run (schedule, push, workflow_dispatch,
     # repository_dispatch, manual), so coverage can tell scheduled runs from
     # ones a person started.
@@ -126,6 +128,7 @@ class RunReport:
             "missed_by": self.missed_by,
             "requests_made": self.requests_made,
             "budget_exhausted": self.budget_exhausted,
+            "blocked": self.blocked,
             "empty_parses": self.empty_parses,
             "diagnostics": self.diagnostics,
             "shape_drift": self.shape_drift,
@@ -182,30 +185,52 @@ class RunReport:
 # Why a car found while a search establishes what it watches stays quiet.
 BASELINE_REASON = "recorded as a starting point when this search's scope changed"
 
+# Why a car a loosened rule lets through stays quiet for that one check.
+RULES_CHANGED_REASON = ("recorded as a starting point when this search's "
+                        "rules changed")
+
 # Below this a search is too small for "half of last time" to mean anything.
 MIN_COUNT_FOR_COLLAPSE = 6
 
-def scope_of(search, cfg: Config) -> str:
-    """A fingerprint of what a search is asking for.
 
-    Covers everything that changes which cars a search returns: the link, the
-    rules layered on it, and how many pages are read. When it changes, the
-    cars that appear were always in scope, so they are a baseline rather
-    than new listings. Not the other spellings of the model: adding one is
-    asking to hear about a car the watch was missing, and a baseline would
-    also silence every car that really is new since the last check.
+def _fingerprint(parts: dict[str, Any]) -> str:
+    blob = json.dumps(parts, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(blob.encode("utf-8")).hexdigest()[:16]
+
+
+def scope_of(search, cfg: Config) -> str:
+    """A fingerprint of which cars a search stores at all.
+
+    The link, how many pages are read, and the models rule, the one rule that
+    throws a result away rather than hiding it. When it changes, the cars
+    that appear were always on the site, so they are a baseline rather than
+    new listings. Not the other spellings of the model: adding one is asking
+    to hear about a car the watch was missing, and a baseline would also
+    silence every car that really is new since the last check.
     """
     scraping = cfg.get("scraping", {}) or {}
     rules = cfg.rules_for(search)
-    parts = {
+    return _fingerprint({
         "url": normalise_search_url(search.url),
-        "filters": {k: v for k, v in sorted((rules["filters"] or {}).items())
-                    if k != "aliases" and v not in (None, "", [], {})},
+        "models": (rules["filters"] or {}).get("models") or [],
         "pages": int(search.max_pages or scraping.get("max_pages", 3) or 1),
         "per_page": int(scraping.get("results_per_page", 50) or 50),
-    }
-    blob = json.dumps(parts, sort_keys=True, separators=(",", ":"))
-    return hashlib.sha256(blob.encode("utf-8")).hexdigest()[:16]
+    })
+
+
+def rule_scope_of(search, cfg: Config) -> str:
+    """A fingerprint of the rules that hide a car rather than drop it.
+
+    A car one of them turns away is still stored, so changing one cannot
+    bring in a car the watch had not seen: loosening one lets stored cars
+    through as "now within your rules", and tightening one lets nothing
+    through. Only those crossings are quieted after a change here; a new car
+    or a price drop in the same check is still news.
+    """
+    rules = cfg.rules_for(search)
+    return _fingerprint({k: v for k, v in sorted((rules["filters"] or {}).items())
+                         if k not in ("aliases", "models")
+                         and v not in (None, "", [], {})})
 
 # A cap, so a search whose window rotates heavily cannot spend a whole run's
 # budget proving that nothing has changed.
@@ -221,6 +246,9 @@ MASS_REMOVAL_FRACTION = 0.25
 # Runs of "could not tell" before absence is believed on its own. Without a
 # limit an unreadable listing page leaves a car pending for good.
 GONE_UNKNOWN_LIMIT = 5
+
+# How often a search that stays unreadable is mentioned again.
+HEALTH_RETOLD_HOURS = 24
 
 # Wording a listing page uses once the car has sold or been withdrawn.
 GONE_MARKERS = (
@@ -246,7 +274,8 @@ def _still_listed(url: str, fetcher: Fetcher) -> bool | None:
         # 404/410 is the site telling us plainly. Anything else - a timeout,
         # a 503 - says nothing about the car.
         text = str(exc)
-        if "HTTP 404" in text or "HTTP 410" in text:
+        if (getattr(exc, "status", None) in (404, 410)
+                or "HTTP 404" in text or "HTTP 410" in text):
             return False
         return None
     except Exception:  # noqa: BLE001 - a check that fails proves nothing
@@ -254,6 +283,13 @@ def _still_listed(url: str, fetcher: Fetcher) -> bool | None:
 
     body = (response.text or "")[:200000].lower()
     if any(marker in body for marker in GONE_MARKERS):
+        return False
+    # A removed listing is often redirected to a results page or to another
+    # car, and either still parses as "a car". Only this car's own page says
+    # it is still listed; a retitled slug keeps its id, so it still counts.
+    wanted = listing_id_from_url(url)
+    if wanted and (listing_id_from_url(response.url or url) != wanted
+                   or page_identifies(response.text, wanted) is False):
         return False
     if detail_from_html(response.text, url=response.url) is not None:
         return True
@@ -411,6 +447,21 @@ def _minutes_since_last_ok(state: State) -> float | None:
     return clock.minutes_since((state.last_check or {}).get("at"))
 
 
+def _minutes_since_turned_away(state: State) -> float | None:
+    """How long since the site served the newest check an anti-bot page.
+
+    None unless the newest check that went ahead was turned away. A site
+    doing that is asking to be read less often, and measuring the floor from
+    the last good read alone would make every firing a full check for as
+    long as the block lasts.
+    """
+    for run in state.runs:
+        if run.get("skipped"):
+            continue
+        return clock.minutes_since(run.get("at")) if run.get("blocked") else None
+    return None
+
+
 def _minutes_since_any_run(state: State) -> float | None:
     """How long since a run happened at all, working or not."""
     for run in (state.data.get("runs") or []):
@@ -438,6 +489,33 @@ def _price_disagrees(listing: Listing, state: State) -> bool:
     return seen_card != listing.card_price
 
 
+def _judge_what_is_held(listings: list[Listing], state: State) -> None:
+    """Put the listing page's figures back on cards it was not read for.
+
+    A known car's listing page is read only when its card price moves, so
+    the rest of the time the rules would judge the card while state keeps
+    the page. The two routinely disagree, and a car whose figures sit either
+    side of a rule's bound would be hidden on one sighting and announced as
+    "now within your rules" on the next, at a price the rule turns away.
+    """
+    for listing in listings:
+        stored = state.listings.get(listing.id)
+        if not stored or listing.enriched:
+            continue
+        if (stored.get("price_source") == "detail" and listing.price is not None
+                and stored.get("price") is not None):
+            listing.price = stored["price"]
+            listing.price_source = "detail"
+            # The card moved and its page could not be read this run: keep
+            # the card figure the page last answered for, so the next run
+            # asks again rather than taking the move as settled.
+            if (stored.get("card_price") is not None
+                    and listing.card_price != stored["card_price"]):
+                listing.card_price = stored["card_price"]
+        if stored.get("enriched") and stored.get("mileage_km") is not None:
+            listing.mileage_km = stored["mileage_km"]
+
+
 def enrich_listings(listings: list[Listing], cfg: Config, fetcher: Fetcher,
                     report: RunReport) -> None:
     """Fill in price/odometer/photos from each detail page's JSON-LD."""
@@ -461,15 +539,30 @@ def enrich_listings(listings: list[Listing], cfg: Config, fetcher: Fetcher,
             report.warnings.append(f"enrichment error on {listing.id}: {exc}")
 
 
+def _hidden_car_back(change: Change | None, was_hidden: bool) -> Change | None:
+    """A car a rule hid, that left and came back inside the rules.
+
+    It was never announced, so "back on the market" is news about a car you
+    have not heard of. What changed for you is that it now qualifies.
+    """
+    if change is None or not was_hidden or change.kind != Change.RELISTED:
+        return change
+    return Change(Change.QUALIFIED, change.listing, old_price=change.old_price,
+                  new_price=change.new_price)
+
+
 def _take(kept: list[Listing], unpriced: list[Listing], *, state: State,
           report: "RunReport", rules: dict[str, Any],
           search_filters: dict[str, Any], search_notify: dict[str, Any],
           baseline: bool, queue, silence, on_new=None,
-          starting_point: str = BASELINE_REASON) -> None:
+          starting_point: str = BASELINE_REASON,
+          rules_changed: bool = False) -> None:
     """Record the cars one search keeps, and announce or quiet each change.
 
     Shared by a check and a Marketplace batch, so a car is judged by the same
     rules wherever it was found. ``on_new`` is told about each new car.
+    ``rules_changed`` quiets the cars a changed rule lets through, and
+    nothing else.
     """
     on_new = on_new or (lambda listing: None)
     for listing in kept:
@@ -484,6 +577,7 @@ def _take(kept: list[Listing], unpriced: list[Listing], *, state: State,
             # rule. What changed is that it now qualifies.
             change = Change(Change.QUALIFIED, listing,
                             new_price=listing.price)
+        change = _hidden_car_back(change, was_hidden)
         if change is None:
             continue
         if change.kind == Change.NEW:
@@ -574,16 +668,21 @@ def _take(kept: list[Listing], unpriced: list[Listing], *, state: State,
                 and -(change.delta or 0) >= int(
                     rules.get("price_drop_alert_abs") or 0))
             if baseline:
-                pass
+                silence(listing.id, starting_point)
             elif search_notify.get("relisted", False):
                 queue(change)
             elif came_back_cheaper and search_notify.get("price_drop", True):
                 report.price_drops += 1
                 queue(change)
+            else:
+                silence(listing.id, "back on the market, and relistings are "
+                                    "switched off for this search")
         elif change.kind == Change.QUALIFIED:
             report.qualified += 1
             if baseline:
                 silence(listing.id, starting_point)
+            elif rules_changed:
+                silence(listing.id, RULES_CHANGED_REASON)
             elif search_notify.get("qualified", True):
                 queue(change)
             else:
@@ -608,6 +707,7 @@ def _take(kept: list[Listing], unpriced: list[Listing], *, state: State,
         if change is None and was_hidden:
             change = Change(Change.QUALIFIED, listing,
                             new_price=listing.price)
+        change = _hidden_car_back(change, was_hidden)
         if change is None:
             continue
         if change.kind == Change.NEW:
@@ -631,13 +731,22 @@ def _take(kept: list[Listing], unpriced: list[Listing], *, state: State,
                 queue(change)
         elif change.kind == Change.RELISTED:
             report.relisted += 1
-            if (tell_me_about_unpriced and not baseline
-                    and search_notify.get("relisted", False)):
+            if baseline:
+                silence(listing.id, starting_point)
+            elif not search_notify.get("relisted", False):
+                silence(listing.id, "back on the market, and relistings are "
+                                    "switched off for this search")
+            elif tell_me_about_unpriced:
                 queue(change)
+            else:
+                silence(listing.id, "back on the market with no price "
+                                    "published, and this search asks for a price")
         elif change.kind == Change.QUALIFIED:
             report.qualified += 1
             if baseline:
                 silence(listing.id, starting_point)
+            elif rules_changed:
+                silence(listing.id, RULES_CHANGED_REASON)
             elif tell_me_about_unpriced and search_notify.get("qualified", True):
                 queue(change)
             else:
@@ -646,10 +755,22 @@ def _take(kept: list[Listing], unpriced: list[Listing], *, state: State,
 
 
 def _hide(rejected: dict[str, tuple[Listing, filters.Verdict]], owned: set[str],
-          *, state: State, report: "RunReport", silence) -> None:
-    """Record the cars no search wanted: quietly, each with its reason."""
+          *, state: State, report: "RunReport", silence,
+          unsettled: set[str] | frozenset[str] = frozenset()) -> None:
+    """Record the cars no search wanted: quietly, each with its reason.
+
+    ``unsettled`` names the searches that did not read all their results
+    this run. A car one of them owns and shows is left to it: another
+    search's rule would hide it only because its owner missed a read, and
+    the owner's next read would then announce it as "now within your rules".
+    """
     for lid, (listing, verdict) in rejected.items():
         if lid in owned:
+            continue
+        stored = state.listings.get(lid) or {}
+        owner = str(stored.get("search_id") or "")
+        if (owner in unsettled and owner != listing.search_id
+                and stored.get("status") == "active" and not stored.get("filtered")):
             continue
         why = verdict.reason
         change = state.record(listing, filtered=True, filter_reason=why,
@@ -662,11 +783,44 @@ def _hide(rejected: dict[str, tuple[Listing, filters.Verdict]], owned: set[str],
         silence(lid, f"{HIDDEN_REASON_PREFIX}{why}")
 
 
+def _drop_what_is_no_longer_owed(state: State, report: "RunReport") -> set[str]:
+    """Cancel held alerts and small drops that should no longer go out.
+
+    A mute or a dismiss from the dashboard says no more alerts about a car,
+    and that includes one already waiting on quiet hours, an outage or the
+    digest cap. So does a car that went while its alert waited: "new
+    listing" about a car that has gone is not news. Each is recorded quiet,
+    with why, rather than just dropped.
+    """
+    dropped: set[str] = set()
+    for lid, entry in state.listings.items():
+        if not (entry.get("pending") or entry.get("ride_along")):
+            continue
+        yours = entry.get("you") or {}
+        owed = (entry.get("pending") or {}).get("kind")
+        if yours.get("muted") or yours.get("dismissed"):
+            why = f"you {'muted' if yours.get('muted') else 'dismissed'} this car"
+            report.your_call += 1
+        elif str(entry.get("status") or "") != "active" and owed != Change.REMOVED:
+            why = "it was gone before the alert could be sent"
+        else:
+            continue
+        # Before silencing, which leaves a car that is still owed as owed.
+        entry.pop("pending", None)
+        entry.pop("ride_along", None)
+        state.silence(lid, why)
+        dropped.add(lid)
+    return dropped
+
+
 def _deliver(cfg: Config, state: State, report: "RunReport",
              changes: list[Change], *, env: dict[str, str], notify: bool,
              dry_run: bool) -> list[Change]:
     """Send what is owed, or hold it, and return what was in the message."""
     settings = cfg.get("notifications", {}) or {}
+    if not dry_run:
+        dropped = _drop_what_is_no_longer_owed(state, report)
+        changes = [c for c in changes if c.listing.id not in dropped]
     # Anything an earlier run detected but could not deliver (quiet hours,
     # a channel outage) is picked back up here rather than being lost.
     if not dry_run:
@@ -693,9 +847,10 @@ def _deliver(cfg: Config, state: State, report: "RunReport",
         if any(r.ok for r in results):
             # Mark only the cars the message named. A capped digest ends
             # "...and N more", so the overflow stays owed and the next run
-            # leads with it.
-            told_about = changes[:max(0, int(
-                settings.get("max_listings_per_message", 12) or 0))] or changes
+            # leads with it. The cap is read as the channels read it
+            # (Notifier.limit), where zero means the default.
+            told_about = changes[:int(
+                settings.get("max_listings_per_message", 12) or 12)]
             state.mark_notified(c.listing.id for c in told_about)
             overflow = len(changes) - len(told_about)
             if overflow > 0:
@@ -711,10 +866,14 @@ def _deliver(cfg: Config, state: State, report: "RunReport",
             if not result.ok and not result.skipped:
                 report.warnings.append(f"notification failed: {result}")
     elif changes and not dry_run and (report.quiet or not notify):
-        state.defer(changes)
-        report.warnings.append(
-            _many(len(changes), "change") + " held"
-            + (" until quiet hours end." if report.quiet else "."))
+        # Riders stay riders, as when every channel fails: deferred, a small
+        # drop would become an alert of its own and could go out alone.
+        owed = [c for c in changes if not c.rider]
+        state.defer(owed)
+        if owed:
+            report.warnings.append(
+                _many(len(owed), "change") + " held"
+                + (" until quiet hours end." if report.quiet else "."))
     elif changes and dry_run:
         report.notified = ["dry run: nothing sent"]
     return changes
@@ -742,9 +901,14 @@ def run(cfg: Config | None = None, state: State | None = None, *,
             log.warning("automatic setup failed: %s", exc)
             report.warnings.append(f"automatic setup failed: {exc}")
 
-    # "First run" means no run has ever succeeded, so the parser has never been
-    # shown to work against the live site.
-    report.first_run = not any(r.get("ok") for r in (state.data.get("runs") or []))
+    # "First run" means no check has ever succeeded, so the parser has never
+    # been shown to work against the live site. Stamped once, because the run
+    # log is a rolling window: a day of failed firings would push the last
+    # good check out of it and make the bot new again. The log still answers
+    # for state written before the stamp, but never from a firing that stood
+    # down, which is recorded as ok and read nothing.
+    report.first_run = not state.data.get("first_ok_at") and not any(
+        r.get("ok") and not r.get("skipped") for r in state.runs)
 
     # Scheduled firings arrive late, early, twice or not at all. One that
     # lands too soon after the last check stands down, and a long gap is
@@ -752,12 +916,16 @@ def run(cfg: Config | None = None, state: State | None = None, *,
     health_conf = cfg.get("health", {}) or {}
     expected = int(health_conf.get("expected_interval_minutes", 30) or 0)
     gap = _minutes_since_last_ok(state)
-    if gap is not None and expected > 0:
+    turned_away = _minutes_since_turned_away(state)
+    if (gap is not None or turned_away is not None) and expected > 0:
         floor = float(health_conf.get("min_interval_minutes", expected / 3.0) or 0)
         # Only scheduled firings are deduplicated; a manual run always runs.
         on_a_schedule = str(env.get("AUTOTRADER_SCHEDULED") or "").strip().lower() \
             not in ("", "0", "false", "no")
-        if gap < floor and on_a_schedule and not force:
+        # A block counts as a check for the floor, so the site that asked
+        # for less is not read on every firing until it gives up asking.
+        waited = min(m for m in (gap, turned_away) if m is not None)
+        if waited < floor and on_a_schedule and not force:
             # Not a warning: the schedule fires more often than the check
             # interval so a dropped firing costs little, and the floor turns
             # those firings back into the intended interval. Most firings are
@@ -768,7 +936,7 @@ def run(cfg: Config | None = None, state: State | None = None, *,
             if not dry_run:
                 _write_the_run_down(cfg, state, report, env, notify)
             return report
-        if gap > expected * 2:
+        if gap is not None and gap > expected * 2:
             report.missed_by = round(gap)
             # A bot that runs and fails looks the same, from the last
             # successful run alone, as a schedule that stopped firing. Ask
@@ -793,6 +961,7 @@ def run(cfg: Config | None = None, state: State | None = None, *,
         delay_ms=int(scraping.get("delay_ms", 1200) or 0),
         user_agent=str(scraping.get("user_agent", "auto")),
         budget=int(scraping.get("request_budget", 250) or 0),
+        run_seconds=float(scraping.get("run_seconds", 720) or 0),
     )
 
     changes: list[Change] = []
@@ -821,6 +990,8 @@ def run(cfg: Config | None = None, state: State | None = None, *,
     declared_seen: set[str] = set()
     removal_plan: list[tuple[Any, bool, bool, dict[str, Any]]] = []
     rejected: dict[str, tuple[Listing, filters.Verdict]] = {}
+    # Searches that read every result they have this run.
+    read_fully: set[str] = set()
     blocked_searches: list[str] = []
     assessments: list[validate.Assessment] = []
     drifted: list[tuple[str, list[str], dict[str, Any]]] = []
@@ -860,7 +1031,7 @@ def run(cfg: Config | None = None, state: State | None = None, *,
             # Not an early return: with no searches left, housekeeping still
             # has to retire their cars and audit what remains.
 
-        for search in searches:
+        for position, search in enumerate(searches):
             try:
                 result = scrape_search(search, cfg, fetcher)
                 listings = result.listings
@@ -887,7 +1058,16 @@ def run(cfg: Config | None = None, state: State | None = None, *,
                 report.errors.append(f"{search.name}: {exc}")
                 blocked_searches.append(search.name)
                 state.record_search_error(search.id, str(exc))
-                continue
+                report.blocked = True
+                # The site is saying slow down, and asking it for the next
+                # search is not slowing down. The rest wait for the next
+                # check, as they would for a spent budget.
+                left = len(searches) - position - 1
+                if left:
+                    report.warnings.append(
+                        f"stopped for this check after an anti-bot page; "
+                        f"{_many(left, 'search', 'searches')} will be read next time.")
+                break
             except FetchError as exc:
                 report.searches_failed += 1
                 report.errors.append(f"{search.name}: {exc}")
@@ -902,6 +1082,8 @@ def run(cfg: Config | None = None, state: State | None = None, *,
 
             report.searches_run += 1
             report.listings_seen += len(listings)
+            if result.complete:
+                read_fully.add(search.id)
 
             # Each search may override the global filters and alert rules.
             # Resolved before the page checks, because the models rule must run
@@ -919,7 +1101,11 @@ def run(cfg: Config | None = None, state: State | None = None, *,
             counted_the_same_way = (
                 bool((state.search_shape(search.id) or {}).get("confined"))
                 == bool(result.confined))
-            state.record_search_ok(search.id, len(listings), strategy)
+            # A page that loaded and read as nothing is a failure, recorded as
+            # one below. Counting it as a good read first reset the failure
+            # streak every run, so the alert written for it never went out.
+            if listings or said_no_results:
+                state.record_search_ok(search.id, len(listings), strategy)
 
             assessments.append(validate.assess(
                 listings, strategy, search.name,
@@ -1064,6 +1250,7 @@ def run(cfg: Config | None = None, state: State | None = None, *,
                 entry = state.listings.get(listing.id) or {}
                 entry["price_checks"] = int(entry.get("price_checks", 0)) + 1
             enrich_listings(disputed + unknown + still_unpriced, cfg, fetcher, report)
+            _judge_what_is_held(for_me, state)
 
             if report.first_run and not assessments[-1].trustworthy:
                 # Keep the evidence: a parse that produced nonsense is as hard
@@ -1088,22 +1275,35 @@ def run(cfg: Config | None = None, state: State | None = None, *,
                     + "; ".join(assessments[-1].concerns))
                 continue
 
-            # A search whose scope just changed (a new link, a relaxed filter,
-            # more pages) is establishing what it watches, not discovering
-            # cars. Record everything, announce nothing, say so.
+            # A search whose scope just changed (a new link, more pages) is
+            # establishing what it watches, not discovering cars. Record
+            # everything, announce nothing, say so.
             health = state.search_health(search.id)
-            scope = scope_of(search, cfg)
-            known_scope = health.get("scope")
-            # Only a change of scope is a baseline. A search's first run
-            # genuinely shows cars the user has not seen.
-            baseline = bool(known_scope) and known_scope != scope
-            health["scope"] = scope
+            scope, rule_scope = scope_of(search, cfg), rule_scope_of(search, cfg)
+            # Only a change is a baseline: a search's first run genuinely
+            # shows cars the user has not seen. State written before the two
+            # fingerprints were told apart holds one of both, and comparing
+            # it would start every search over at once.
+            compared = "rule_scope" in health
+            baseline = compared and bool(health.get("scope")) \
+                and health.get("scope") != scope
+            # A changed rule quiets only the cars it lets through.
+            rules_changed = compared and not baseline \
+                and health.get("rule_scope") != rule_scope
+            health["scope"], health["rule_scope"] = scope, rule_scope
             if baseline:
                 report.baselines.append(search.name)
                 report.warnings.append(
                     f"{search.name}: what this search covers has changed, so "
                     f"what it finds now is being recorded as a starting point "
                     f"rather than announced as new.")
+            elif rules_changed:
+                report.baselines.append(search.name)
+                report.warnings.append(
+                    f"{search.name}: what this search covers has changed, so "
+                    f"cars its rules now let through are being recorded as a "
+                    f"starting point. New cars and price drops are announced "
+                    f"as usual.")
 
             # A car returned by two searches belongs to the first that keeps
             # it. Otherwise the last search to run would take it over and apply
@@ -1155,7 +1355,8 @@ def run(cfg: Config | None = None, state: State | None = None, *,
                   search_filters=search_filters, search_notify=search_notify,
                   baseline=baseline, queue=queue, silence=silence,
                   on_new=lambda listing: archive_mod.archive_listing(
-                      listing, archive_conf, fetcher))
+                      listing, archive_conf, fetcher),
+                  rules_changed=rules_changed)
 
             # Held until every search has been read: recording a rejection now
             # would mark the car silenced before a later search that wants it
@@ -1187,7 +1388,8 @@ def run(cfg: Config | None = None, state: State | None = None, *,
         # hid by filter is still on the site, and forgetting it makes the next
         # run report it as removed - but quietly, and only now that every
         # search has had its say.
-        _hide(rejected, owned, state=state, report=report, silence=silence)
+        _hide(rejected, owned, state=state, report=report, silence=silence,
+              unsettled={s.id for s in cfg.searches} - read_fully)
 
         # Now that every search has had its say, drop the results none of
         # them was for: a car one search does not want may be another's.
@@ -1293,13 +1495,24 @@ def run(cfg: Config | None = None, state: State | None = None, *,
                            and e.get("status") == "active"
                            and not on_marketplace(lid)]
                 vanished = [lid for lid in watched if lid not in seen_anywhere]
-                mass = (len(watched) >= MIN_COUNT_FOR_COLLAPSE
-                        and len(vanished) > len(watched) * MASS_REMOVAL_FRACTION)
-                if mass:
+                # A small watch has no "most of it" to measure, but every car
+                # it has vanishing at once is the same bad read or empty page,
+                # and asking a handful of listing pages is cheap.
+                every_one = bool(watched) and len(vanished) == len(watched)
+                mass = every_one or (
+                    len(watched) >= MIN_COUNT_FOR_COLLAPSE
+                    and len(vanished) > len(watched) * MASS_REMOVAL_FRACTION)
+                if mass and len(watched) == 1:
                     report.warnings.append(
-                        f"{search.name}: {len(vanished)} of {len(watched)} watched "
-                        f"cars are missing at once - checking their listing pages "
-                        f"before calling any of them sold.")
+                        f"{search.name}: its one watched car is missing - "
+                        f"checking its listing page before calling it sold.")
+                elif mass:
+                    what = (f"all {len(watched)}" if every_one
+                            else f"{len(vanished)} of {len(watched)}")
+                    report.warnings.append(
+                        f"{search.name}: {what} watched cars are missing at once "
+                        f"- checking their listing pages before calling any of "
+                        f"them sold.")
 
                 confirm = None
                 if not complete or mass:
@@ -1347,6 +1560,14 @@ def run(cfg: Config | None = None, state: State | None = None, *,
                         search.id, seen_anywhere, confirm=confirm,
                         grace_minutes=int(cfg.get("health.min_interval_minutes")
                                           or 0)):
+                    if (state.listings.get(change.listing.id) or {}).get("filtered"):
+                        # A car a rule hid was never announced, so its going
+                        # is not news either: counted, like every other
+                        # change on a hidden car, and still quiet for the
+                        # rule's reason.
+                        report.hidden_events[Change.REMOVED] = (
+                            report.hidden_events.get(Change.REMOVED, 0) + 1)
+                        continue
                     report.removed += 1
                     if search_notify.get("removed", False):
                         queue(change)
@@ -1428,10 +1649,12 @@ def run(cfg: Config | None = None, state: State | None = None, *,
                 report.warnings.append(f"pruned {_many(len(pruned), 'old archive folder')}")
             state.prune()
 
-            # Our own copy of the photos, so the page works offline and a
-            # delisted car still has a picture. Uses the same fetcher, so it
-            # queues behind the same rate limit and the same budget; never
-            # raises, because a photo is a nicety and a check is the job.
+            # Our own copy of the photos, so the page works offline. Only for
+            # live cars: a car's copies are dropped once it leaves or a rule
+            # hides it, so the space goes to cars still for sale. Uses the
+            # same fetcher, so it queues behind the same rate limit and the
+            # same budget; never raises, because a photo is a nicety and a
+            # check is the job.
             if cfg.get("dashboard.photos", True):
                 try:
                     shots = thumbs_mod.sync(state.listings.values(), fetcher)
@@ -1530,6 +1753,8 @@ def _write_the_run_down(cfg: Config, state: State, report: "RunReport",
         report.budget = _charge_the_budget(cfg, state, report, env, notify)
     except Exception as exc:   # noqa: BLE001 - never fail a check over accounting
         log.warning("could not update the minute ledger: %s", exc)
+    if report.ok and not report.skipped and report.searches_run:
+        state.data.setdefault("first_ok_at", utcnow())
     # This is the whole point: state is written even if something above blew
     # up, so a failure costs one run, never the entire history.
     state.record_run(report.to_dict())
@@ -1567,6 +1792,14 @@ def _caller_name(env: dict[str, str]) -> str:
         return ""
 
 
+# The stop file stops the checks, not the timer: watch.yml reads it on a
+# runner that has already started, so each firing is still billed.
+BILLED_WHILE_STOPPED = (
+    "Each scheduled firing still starts a job, billed at about a minute. To "
+    "stop spending entirely, disable the Check AutoTrader workflow in the "
+    "repository's Actions tab, and enable it again once BUDGET-STOP is deleted.")
+
+
 def _charge_the_budget(cfg: Config, state: State, report: "RunReport",
                        env: dict[str, str], notify: bool) -> dict[str, Any]:
     """Bill this run to the month, and stop the bot if the month is spent.
@@ -1598,12 +1831,13 @@ def _charge_the_budget(cfg: Config, state: State, report: "RunReport",
             f"Allowance: {verdict['allowance']:,}. This bot stops at "
             f"{verdict['ceiling']:,.0f}.\n\n"
             "Delete this file to start checking again. It will be rewritten "
-            "on the next run if the month is still over.\n",
+            "on the next run if the month is still over.\n\n"
+            + BILLED_WHILE_STOPPED + "\n",
             encoding="utf-8")
         report.warnings.append(verdict["text"])
         if notify and not state.data.get("budget_told") == verdict["month"]:
             notifiers.alert(cfg, "The watcher has stopped: this month's minutes are spent",
-                            verdict["text"], env)
+                            verdict["text"] + "\n\n" + BILLED_WHILE_STOPPED, env)
             state.data["budget_told"] = verdict["month"]
     else:
         if stop_file.exists():
@@ -1681,9 +1915,14 @@ def _retire_dead_channels(cfg: Config, state: State, report: RunReport,
                 f"It failed that way {strikes} runs in a row, so it is now off "
                 f"and will stop filling the log.\n\n"
                 f"Still delivering via: {', '.join(alive)}.\n\n"
-                f"To bring it back, fix the credentials and set "
-                f"notifications.channels.{channel}.enabled to true in "
-                f"config.json, or switch it on under the dashboard's Searches tab.",
+                # The only way back there is. config.json lives sealed in
+                # the vault, and the dashboard has no switch for a channel.
+                f"To bring it back, fix the credentials, then switch it on "
+                f"again in config.json from a clone of your fork (README, "
+                f"\"Running it locally\"):\n\n"
+                f"  python -m autotrader vault pull && python -m autotrader vault open\n"
+                f"  python -m autotrader set notifications.channels.{channel}.enabled true\n"
+                f"  python -m autotrader vault seal && python -m autotrader vault push --lease",
                 env)
         report.warnings.append(
             f"switched off {channel} after {strikes} runs of credential failures")
@@ -1739,6 +1978,7 @@ def _health_check(cfg: Config, state: State, report: RunReport,
     dark_after = float(cfg.get("health.silent_after_hours") or 0)
     from .insight import _span
     broken = []
+    broken_ids = []
     for search in cfg.active_searches:
         health = state.search_health(search.id)
         failures = int(health.get("consecutive_failures", 0))
@@ -1753,9 +1993,19 @@ def _health_check(cfg: Config, state: State, report: RunReport,
         broken.append(f"- {search.name}: {_many(failures, 'failed check')} in "
                       f"a row, {when}. "
                       f"Last error: {health.get('last_error') or 'unknown'}")
+        broken_ids.append(search.id)
     if not broken:
+        state.data.pop("health_told", None)
         return
     if not (cfg.get("notifications.notify_on.errors", True)):
+        return
+    # Once for each outage, and once a day while it lasts, as the other
+    # alerts about the bot itself are. A high-priority push on every failed
+    # check is an alarm that gets muted.
+    told = state.data.get("health_told") or {}
+    which = ",".join(sorted(broken_ids))
+    since = clock.hours_since(told.get("at"))
+    if told.get("searches") == which and since is not None and since < HEALTH_RETOLD_HOURS:
         return
     body = ("Your AutoTrader watcher cannot read one or more searches:\n\n"
             + "\n".join(broken))
@@ -1771,3 +2021,5 @@ def _health_check(cfg: Config, state: State, report: RunReport,
     results = notifiers.alert(cfg, "AutoTrader watcher needs attention", body, env)
     report.channel_results.extend(results)
     report.warnings.append("sent a health alert: " + ", ".join(str(r) for r in results))
+    if any(r.ok for r in results):
+        state.data["health_told"] = {"searches": which, "at": utcnow()}

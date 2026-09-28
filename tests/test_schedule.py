@@ -15,8 +15,8 @@ from autotrader.config import Config
 from autotrader.runner import run
 from autotrader.state import State
 
-from .helpers import (WATCH_CONFIGS, Capture, FakeFetcher, use_channels,
-                      watch_config)
+from .helpers import (WATCH_CONFIGS, Capture, FakeFetcher, next_check,
+                      use_channels, watch_config)
 
 SCHEDULED = {"AUTOTRADER_SCHEDULED": "1"}
 
@@ -127,6 +127,68 @@ class TestTheScheduleFiringTwice:
         bench.cfg.set("health.min_interval_minutes", 0)
         bench.cfg.save()
         assert not bench.run(SCHEDULED).skipped
+
+
+class TestASiteThatTurnsTheBotAway:
+    """An anti-bot page is the site asking for fewer requests.
+
+    The floor was measured from the last good read, and a blocked check is
+    not one, so every firing - the half-hourly cron and every collector
+    dispatch - became a full check against the site that was saying stop.
+    """
+
+    def _blocked(self, bench, env):
+        from autotrader.http import BlockedError
+        fetcher = FakeFetcher("", fail=BlockedError("anti-bot page"))
+        report = run(bench.cfg, bench.state(), fetcher=fetcher, env=dict(env))
+        return report, fetcher
+
+    def test_a_block_counts_as_a_check_for_the_floor(self, bench):
+        bench.run()
+        went_ahead = []
+        for _ in range(8):                   # four hours of half-hourly firings
+            next_check(30)
+            report, fetcher = self._blocked(bench, SCHEDULED)
+            assert report.skipped or report.blocked
+            if not report.skipped:
+                went_ahead.append(len(fetcher.urls))
+        floor = int(bench.cfg.get("health.min_interval_minutes"))
+        assert len(went_ahead) <= 240 // floor, went_ahead
+        assert went_ahead, "the site is still asked, only less often"
+
+    def test_a_first_check_that_was_turned_away_counts_too(self, bench):
+        report, _ = self._blocked(bench, SCHEDULED)
+        assert report.blocked and not report.skipped
+        next_check(30)
+        assert self._blocked(bench, SCHEDULED)[0].skipped
+
+    def test_a_run_someone_asked_for_still_happens(self, bench):
+        bench.run()
+        next_check(100)
+        self._blocked(bench, SCHEDULED)
+        next_check(10)
+        report, fetcher = self._blocked(bench, {})
+        assert not report.skipped and fetcher.urls
+
+    def test_the_other_searches_wait_for_the_next_check(self, bench):
+        bench.cfg.add_search("https://www.autotrader.ca/cars/audi/rs5/?rcp=25",
+                             "Second search")
+        bench.cfg.save()
+        report, fetcher = self._blocked(bench, {})
+        assert len(fetcher.urls) == 1, fetcher.urls
+        assert report.searches_failed == 1
+        assert any("read next time" in w for w in report.warnings), report.warnings
+        second = bench.cfg.searches[1].id
+        assert bench.state().search_health(second)["consecutive_failures"] == 0
+
+    def test_a_good_check_after_it_is_measured_as_usual(self, bench):
+        bench.run()
+        next_check(100)
+        self._blocked(bench, SCHEDULED)
+        next_check(100)
+        assert not bench.run(SCHEDULED).skipped
+        next_check(30)
+        assert bench.run(SCHEDULED).skipped
 
 
 class TestAMissedWindow:

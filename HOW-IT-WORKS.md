@@ -27,7 +27,8 @@ reliable, private, and easy to read. Setup and everyday use are in the
 5. **Check.** `run` reads every search: fetch, parse, filter, compare with
    state, alert, copy photos, audit, and write `docs/data.json`. A scheduled
    firing within 90 minutes of the last check stands down here without
-   contacting AutoTrader.
+   contacting AutoTrader. A check AutoTrader turned away with an anti-bot page
+   counts as one, and reads no further searches once it meets that page.
 6. **Record.** `events --notify` updates the ledger of market firsts.
    Steps 3 to 6 send their output only to `run.log`, which is sealed with the
    rest.
@@ -196,7 +197,10 @@ on an allowance (made private, or moved to a larger runner), it projects the
 month, and past 85% of `budget.included_minutes` (a 3,000-minute allowance
 unless you set your plan's) it commits `BUDGET-STOP`, alerts you, and stops
 checking until you delete the file. Every firing is billed, including one
-that stands down, so the schedule in `watch.yml` sets the cost.
+that stands down, so the schedule in `watch.yml` sets the cost. That includes
+the firings after the stop, which read the file and end, at about a minute
+each: to stop spending entirely, disable Check AutoTrader in the Actions tab
+until the file is deleted.
 
 ## Facebook Marketplace
 
@@ -299,14 +303,14 @@ Besides the alerts about cars, these are all of them.
 |---|---|---|
 | **AutoTrader watcher is working** | The first check read the site and the parse looks right. | Nothing. It says this once. |
 | **AutoTrader watcher: the first check looks wrong** | A first check read something that does not look like a results page, so it recorded nothing. | [A search fails to parse](#a-search-fails-to-parse). |
-| **AutoTrader watcher needs attention** | A search failed three checks in a row, or has been unreadable for six hours. It names the search and the error. | [A search fails to parse](#a-search-fails-to-parse). |
+| **AutoTrader watcher needs attention** | A search failed three checks in a row, or has been unreadable for six hours. It names the search and the error, once for each outage and again each day it lasts. | [A search fails to parse](#a-search-fails-to-parse). |
 | **AutoTrader changed how its pages are built** | The results page changed shape. The bot is still reading it, by another route. | Nothing yet. Worth a look if it becomes "needs attention". |
 | **AutoTrader watcher has gone quiet** | No check has succeeded for six hours and nothing has started since. It says whether this looks like GitHub dropping runs or something changing. | [Checks have stopped](#checks-have-stopped). |
 | **AutoTrader watcher is running and failing** | Checks start and fail every time. | [Checks have stopped](#checks-have-stopped). |
 | **AutoTrader watcher covered only N% of yesterday** | The schedule delivered under half the checks asked of it. At most once a day. | An outside timer; see the README's Schedule section. |
 | **AutoTrader watcher: its own records do not add up** | A bookkeeping rule failed after a check. Sent when the set of broken rules changes. | Read `diagnostics/invariants.json` in an opened vault. |
 | **This month's runner minutes are heading over** | The repository is drawing on an allowance, and the projection passes the ceiling. Nothing has stopped yet. | Make the repository public again, or thin the `cron` in `watch.yml`. |
-| **The watcher has stopped: this month's minutes are spent** | It committed `BUDGET-STOP` and will not check until the file is gone. | Delete `BUDGET-STOP` to resume. |
+| **The watcher has stopped: this month's minutes are spent** | It committed `BUDGET-STOP` and will not check until the file is gone. Each firing is still billed about a minute. | Delete `BUDGET-STOP` to resume. To stop spending meanwhile, disable Check AutoTrader in the Actions tab. |
 | **Switched off <channel> notifications** | A channel rejected the bot's credentials twice. | Fix the secret, then switch the channel back on locally with `set notifications.channels.<name>.enabled true`. |
 | **AutoTrader watcher: your alerts moved** | The ntfy topic changed. | Subscribe again from the QR code on the **Status** tab. |
 | **AutoTrader: your last N days** | The weekly digest. | Read it, or not. |

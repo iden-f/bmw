@@ -17,7 +17,7 @@ from .archive import prune as prune_archives
 from .archive import size_report
 from .config import CHANNEL_SECRETS, Config, ConfigError
 from .http import Fetcher
-from .listing import Listing, name_of
+from .listing import Listing, name_of, on_marketplace
 from .parser import parse_search_page
 from .state import Change, State
 from .urls import describe_search, page_url
@@ -599,30 +599,39 @@ def cmd_verify(args: argparse.Namespace) -> int:
 
     cfg = Config.load(args.config)
     state = State.load(args.state)
-    watched = [e for e in state.listings.values()
-               if e.get("status") == "active"
+    # Never a Marketplace car: this client is not a browser, and nothing but
+    # the collector on a computer at home ever asks Facebook for a page.
+    on_facebook = sum(1 for lid, e in state.listings.items()
+                      if e.get("status") == "active" and on_marketplace(lid))
+    watched = [e for lid, e in state.listings.items()
+               if e.get("status") == "active" and not on_marketplace(lid)
                and (args.hidden or not e.get("filtered"))]
     watched.sort(key=lambda e: str(e.get("search_name") or ""))
     if args.limit:
         watched = watched[: args.limit]
     if not watched:
-        print(_warn("no live cars to verify"))
+        print(_warn("no live cars to verify"
+                    + (f" ({on_facebook} on Marketplace; the collector "
+                       f"reports those)" if on_facebook else "")))
         return 0
 
     # Say what is left out as well, so the count does not read as all of
     # state: hidden and gone cars are skipped to spare the site requests.
     total = len(state.listings)
-    hidden = sum(1 for e in state.listings.values()
-                 if e.get("status") == "active" and e.get("filtered"))
+    hidden = sum(1 for lid, e in state.listings.items()
+                 if e.get("status") == "active" and e.get("filtered")
+                 and not on_marketplace(lid))
     gone = sum(1 for e in state.listings.values()
                if e.get("status") != "active")
     print(f"Checking {_many(len(watched), 'car')} against the site.")
-    if not args.hidden and (hidden or gone):
-        left_out = []
-        if hidden:
-            left_out.append(f"{hidden} hidden by a rule (--hidden includes them)")
-        if gone:
-            left_out.append(f"{gone} already gone")
+    left_out = []
+    if hidden and not args.hidden:
+        left_out.append(f"{hidden} hidden by a rule (--hidden includes them)")
+    if gone and not args.hidden:
+        left_out.append(f"{gone} already gone")
+    if on_facebook:
+        left_out.append(f"{on_facebook} on Marketplace (the collector reports those)")
+    if left_out:
         print(f"  Not checked: {', '.join(left_out)}. "
               f"State holds {_many(total, 'row')} in all.")
     print()
