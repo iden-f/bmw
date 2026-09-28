@@ -23,7 +23,9 @@ from http.server import ThreadingHTTPServer
 
 import pytest
 
-from .test_dashboard_layout import browser, payload, site  # noqa: F401 - fixtures
+from autotrader import clock
+
+from .test_dashboard_layout import _demo_payload, browser, payload, site  # noqa: F401 - fixtures
 from .test_private_site import DOCS, STORED, TITLE, _Quiet, _unlock, private_site  # noqa: F401
 
 UTC = timezone.utc
@@ -136,8 +138,11 @@ class TestATabLeftOpen:
             # Its words keep time with the strip under it.
             page.clock.run_for(10 * 60_000)
             assert page.text_content("#trust-text") == "Checked 15m ago"
-            # Past the bot's own silent_after_hours, with the same file.
+            # Past the bot's own silent_after_hours, with the same file. The
+            # page asks for a fresher one first, and judges once it has its
+            # answer.
             page.clock.fast_forward("07:00:00")
+            page.wait_for_timeout(300)
             page.clock.run_for(1_000)
             assert page.get_attribute("#trust", "data-state") == "stale"
             assert page.text_content("#trust-text") == "Checked 7h ago"
@@ -149,6 +154,42 @@ class TestATabLeftOpen:
             page.clock.run_for(10 * 60_000)
             assert page.get_attribute("#trust", "aria-live") == "off"
             assert page.get_attribute("#alarm", "aria-live") == "off"
+            assert not errors, errors
+        finally:
+            ctx.close()
+
+    def test_a_tab_brought_back_waits_for_the_copy_on_its_way(self, browser, site, payload):
+        """Hidden overnight while checks went on landing. The copy it holds is
+        eight hours old and a fresh one is on its way: until that lands, or
+        plainly will not, no alarm says no check has landed."""
+        start = datetime.now(UTC).replace(microsecond=0)
+        d = _checked_at(payload, start - timedelta(minutes=5))
+        ctx, page, errors, served = _open(browser, site, d, "#/feed", clock=start)
+        held = []
+        try:
+            assert page.is_hidden("#alarm")
+            page.evaluate("""() => { window.away = true;
+                Object.defineProperty(document, 'hidden', {configurable: true,
+                                                           get: () => window.away});
+                document.dispatchEvent(new Event('visibilitychange')); }""")
+            page.clock.fast_forward("08:00:00")
+            served.publish(_checked_at(payload, start + timedelta(hours=7, minutes=50)))
+            # A phone's network is slow to wake: the file comes when let go.
+            page.unroute("**/data.json")
+            page.route("**/data.json", lambda route: held.append(route))
+            page.evaluate("""() => { window.away = false;
+                document.dispatchEvent(new Event('visibilitychange')); }""")
+            page.clock.run_for(3_000)
+            assert len(held) == 1, "the page did not ask for a fresh copy"
+            assert page.is_hidden("#alarm")
+            # A copy that never comes does not keep the green up for long.
+            page.clock.run_for(15_000)
+            assert page.is_visible("#alarm")
+            assert page.text_content("#alarm-text").startswith("No check has landed")
+            served(held.pop())
+            page.wait_for_timeout(300)
+            assert page.is_hidden("#alarm")
+            assert page.text_content("#trust-text") == "Checked 10m ago"
             assert not errors, errors
         finally:
             ctx.close()
@@ -169,6 +210,27 @@ class TestATabLeftOpen:
             assert "timed out" in page.text_content("#alarm-detail")
         finally:
             ctx.close()
+
+
+@pytest.mark.parametrize("gate", ["2027-01-01T00:01:00Z", "2026-01-31T12:00:00Z"])
+def test_inside_the_date_gate_the_page_reads_its_data_as_just_made(
+        browser, site, tmp_path, monkeypatch, gate):
+    """scripts/time-gate.sh moves the bot's clock, and a browser keeps the
+    host's. Built there, the demo was months away to the page: every event
+    unread, or no car new, and the tests counting them failed at every date
+    but today's."""
+    monkeypatch.setenv(clock.ENV_VAR, gate)
+    monkeypatch.chdir(tmp_path)
+    d = _demo_payload(tmp_path)
+    # And the gate's clock is back for whatever comes next.
+    assert clock.now() == datetime.fromisoformat(gate.replace("Z", "+00:00"))
+    ctx, page, errors, _ = _open(browser, site, d, "#/listings")
+    try:
+        assert page.text_content('[data-view-link="feed"] .tab__n') == ""
+        assert page.locator('.chips [data-chip="new"]').count() == 1
+        assert not errors, errors
+    finally:
+        ctx.close()
 
 
 class TestDataThatLandsWhileACarIsOpen:
@@ -309,7 +371,9 @@ class TestYourMarks:
 
     def test_this_device_gives_way_to_the_bot(self, browser, site, payload):
         """A tap the bot has since recorded, one it never got, and one just
-        made: only the last stays in the browser."""
+        made. This page is not locked, so it cannot send a change: the one
+        the bot never got is all there is of it, and it stays. A locked page
+        lets it go (test_private_site)."""
         published = datetime.fromisoformat(payload["generated_at"])
         local = {
             # Older than the publish by far, and the bot has no such mark.
@@ -323,14 +387,39 @@ class TestYourMarks:
         ctx, page, _, _ = _open(browser, site, payload, "#/listings", init=init)
         try:
             kept = json.loads(page.evaluate(f"localStorage.getItem({json.dumps(MARKS)})"))
-            assert set(kept) == {"3"}, kept
-            assert "card--mine" not in _card(page, "1").get_attribute("class")
+            assert set(kept) == {"1", "3"}, kept
+            assert "card--mine" in _card(page, "1").get_attribute("class")
             assert "card--mine" in _card(page, "2").get_attribute("class")
             assert "card--muted" in _card(page, "3").get_attribute("class")
             # The sheet says which marks are only on this device.
             _card(page, "3").click()
             page.wait_for_selector("#sheet[data-open='1']")
             assert "on this device" in page.inner_text("#sheet-body")
+        finally:
+            ctx.close()
+
+    def test_a_tap_on_a_page_that_cannot_send_it_outlasts_a_later_check(
+            self, browser, site, payload):
+        """The local viewer rebuilds the data on every visit, stamped with
+        the time. A mark set there was gone half an hour later."""
+        now = datetime.now(UTC).replace(microsecond=0)
+        d = _checked_at(payload, now)
+        ctx, page, errors, served = _open(browser, site, d, "#/listings")
+        try:
+            _card(page, "3").click()
+            page.wait_for_selector("#sheet[data-open='1']")
+            _toggle(page, "shortlisted").click()
+            assert "on this device only" in page.inner_text("#sheet-body")
+            page.keyboard.press("Escape")
+            page.wait_for_timeout(250)
+            later = copy.deepcopy(d)
+            later["generated_at"] = _iso(now + timedelta(hours=2))
+            served.publish(later)
+            _refresh(page)
+            kept = json.loads(page.evaluate(f"localStorage.getItem({json.dumps(MARKS)})"))
+            assert kept["3"]["shortlisted"] is True, kept
+            assert "card--mine" in _card(page, "3").get_attribute("class")
+            assert not errors, errors
         finally:
             ctx.close()
 

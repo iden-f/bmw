@@ -1,5 +1,6 @@
 """Test doubles shared by the runner and failure-mode suites."""
 
+import contextlib
 import functools
 from pathlib import Path
 
@@ -234,6 +235,28 @@ def browser_path() -> str | None:
     found = sorted(BROWSERS.glob("chromium-*/chrome-linux*/chrome"),
                    key=_revision, reverse=True)
     return str(found[0]) if found else None
+
+
+@contextlib.contextmanager
+def on_the_browser_s_clock():
+    """Hold the bot's clock at the host's time, as a browser reads it.
+
+    AUTOTRADER_NOW moves the bot's clock (scripts/time-gate.sh), and nothing
+    moves a browser's: only TZ reaches it. Data for a page built at the
+    gate's date is, to the page, from another year: its events are never
+    unread or always are, no car is new, and a republish reads as older than
+    the copy it replaces. So the data a page draws is built here, and the
+    clock is left as it was found.
+    """
+    from datetime import datetime, timezone
+
+    from autotrader import clock
+    held = clock._FROZEN
+    clock.freeze(datetime.now(timezone.utc))
+    try:
+        yield
+    finally:
+        clock.freeze(held)
 
 
 def need_browser() -> str:

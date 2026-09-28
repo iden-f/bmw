@@ -27,6 +27,11 @@ DATES="2026-09-30T23:58:00Z 2026-10-01T00:02:00Z 2028-02-29T12:00:00Z
        2026-12-31T23:59:00Z 2027-01-01T00:01:00Z 2026-01-31T12:00:00Z
        2026-03-08T07:30:00Z 2026-11-01T05:30:00Z"
 
+# A browser keeps the host's clock: TZ reaches it, AUTOTRADER_NOW does not.
+# So the page tests build the data a page draws on the host's time
+# (on_the_browser_s_clock in tests/helpers.py), and where a browser is found
+# they run here in every zone with the rest.
+
 # Zones chosen for the extremes and the awkward offsets.
 #   Kiritimati  UTC+14, the furthest ahead of UTC any place is
 #   Niue        UTC-11, the furthest behind

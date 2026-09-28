@@ -475,7 +475,8 @@ class TestTheCounts:
             ctx.close()
 
     @pytest.mark.parametrize("stored,words", [
-        (4, "They are the oldest of the cars that have gone or that your rules hide."),
+        (4, "Cars your rules hide are left out first, then the oldest of the cars that "
+            "have gone."),
         (6, "2 of them are cars you could buy."),
     ])
     def test_the_note_on_the_cars_left_out_says_which_they_are(self, browser, site, payload,
@@ -577,14 +578,39 @@ class TestARefreshWaitsForAnEdit:
             page.keyboard.type("civ")
             served.publish(_newer(payload))
             _refresh(page)
+            # The box and what it holds stay; the cars under it take the news.
             assert _focused(page)["id"] == "q"
             assert page.input_value("#q") == "civ"
-            assert page.locator(".card").count() == 4
-            # Done typing: the new car is drawn within a tick.
+            assert page.locator(".card").count() == 5
+            page.keyboard.type("ic")
+            assert page.input_value("#q") == "civic"
+            # Done typing: the bar catches up within a tick.
             page.click("#listings-h")
             page.wait_for_timeout(1300)
             assert page.locator(".card").count() == 5
-            assert page.input_value("#q") == "civ"
+            assert page.input_value("#q") == "civic"
+        finally:
+            ctx.close()
+
+    @pytest.mark.parametrize("pick", ["sort", "search-pick"])
+    def test_a_pick_does_not_hold_back_new_cars(self, browser, site, payload, pick):
+        """A select hands the keyboard back to itself after a pick, and
+        nothing moves it on while the owner scrolls or looks away. The grid
+        waited with it, under a tab badge that had moved on."""
+        ctx, page, errors, served = _open(browser, site, payload, "#/listings")
+        try:
+            page.select_option(f"#{pick}", index=1)
+            page.wait_for_timeout(100)
+            value = page.input_value(f"#{pick}")
+            assert _focused(page)["id"] == pick
+            served.publish(_newer(payload))
+            _refresh(page)
+            assert _focused(page)["id"] == pick
+            assert page.input_value(f"#{pick}") == value
+            live = page.locator('.chips [data-chip="all"] .n').text_content()
+            badge = page.text_content('[data-view-link="listings"] .tab__n')
+            assert page.locator(".card").count() == int(live) == int(badge) == 5
+            assert not errors, errors
         finally:
             ctx.close()
 

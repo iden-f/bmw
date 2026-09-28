@@ -29,7 +29,7 @@ from pathlib import Path
 
 import pytest
 
-from .helpers import browser_path, need_browser, playwright_or_skip
+from .helpers import browser_path, need_browser, on_the_browser_s_clock, playwright_or_skip
 
 DOCS = Path(__file__).resolve().parent.parent / "docs"
 PHOTO = Path(__file__).resolve().parent / "fixtures" / "photo.webp"
@@ -53,7 +53,14 @@ def _demo_payload(root: Path) -> dict:
     cars and every test that clicks a card failed the morning those searches
     were swapped for different ones. The page under test is still the real
     published page - only the data it draws is fixed.
+
+    Dated by the clock the browser reads, even inside the date gate.
     """
+    with on_the_browser_s_clock():
+        return _build_demo(root)
+
+
+def _build_demo(root: Path) -> dict:
     from autotrader.config import Config
     from autotrader.dashboard import build_payload
     from autotrader.listing import Listing
@@ -1999,6 +2006,43 @@ class TestTheCollectorOnThePage:
         setup = page.locator("section.section", has=page.locator("h2", has_text="What is set up"))
         row = setup.locator("li", has_text="Facebook Marketplace")
         assert row.get_attribute("data-state") == "todo" and "collector/run login" in row.text_content()
+        assert not errors, errors
+        ctx.close()
+
+    @pytest.mark.parametrize("sent_last", ["collector-a", "collector-b"])
+    def test_a_standby_reading_for_a_signed_out_primary_says_so(self, browser, site, payload,
+                                                                sent_last):
+        """Facebook signed collector-a out. It goes on checking in each pass
+        while the standby reads in its place, and the bot says nothing is
+        missed: the page said Marketplace was not being read."""
+        from datetime import datetime, timedelta, timezone
+        d = self.payload_with(payload)
+        now = datetime.now(timezone.utc)
+        reader = dict(d["marketplace"]["last_batch"], host="collector-b", role="standby",
+                      polled=True, session="ok")
+        primary = dict(reader, host="collector-a", role="primary", polled=False,
+                       session="signed_out", note="held after a sign-out",
+                       received=(now - timedelta(minutes=2 if sent_last == "collector-a" else 12))
+                       .isoformat(timespec="seconds"))
+        d["marketplace"]["last_batch"] = primary if sent_last == "collector-a" else reader
+        d["marketplace"]["hosts"] = {"collector-a": primary, "collector-b": reader}
+        ctx, page, errors = self.open(browser, site, d, "#/status", width=375)
+        page.wait_for_selector("#clock-mp-cell:not([hidden])")
+        assert page.text_content("#clock-mp").endswith("m ago")
+        assert page.get_attribute("#clock-mp-cell", "data-state") == "ok"
+        title = page.get_attribute("#clock-mp", "title")
+        assert "collector/run login" in title and "collector-b is reading in its place" in title
+        tile = page.locator(".stat", has=page.locator("dt:text-is('Facebook')"))
+        assert tile.get_attribute("data-tone") == "warn"
+        assert tile.locator("dd").first.text_content() == "Read by collector-b"
+        assert "collector/run login on that computer (collector-a)" in tile.text_content()
+        setup = page.locator("section.section", has=page.locator("h2", has_text="What is set up"))
+        row = setup.locator("li", has_text="Facebook Marketplace")
+        # Still a sign-in to do, on the computer that needs it.
+        assert row.get_attribute("data-state") == "todo"
+        assert "read by collector-b standing in: last batch 5m ago" in row.text_content()
+        assert "(collector-a)" in row.text_content()
+        assert page.evaluate("document.documentElement.scrollWidth") <= 375
         assert not errors, errors
         ctx.close()
 
