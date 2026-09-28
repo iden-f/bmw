@@ -311,7 +311,7 @@ Besides the alerts about cars, these are all of them.
 | **AutoTrader watcher: its own records do not add up** | A bookkeeping rule failed after a check. Sent when the set of broken rules changes. | Read `diagnostics/invariants.json` in an opened vault. |
 | **This month's runner minutes are heading over** | The repository is drawing on an allowance, and the projection passes the ceiling. Nothing has stopped yet. | Make the repository public again, or thin the `cron` in `watch.yml`. |
 | **The watcher has stopped: this month's minutes are spent** | It committed `BUDGET-STOP` and will not check until the file is gone. | Delete `BUDGET-STOP` to resume. |
-| **Switched off <channel> notifications** | A channel rejected the bot's credentials twice. | Fix the secret, then switch the channel back on locally with `set notifications.channels.<name>.enabled true`. |
+| **Switched off <channel> notifications** | A channel rejected the bot's credentials twice. | Fix the secret, then switch the channel back on from **Alerts** on the dashboard's **Status** tab, or locally with `set notifications.channels.<name>.enabled true`. |
 | **AutoTrader watcher: your alerts moved** | The ntfy topic changed. | Subscribe again from the QR code on the **Status** tab. |
 | **AutoTrader: your last N days** | The weekly digest. | Read it, or not. |
 | **Marketplace needs you to sign in again** | Facebook signed the collector out, asked the account to confirm who it is, or refused its searches. Marketplace is not being read; AutoTrader is. | `collector/run login` on the Mac named in the message. |

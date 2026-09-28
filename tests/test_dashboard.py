@@ -129,6 +129,19 @@ class TestTheBotsOwnState:
         assert "images" not in hidden
         assert len(hidden["price_history"]) <= 2
 
+    def test_a_car_carries_one_photo_address_and_the_count_of_all(self, tmp_path):
+        """The page shows only the first; the other eleven addresses were most
+        of what a phone downloaded and decrypted on every unlock."""
+        cfg, state, sid = self._bench(tmp_path)
+        photos = [f"https://images.example.test/civic/{n}.jpg" for n in range(12)]
+        state.listings["keep"]["images"] = photos
+        car = next(l for l in build_payload(cfg, state, env={})["listings"]
+                   if l["id"] == "keep")
+        assert car["images"] == photos[:1]
+        assert car["photo_count"] == 12
+        # What the bot keeps is untouched: the thumbnails are taken from it.
+        assert state.listings["keep"]["images"] == photos
+
     def test_counts_separate_live_hidden_and_call_for_price(self, tmp_path):
         cfg, state, sid = self._bench(tmp_path)
         payload = build_payload(cfg, state, env={})

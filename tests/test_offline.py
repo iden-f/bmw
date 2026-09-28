@@ -88,6 +88,25 @@ class TestTheWorkerCanBeUpdated:
         dashboard.write(cfg, state, {}, path=tmp_path / "data.json")
         assert "__BUILD__" not in (tmp_path / "sw.js").read_text()
 
+    def test_the_stamp_covers_every_file_the_shell_serves(self, worker):
+        """The shell is served cache-first, so a file the stamp did not cover
+        - the manifest, the icon - could change on the site and never reach
+        an installed app."""
+        files = re.search(r"const FILES = \[(.*?)\];", worker, re.S).group(1)
+        cached = {f.removeprefix("./") for f in re.findall(r"'([^']+)'", files)}
+        cached.discard("")      # './' is index.html
+        assert cached and cached <= set(dashboard.SW_WATCHES), \
+            cached - set(dashboard.SW_WATCHES)
+
+    def test_changing_the_manifest_changes_the_stamp(self, tmp_path):
+        import shutil
+        for name in ("sw.js", "app.js", "index.html", "manifest.webmanifest", "icon.svg"):
+            shutil.copy(DOCS / name, tmp_path / name)
+        before = dashboard.stamp_worker(tmp_path)
+        manifest = tmp_path / "manifest.webmanifest"
+        manifest.write_text(manifest.read_text().replace('"standalone"', '"minimal-ui"'))
+        assert dashboard.stamp_worker(tmp_path) != before
+
     def test_the_install_bypasses_the_browsers_own_cache(self, worker):
         """Otherwise a new worker is handed the bytes the old one was using,
         and the install is not an update."""
@@ -126,6 +145,16 @@ class TestOfflineIsNotAFreshPage:
         app = (DOCS / "app.js").read_text()
         assert "X-From-Cache" in app
         assert "app.offline = true" in app
+
+    def test_the_photo_cache_is_bounded(self, worker):
+        """It outlives builds, and each photo in it is at least 64 KB: kept
+        unbounded, it grew by every car ever shown until the browser cleared
+        the whole site, saved key and marks included. The browser test
+        (test_dashboard_fe3) shows it trimmed."""
+        limit = int(re.search(r"const PHOTO_LIMIT = (\d+);", worker).group(1))
+        assert 100 <= limit <= 2000, limit
+        body = worker.split("async function photo(")[1].split("\n}")[0]
+        assert "trim(cache)" in body and "waitUntil" in body
 
     def test_nothing_resolves_respond_with_undefined(self, worker):
         """caches.match() misses resolve to undefined, which fails the request

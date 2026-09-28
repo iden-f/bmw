@@ -398,7 +398,10 @@ function every(minutes) {
 /* A duration in hours, in one shape everywhere it is printed. */
 function hours(n) {
   const h = Number(n) || 0;
-  if (h < 1) return `${Math.round(h * 60)} minutes`;
+  if (h < 1) {
+    const m = Math.round(h * 60);
+    return m < 1 ? 'under a minute' : `${m} minute${m === 1 ? '' : 's'}`;
+  }
   const rounded = h < 10 ? Math.round(h * 10) / 10 : Math.round(h);
   return `${rounded} hour${rounded === 1 ? '' : 's'}`;
 }
@@ -423,6 +426,16 @@ function comparableSays(cmp, l) {
   if (!cmp) return null;
   if (cmp.pct !== undefined) {
     const under = cmp.pct < 0, n = Math.round(Math.abs(cmp.pct));
+    // Within half a percent is at the median: "0% under" is no deal, and
+    // must not wear the good-deal green.
+    if (n === 0) {
+      return {
+        tone: '',
+        badge: `at the median of ${num(cmp.sample)}`,
+        sentence: `At the median ${money(cmp.median)} of ${plural(cmp.sample, 'comparable')} `
+          + `— ${esc(cmp.cohort || 'cars like it')}, each within a third of this car's odometer.`,
+      };
+    }
     return {
       tone: under ? 'drop' : '',
       badge: `${n}% ${under ? 'under' : 'over'} the median of ${num(cmp.sample)}`,
@@ -431,14 +444,16 @@ function comparableSays(cmp, l) {
         + `each within a third of this car's odometer.`,
     };
   }
+  // The bot's reason is written to follow a label, in lower case; on its own
+  // under the price it is a sentence, and starts like one.
   if (cmp.rank !== undefined) {
     return {
       tone: '',
       badge: `${ordinal(cmp.rank)} cheapest of ${num(cmp.of)}`,
-      sentence: esc(stop(cmp.why_not)),
+      sentence: esc(sentence(cmp.why_not)),
     };
   }
-  return { tone: '', badge: null, sentence: cmp.why_not ? esc(stop(cmp.why_not)) : null };
+  return { tone: '', badge: null, sentence: cmp.why_not ? esc(sentence(cmp.why_not)) : null };
 }
 
 /* A label and the sentence under it, without the stutter: the label is
@@ -647,6 +662,7 @@ function trustState() {
     return {
       state: 'bad',
       text: `Last check failed ${when(firing.at)}`,
+      failed: firing.at,
       alarm: {
         level: 'bad',
         text: 'The last check did not finish cleanly, so what you are looking at may be out of date.',
@@ -831,6 +847,11 @@ function renderClock() {
   host.dataset.state = c.state;
   const last = document.getElementById('clock-last');
   last.textContent = c.last;
+  // Under a pill saying a later check failed, this one is the last that did
+  // not: two "Last check" times, one above the other, would disagree.
+  const t = trustState();
+  document.getElementById('clock-last-term').textContent =
+    t.failed && t.failed !== c.iso ? 'Last good check' : 'Last check';
   // The exact stamp on hover: "3h ago" suits a glance, not a quote. With a
   // collector sending batches, checks also come off-schedule; say why.
   last.title = (c.iso ? stamp(c.iso) : '') + (mt
@@ -857,7 +878,10 @@ function standDown(d) {
    So the strip pulls a fresh copy in the background: only while the tab is
    visible, at most once a minute, re-rendering only when `generated_at`
    moved (a re-render costs the scroll position), and never under an open
-   listing sheet; the new data waits until it closes. */
+   listing sheet; the new data waits until it closes. The copy is asked for
+   with 'no-cache', which asks the server every time whether the file has
+   changed, and an unchanged one costs a "not modified" rather than the whole
+   file: a tab left open on an overdue check asks once a minute. */
 let clockTimer = null;
 let lastFetchAt = 0;
 
@@ -889,7 +913,7 @@ async function refreshData() {
   if (Date.now() - lastFetchAt < 60000) return;
   lastFetchAt = Date.now();
   try {
-    const { data: fresh, cached } = await fetchData({ cache: 'no-store' });
+    const { data: fresh, cached } = await fetchData({ cache: 'no-cache' });
     // Offline is re-decided on every refresh: the worker marks a cached
     // answer, and a live one means the network is back.
     const wasOffline = app.offline;
@@ -1263,7 +1287,9 @@ function eventRow(e) {
   if (e.filtered) sub.push(`<span>hidden — ${esc(e.filter_reason || 'a rule of yours')}</span>`);
   else if (e.delivery?.state === 'queued') sub.push('<span>queued, not sent yet</span>');
   else if (e.delivery?.state === 'quiet') sub.push(`<span>${esc(e.delivery.text)}</span>`);
-  else if (e.delivery?.state === 'none') sub.push('<span class="drop">no delivery record</span>');
+  // A fault, as the sheet says, so in the fault's colour, never the green of
+  // good news.
+  else if (e.delivery?.state === 'none') sub.push('<span class="err">no delivery record</span>');
 
   if (String(e.listing_id || '').startsWith('fb-')) sub.unshift('<span class="site">Marketplace</span>');
   const name = carName(e);
@@ -1877,15 +1903,33 @@ function card(l) {
     (mine.note ? `<p class="yours">${esc(mine.note)}</p>` : '') +
     (foot.length ? `<div class="card__foot">${foot.join('')}</div>` : '');
   b.appendChild(body);
-  b.setAttribute('aria-label',
-    `${carName(l)}, ${l.unpriced ? 'call for price' : money(l.price)}` +
-    (l.mileage_km ? `, ${km(l.mileage_km)} kilometres` : '') +
-    (l.site === 'marketplace' ? ', on Facebook Marketplace' : '') +
-    (l.filtered ? `, hidden: ${l.filter_reason || 'a rule'}` : '') +
-    (mine.shortlisted ? ', on your shortlist' : '') +
-    (mine.muted ? ', muted' : '') +
-    (mine.dismissed ? ', dismissed' : '') +
-    (mine.note ? `. Your note: ${mine.note}` : ''));
+  // The name replaces everything the card shows, so it says all of it: a
+  // screen reader must hear that a car has gone, or came down and by how
+  // much, not only what it is. The car and its price come first, so a voice
+  // can find it by name.
+  const heard = [carName(l), l.unpriced ? 'call for price' : money(l.price)];
+  if (kind) heard.push(KIND[kind].label.toLowerCase());
+  if (move && !l.unpriced) {
+    heard.push(`was ${money(move.was)}`,
+      `${move.delta < 0 ? 'down' : 'up'} ${money(Math.abs(move.delta))}`);
+  }
+  if (l.mileage_km) heard.push(`${km(l.mileage_km)} kilometres`);
+  if (l.per_1000km) heard.push(`${money(l.per_1000km)} ${PER_KM}`);
+  if (l.distance_km !== undefined && l.distance_km !== null) {
+    heard.push(l.distance_km < 1 ? 'right here' : `${km(l.distance_km)} km away`);
+  }
+  if (l.location) heard.push(l.location);
+  if (says?.badge) heard.push(says.badge);
+  if (l.days_listed !== undefined) heard.push(daysListed(l.days_listed));
+  if (l.site === 'marketplace') heard.push('on Facebook Marketplace');
+  if (l.seller_type) heard.push(sellerWord(l.seller_type));
+  if (l.sale_pending) heard.push('sale pending');
+  if (l.filtered) heard.push(`hidden: ${l.filter_reason || 'a rule'}`);
+  if (mine.shortlisted) heard.push('on your shortlist');
+  if (mine.muted) heard.push('muted, no alerts');
+  if (mine.dismissed) heard.push('not interested');
+  b.setAttribute('aria-label', heard.filter(Boolean).join(', ')
+    + (mine.note ? `. Your note: ${mine.note}` : ''));
   b.addEventListener('click', () => openSheet(l.id));
   return b;
 }
@@ -2024,14 +2068,19 @@ function renderMarket() {
   // out short and overstate the cars you could buy.
   const hiddenHere = app.data.health?.counts?.filtered ?? (app.data.listings || [])
     .filter(l => l.status === 'active' && l.filtered).length;
+  const buyable = (m.live ?? 0) - hiddenHere;
+  // The models count only a car with an asking price: there is nothing of a
+  // "call for price" car to take a median of. The heading counts the same.
+  const priced = Object.values(m.by_model || {}).reduce((n, row) => n + (row.n || 0), 0);
   head.innerHTML = `<h1 id="market-h">The market</h1>
     <p>What the cars say together, rather than what one says. The tiles count
        all ${m.live ?? 0} listings the searches returned${hiddenHere
          ? `, the ${hiddenHere} your rules hide included` : ''};
-       the per-model figures below count only the ${(m.live ?? 0) - hiddenHere}
-       you could actually buy, because a median of the cars a rule rejects is
-       a market you are not shopping in. Everything carries how many cars it
-       is drawn from.</p>`;
+       the per-model figures below count only the ${priced < buyable
+         ? `${priced} of the ${buyable} you could actually buy that carry an asking price`
+         : `${buyable} you could actually buy`}, because a median of the cars a rule
+       rejects is a market you are not shopping in. Everything carries how many
+       cars it is drawn from.</p>`;
   host.appendChild(head);
 
   // The window first, because it decides how much of the rest to believe.
@@ -2213,10 +2262,19 @@ function rangeChart(years, axis) {
   const min = Math.min(axis?.min ?? Infinity, ...all);
   const max = Math.max(axis?.max ?? -Infinity, ...all);
   const span = (max - min) || 1;
+  // One grid for every year, so every track starts and ends in the same
+  // place and a price sits at the same point on each. A grid per row ended
+  // each track where that row's "$X n=Y" began. Each row is a subgrid of it,
+  // and so still one picture to a screen reader; without subgrid, the
+  // figures' column is a fixed width instead.
   const wrap = el('div');
+  wrap.style.cssText = 'display:grid;grid-template-columns:48px minmax(0,1fr) max-content;'
+    + 'column-gap:var(--s3)';
   for (const [year, r] of years) {
     const row = el('div');
-    row.style.cssText = 'display:grid;grid-template-columns:48px 1fr auto;gap:var(--s3);align-items:center;padding:var(--s1) 0';
+    row.style.cssText = 'grid-column:1/-1;display:grid;'
+      + 'grid-template-columns:48px minmax(0,1fr) 14ch;grid-template-columns:subgrid;'
+      + 'column-gap:var(--s3);align-items:center;padding:var(--s1) 0';
     const at = v => ((v - min) / span) * 100;
     // Full range as a hairline, middle half as the solid bar, median as the
     // tick, so one outlier cannot squash every other year into a smudge.
@@ -2236,10 +2294,11 @@ function rangeChart(years, axis) {
       `middle half ${money(q1)} to ${money(q3)}, median ${money(r.median)}`);
     wrap.appendChild(row);
   }
-  // The axis ends, so the bars can be read against something. Spaced below
+  // The axis ends, so the bars can be read against something: under the
+  // track itself, where the lowest and highest prices are drawn. Spaced below
   // as well as above so whatever follows does not read as another row.
   const ends = el('div', 'facts');
-  ends.style.cssText = ('justify-content:space-between;'
+  ends.style.cssText = ('grid-column:2;justify-content:space-between;'
     + 'margin:var(--s2) 0 var(--s5)');
   ends.innerHTML = `<span class="num">${money(min)}</span>`
     + `<span class="num">${money(max)}</span>`;
@@ -2608,11 +2667,13 @@ function rulesEditor(s) {
     });
     const changed = JSON.stringify(rule) !== JSON.stringify(saved);
     pv.innerHTML = pool.length
-      ? `<b>${num(kept.length)}</b> of the ${num(pool.length)} cars this search currently holds would pass`
+      ? `<b>${num(kept.length)}</b> of the ${plural(pool.length, 'car')} this search currently holds would pass`
         + (changed ? ' under the rule above.' : ' under the rule as saved.')
-        + (held.length ? ` ${plural(held.length, 'car')} the bot currently hides `
-            + `${held.length === 1 ? 'is' : 'are'} not counted here: this preview `
-            + 'can only re-run the four rules above.' : '')
+        // The cars held are among those counted, and not among those that
+        // pass: said so, rather than "not counted".
+        + (held.length ? ` ${num(held.length)} of them ${held.length === 1 ? 'is' : 'are'} `
+            + 'hidden by another rule, which this preview cannot re-run, and '
+            + `${held.length === 1 ? 'stays' : 'stay'} hidden.` : '')
       : 'This search is not holding any cars to test the rule against.';
 
     if (!changed) return;
@@ -2623,7 +2684,7 @@ function rulesEditor(s) {
     ask.appendChild(askButton(
       `Apply this to ${s.name}`,
       `Change the rules on ${s.name}`, instructions,
-      `Rules for ${s.name}. On today's ${num(pool.length)} cars this would keep ${num(kept.length)}.`));
+      `Rules for ${s.name}. On today's ${plural(pool.length, 'car')} this would keep ${num(kept.length)}.`));
     ask.appendChild(el('span', 'note', CHANGE_NOTE));
   };
   box.addEventListener('input', preview);
@@ -2918,7 +2979,10 @@ function renderStatus() {
       <dt>Coverage, ${hours(cov.window_hours || 24)}</dt>
       <dd class="num">${covPct === null ? '—' : `${covPct}%`}</dd>
       <dd class="stat__note">${cov.too_short && cov.new_install
-        ? `a new watch: ${plural(cov.successful ?? 0, 'check')} in its first ${hours(cov.window_hours)}`
+        // Under a minute old, "in its first 0 minutes" is not a sentence.
+        ? ((cov.window_hours || 0) * 60 < 1 && (cov.successful ?? 0) <= 1
+          ? 'a new watch: its first check has just run'
+          : `a new watch: ${plural(cov.successful ?? 0, 'check')} in its first ${hours(cov.window_hours)}`)
         : cov.too_short
         ? `measuring for ${hours(cov.window_hours)} so far, since the schedule `
           + `changed to one check every ${every(cov.expected_interval_minutes)}. `
@@ -2960,14 +3024,16 @@ function renderStatus() {
                 : (firing.ok === false ? 'a firing failed' : 'a firing ran')} ${when(firing.at)}`
           : ''}</dd></div>
     <div class="stat" data-tone="${cov.longest_gap_minutes > 180 ? 'warn' : ''}"><dt>Longest gap</dt>
-      <dd class="num">${cov.longest_gap_minutes ? Math.round(cov.longest_gap_minutes / 60 * 10) / 10 : '—'}h</dd>
+      <dd class="num">${cov.longest_gap_minutes
+        ? `${Math.round(cov.longest_gap_minutes / 60 * 10) / 10}h` : '—'}</dd>
       <dd class="stat__note">between good checks</dd></div>
     <div class="stat"><dt>Requests last check</dt><dd class="num">${run.requests_made ?? '—'}</dd>
       <dd class="stat__note">budget ${h.budget?.limit ?? '—'}</dd></div>
     <div class="stat"><dt>Check took</dt><dd class="num">${
-      run.duration_s == null ? '—' : Math.round(run.duration_s)}s</dd>
+      run.duration_s == null ? '—' : `${Math.round(run.duration_s)}s`}</dd>
       <dd class="stat__note">${d.cost
-        ? `${d.cost.checks} checks · ${d.cost.billed_minutes ?? d.cost.minutes} billed minutes in ${d.cost.window_hours}h`
+        ? `${plural(d.cost.checks, 'check')} · `
+          + `${plural(d.cost.billed_minutes ?? d.cost.minutes, 'billed minute')} in ${d.cost.window_hours}h`
           + (cov.stood_down ? ` · ${num(cov.stood_down)} firing${
               cov.stood_down === 1 ? '' : 's'} stood down` : '')
         : ''}</dd></div>
@@ -2982,7 +3048,7 @@ function renderStatus() {
     <div class="stat"><dt>Exempt minutes</dt>
       <dd class="num">${num(d.budget.exempt_minutes ?? 0)}</dd>
       <dd class="stat__note">${(d.budget.exempt_minutes ?? 0) > 0
-        ? 'ran free' : 'none labelled yet \u2014 from here'} \u2014 ${
+        ? 'ran free' : 'none labelled yet'} \u2014 ${
         esc(d.budget.why || 'reason not recorded')}</dd></div>
     <div class="stat" data-tone="${d.budget.can_still_run === false ? 'bad' : 'good'}">
       <dt>Can it still run</dt>
@@ -3120,6 +3186,24 @@ function renderStatus() {
         <td colspan="2" class="note">${esc(sentence(labelled(c.disabled_reason, 'Switched off')))}</td></tr>`).join('') +
     `</tbody>`;
   s2.appendChild(table(channelsHtml));
+  // A channel the bot switched off, whose secrets are all still set, can be
+  // switched back on from here once the one it rejected is fixed. One with a
+  // secret missing has nothing to switch on until it is set.
+  const retired = Object.entries(d.channels || {})
+    .filter(([, c]) => !c.active && c.disabled_reason && !(c.missing || []).length);
+  if (retired.length) {
+    const bar = el('div', 'bar');
+    bar.style.cssText = 'margin:var(--s3) 0 0';
+    for (const [name, c] of retired) {
+      const label = c.label || name;
+      bar.appendChild(askButton(`Switch ${label} back on`, `Switch ${label} on`,
+        [{ action: 'set-channel', channel: name, enabled: true }]));
+    }
+    s2.appendChild(bar);
+    s2.appendChild(el('p', 'note', `Do this once ${retired.length === 1
+      ? 'its secret is fixed' : 'their secrets are fixed'} in the repository's settings, `
+      + `or the bot switches ${retired.length === 1 ? 'it' : 'them'} off again. ${CHANGE_NOTE}`));
+  }
   if (d.notify?.ntfy_url) s2.appendChild(onYourPhone(d.notify));
   host.appendChild(s2);
 
@@ -3713,7 +3797,9 @@ function render() {
   else if (app.view === 'status') renderStatus();
 }
 
-function route() {
+/* The view the address names. Run once at start, and on every change of
+   address: Back, Forward, a link, or go() itself. */
+function route(e) {
   const h = location.hash.replace(/^#\/?/, '');
   const [what, arg] = h.split('/');
   if (what === 'listing' && arg) {
@@ -3729,7 +3815,10 @@ function route() {
     if (!store.persist) history.replaceState(null, '', `#/${app.view}`);
     return;
   }
-  go(VIEWS.some(v => v.id === what) ? what : 'feed', { silent: true, focus: false });
+  const view = VIEWS.some(v => v.id === what) ? what : 'feed';
+  // The change of address go() made itself: the view is drawn already, and
+  // drawing it twice cost every tab switch a second full drawing.
+  if (!(e && view === app.view)) go(view, { silent: true, focus: false });
   // Back with a car open: the address has left the car, so the sheet goes
   // too, after go() so its own address is the view's.
   if (sheetUp) closeSheet();
@@ -3764,6 +3853,9 @@ function showLock() {
     pass.value = '';
     form.hidden = true;
     delete document.body.dataset.locked;
+    // The box that had the keyboard has just been hidden, which would leave
+    // it nowhere; it goes to the page instead.
+    document.getElementById('main').focus({ preventScroll: true });
     start();
   });
 }
@@ -3870,12 +3962,8 @@ async function start() {
       if (e.key === '/') {
         e.preventDefault();
         go('listings');
-        // Focus after the hash settles: the hashchange from go() runs as a
-        // separate task and moves focus back to <main>.
-        setTimeout(() => {
-          const box = document.getElementById('q');
-          if (box) { box.focus(); box.select(); }
-        }, 0);
+        const box = document.getElementById('q');
+        if (box) { box.focus(); box.select(); }
         return;
       }
       if (e.key === '?') { e.preventDefault(); showShortcuts(); return; }

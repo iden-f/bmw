@@ -137,6 +137,11 @@ def build_payload(cfg: Config, state: State, env: dict[str, str] | None = None
             # published file small.
             item.pop("images", None)
             item["price_history"] = item["price_history"][-2:]
+        elif entry.get("images"):
+            # The page shows the first photo's address, when it holds no copy
+            # of its own; photo_count below carries how many there are. The
+            # other eleven were most of what a phone downloaded and decrypted.
+            item["images"] = list(entry["images"])[:1]
         history = item["price_history"]
         if len(history) >= 2 and history[0].get("price") and history[-1].get("price"):
             item["price_change"] = history[-1]["price"] - history[0]["price"]
@@ -520,7 +525,10 @@ def write(cfg: Config, state: State, env: dict[str, str] | None = None,
 
 
 SW_FILE = "sw.js"
-SW_WATCHES = ("index.html", "app.js")
+# Every file the worker caches as the shell, because it serves each from its
+# cache first: a change to one the stamp did not cover would never reach an
+# installed app.
+SW_WATCHES = ("index.html", "app.js", "manifest.webmanifest", "icon.svg")
 _BUILD_LINE = re.compile(r"^const BUILD = '([^']*)';$", re.M)
 
 
