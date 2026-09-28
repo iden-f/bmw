@@ -673,3 +673,135 @@ class TestTheEmailNamesWhatTheRunnerMarks:
         after = State.load(bench.path / "state.json")
         told = [c for c in owed if after.listings[c.listing.id].get("notified_at")]
         assert len(told) == 12
+
+
+# ------------------------------------------------------------- Telegram
+
+def _offers(n, *, photos=True):
+    """Cars with autotrader.ca/offers addresses, whose slugs are long."""
+    import uuid
+    out = []
+    for i in range(n):
+        lid = str(uuid.UUID(int=i + 1))
+        slug = ("honda-civic-type-r-limited-edition-6-speed-manual-heated-seats-"
+                "navigation-apple-carplay-android-auto-one-owner-no-accidents")
+        listing = Listing(id=lid, url=f"https://www.autotrader.ca/offers/{slug}-{lid}",
+                          title=f"2020 Honda Civic Type R Limited Edition number {i:02d}",
+                          year=2020, make="Honda", model="Civic", price=40000 + i,
+                          mileage_km=30000 + i, location="Ottawa",
+                          images=[f"https://images.example.com/{lid}.jpg"] if photos else [])
+        out.append(Change(Change.PRICE_DROP, listing, old_price=42000 + i,
+                          new_price=40000 + i))
+    return out
+
+
+class TelegramStub(notifiers.TelegramNotifier):
+    """Telegram with its API call recorded, and failing where told to."""
+
+    def __init__(self, fail=(), limit=12):
+        super().__init__({}, {"TELEGRAM_BOT_TOKEN": "5401234567:AAFakeTokenValue",
+                              "TELEGRAM_CHAT_ID": "1"},
+                         {"max_listings_per_message": limit})
+        self.calls, self.fail = [], set(fail)
+
+    def _api(self, method, payload):
+        self.calls.append((method, payload))
+        if method in self.fail:
+            raise RuntimeError("Too Many Requests: retry after 7")
+        return {"ok": True}
+
+
+class TestTelegramNamesWhatItSays:
+    """Cut at 3,900 characters, a twelve-car digest showed eleven cars and
+    "...trimmed.", and the runner marked all twelve told. The twelfth was
+    never named on Telegram at all."""
+
+    def test_a_long_digest_shows_fewer_cars_and_says_how_many_more(self):
+        changes = _offers(12, photos=False)
+        assert len(render.as_telegram_html(changes, limit=12)) > 4000, \
+            "the digest has to be too long for this to test anything"
+        tg = TelegramStub()
+        assert tg.send(changes).ok
+        [(method, payload)] = tg.calls
+        text = payload["text"]
+        assert len(text) <= 4000
+        assert "trimmed" not in text
+        import re
+        shown = len(re.findall(r"number \d\d", text))
+        assert f"...and {12 - shown} more." in text, text[-200:]
+
+
+class TestTelegramPhotosAreANicety:
+    """The album went out, the text after it failed, and the send counted as
+    failed - so the next run sent the album again, and the one after that,
+    and the alert was never marked delivered."""
+
+    def test_a_digest_too_long_for_a_caption_sends_its_text_first(self):
+        tg = TelegramStub()
+        assert tg.send(_offers(5)).ok
+        assert [m for m, _ in tg.calls] == ["sendMessage", "sendMediaGroup"]
+
+    def test_if_the_text_fails_no_album_goes_out(self):
+        tg = TelegramStub(fail={"sendMessage"})
+        result = tg.send(_offers(5))
+        assert not result.ok
+        assert [m for m, _ in tg.calls] == ["sendMessage"], \
+            "nothing went out, so the retry next run repeats nothing"
+
+    def test_if_the_photos_fail_after_the_text_the_alert_was_delivered(self):
+        tg = TelegramStub(fail={"sendMediaGroup"})
+        result = tg.send(_offers(5))
+        assert result.ok
+        assert "photos failed" in result.detail
+        assert [m for m, _ in tg.calls] == ["sendMessage", "sendMediaGroup"]
+
+    def test_a_digest_that_fits_a_caption_is_one_album(self):
+        tg = TelegramStub(limit=2)
+        changes = _offers(2)
+        assert len(render.as_telegram_html(changes, limit=2)) <= 1000
+        assert tg.send(changes).ok
+        [(method, payload)] = tg.calls
+        assert method == "sendMediaGroup"
+        assert payload["media"][0]["caption"]
+
+    def test_an_album_that_fails_with_its_caption_falls_back_to_text(self):
+        tg = TelegramStub(fail={"sendMediaGroup"}, limit=2)
+        assert tg.send(_offers(2)).ok
+        assert [m for m, _ in tg.calls] == ["sendMediaGroup", "sendMessage"]
+
+
+class TestAWebhookThatRefusesIsNotDelivered:
+    """A health alert posted to a webhook answering 500 counted as sent, so
+    the watchdog never sent it again and the channel looked healthy."""
+
+    def test_an_error_status_fails_the_alert(self, monkeypatch):
+        class Answer:
+            ok, status_code = False, 500
+        monkeypatch.setattr(notifiers.requests, "post", lambda *a, **k: Answer())
+        hook = notifiers.WebhookNotifier({"url": "https://hooks.example.com/in"}, {}, {})
+        result = hook.send_text("AutoTrader watcher has gone quiet", "body")
+        assert not result.ok and "500" in result.detail
+
+    def test_a_good_status_is_still_sent(self, monkeypatch):
+        class Answer:
+            ok, status_code = True, 200
+        monkeypatch.setattr(notifiers.requests, "post", lambda *a, **k: Answer())
+        hook = notifiers.WebhookNotifier({"url": "https://hooks.example.com/in"}, {}, {})
+        assert hook.send_text("subject", "body").ok
+
+
+class TestSmsUsesTheShortLink:
+    """Each SMS segment is billed, and a full autotrader.ca/offers address is
+    mostly the dealer's title."""
+
+    def test_the_offer_goes_by_its_id(self):
+        changes = _offers(3)
+        sms = render.as_sms(changes)
+        lid = changes[0].listing.id
+        assert f"https://www.autotrader.ca/offers/{lid}" in sms
+        assert "one-owner-no-accidents" not in sms
+        assert len(sms) < len("\n".join(c.listing.url for c in changes))
+
+    def test_any_other_address_is_left_alone(self):
+        [first, _] = sample()
+        assert first.listing.url in render.as_sms([first])

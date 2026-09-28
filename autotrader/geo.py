@@ -254,11 +254,20 @@ def region_of(text: str) -> str:
     return ""
 
 
+# How much closer than the nearest place the table knows in its province an
+# unknown town may lie. The nearest known place is not a bound: a town just
+# over a provincial border can be far nearer than any listed town in its
+# province, and the tables are thin (in the north, the nearest listed town
+# can be several hundred kilometres further than the border).
+UNPLACED_MARGIN_KM = 500
+
+
 def nearest_in(province: str, point: tuple[float, float]) -> float | None:
     """How close the nearest place we know of in a province gets to a point.
 
-    Lets an unknown town still be excluded honestly: if every known place in
-    its province is beyond the radius, so is the town.
+    Lets an unknown town in a far-off province still be excluded: if every
+    known place in it is beyond the radius by more than UNPLACED_MARGIN_KM,
+    so is the town.
     """
     places = CITIES.get((province or "").strip().upper())
     if not places:
@@ -280,8 +289,10 @@ def too_far(city: str, province: str, reference: tuple[float, float],
         away = distance_km(reference, here)
         return away > radius_km, round(away)
     floor = nearest_in(province, reference)
-    if floor is not None and floor > radius_km:
-        # Nothing in that province is within range, so this town is not either.
+    if floor is not None and floor > radius_km + UNPLACED_MARGIN_KM:
+        # Nothing in that province comes anywhere near the radius, so this
+        # town is out too. A province merely beyond it is not proof: the
+        # town could be just over its border.
         return True, None
     return False, None
 

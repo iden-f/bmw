@@ -524,8 +524,10 @@ def as_sms(changes: list[Change]) -> str:
         listing = change.listing
         lines.append(f"{_change_prefix(change)}{listing.display_title} "
                      f"{listing.price_text} {listing.mileage_text}")
+        # The short link: a full autotrader.ca address is mostly the dealer's
+        # title, and every character of it is billed.
         if listing.url:
-            lines.append(listing.url)
+            lines.append(short_link(listing))
     if len(changes) > 5:
         lines.append(f"+{len(changes) - 5} more")
     return "\n".join(lines)[:MAX_SMS]

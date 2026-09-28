@@ -429,3 +429,90 @@ class TestKeepingMoreThanOne:
             {"older-format-car": {"file": "old.webp", "bytes": 900, "w": 250, "h": 188}}))
         assert thumbs.local_for("older-format-car") == "thumbs/old.webp"
         assert thumbs.locals_for("older-format-car") == ["thumbs/old.webp"]
+
+
+class TestWhenTheBudgetRunsShort:
+    """With the budget full, every run wrote one "budget is full" line per
+    car, and the cars with no photo were the newest - the ones the alerts
+    point at - because the oldest took three photos each first."""
+
+    def car(self, i, days_ago, photos=3):
+        from datetime import timedelta
+        from autotrader import clock
+        seen = (clock.now() - timedelta(days=days_ago)).isoformat(timespec="seconds")
+        return {"id": f"{i:08d}-0000-0000-0000-000000000000", "status": "active",
+                "filtered": False, "first_seen": seen,
+                "images": [f"https://cdn.test/{i}-{n}.webp" for n in range(photos)]}
+
+    def test_the_newest_cars_get_a_photo_before_an_old_car_gets_a_second(self, here):
+        cars = [self.car(i, days_ago=30 - i) for i in range(6)]   # oldest first
+        report = thumbs.sync(cars, CDN(), limit=6)
+        assert report.fetched == 6
+        index = json.loads(thumbs.INDEX.read_text())
+        assert all(len(index[c["id"]]["files"]) == 1 for c in cars), \
+            "one photo each before anyone's second"
+
+    def test_a_short_budget_goes_to_the_newest(self, here):
+        cars = [self.car(i, days_ago=30 - i) for i in range(6)]
+        size = len(webp())
+        budget = thumbs.MAX_BYTES_EACH + 2 * size + 10
+        thumbs.sync(cars, CDN(), budget=budget)
+        kept = [c["id"] for c in cars if thumbs.locals_for(c["id"])]
+        assert kept == [c["id"] for c in cars[-3:]], "the three newest"
+
+    def test_a_full_budget_says_so_once(self, here):
+        cars = [self.car(i, days_ago=i) for i in range(20)]
+        report = thumbs.sync(cars, CDN(), budget=0)
+        budget_notes = [n for n in report.notes if "budget" in n]
+        assert len(budget_notes) == 1, report.notes
+        assert "20 of 20 cars have no photo" in budget_notes[0]
+
+
+class TestAPhotoThatNeverComesIsLeftAlone:
+    """An expired Marketplace link, or a photo over the size cap, failed on
+    every check and every Marketplace batch for as long as the car was
+    listed, spending requests the cars with working links needed."""
+
+    def refusing(self):
+        cdn = CDN(mode="404")
+        return cdn
+
+    def test_two_failures_and_it_stops_asking(self, here):
+        cdn = self.refusing()
+        for _ in range(4):
+            thumbs.sync([car(1)], cdn)
+        assert len(cdn.calls) == 2, cdn.calls
+
+    def test_a_new_link_is_tried_at_once(self, here):
+        cdn = self.refusing()
+        for _ in range(3):
+            thumbs.sync([car(1)], cdn)
+        moved = dict(car(1), images=["https://cdn.test/1-new.webp"])
+        report = thumbs.sync([moved], CDN())
+        assert report.fetched == 1
+
+    def test_it_asks_again_after_a_week(self, here):
+        from datetime import timedelta
+        from autotrader import clock
+        cdn = self.refusing()
+        clock.freeze("2026-09-01T12:00:00+00:00")
+        thumbs.sync([car(1)], cdn)
+        thumbs.sync([car(1)], cdn)
+        clock.advance(timedelta(days=6))
+        thumbs.sync([car(1)], cdn)
+        assert len(cdn.calls) == 2
+        clock.advance(timedelta(days=2))
+        thumbs.sync([car(1)], cdn)
+        assert len(cdn.calls) == 3
+
+    def test_a_success_clears_the_note(self, here):
+        thumbs.sync([car(1)], self.refusing())
+        report = thumbs.sync([car(1)], CDN())
+        assert report.fetched == 1 and report.kept == 1
+        row = json.loads(thumbs.INDEX.read_text())[car(1)["id"]]
+        assert "failed" not in row
+
+    def test_a_car_with_only_a_failure_is_not_counted_as_kept(self, here):
+        report = thumbs.sync([car(1), car(2)], CDN(mode="404"))
+        assert report.kept == 0
+        assert thumbs.locals_for(car(1)["id"]) == []

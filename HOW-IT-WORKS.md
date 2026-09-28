@@ -106,7 +106,8 @@ All in `autotrader/`, in the order the data moves.
 - **`dashboard`**: builds `docs/data.json`, and refuses to write anything
   shaped like a credential.
 - **`thumbs`**: small copies of listing photos, at most 24 new photos per
-  check, pruned when a car goes.
+  check, the newest cars' first photos first, pruned when a car goes. A photo
+  that fails twice running is left alone for a week.
 - **`archive`**: a per-car archive (metadata only by default), with
   retention.
 

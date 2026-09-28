@@ -163,3 +163,72 @@ class TestRetirement:
         bench.run(); bench.run(search_html=self._with_new_car(bench))
         cfg = Config.load(bench.path / "config.json")
         assert cfg.active_channels({}) == ["ntfy"]
+
+
+class TestASecretNeverReachesTheLog:
+    """A connection error names the address it was sending to, and for
+    Telegram and Discord that address is the secret. It went into the run
+    log, the Status tab and, once the channel was switched off, into an
+    alert on every other channel. The ids in it also held a "403", so an
+    outage could pass for rejected credentials and switch the channel off.
+    """
+
+    TOKEN = "5401234567:AAFake403TokenValue"
+    HOOK = "https://discord.com/api/webhooks/1140312345678901234/abcDEF403xyz"
+
+    def _refused(self, monkeypatch, path):
+        import requests
+
+        def post(*a, **k):
+            raise requests.exceptions.ConnectionError(
+                "HTTPSConnectionPool(host='example.invalid', port=443): Max "
+                f"retries exceeded with url: {path} (Caused by "
+                "NewConnectionError('Failed to establish a new connection'))")
+        monkeypatch.setattr(requests, "post", post)
+
+    def test_the_telegram_token_is_taken_out(self, monkeypatch):
+        from autotrader.notifiers import TelegramNotifier
+        self._refused(monkeypatch, f"/bot{self.TOKEN}/sendMessage")
+        tg = TelegramNotifier({}, {"TELEGRAM_BOT_TOKEN": self.TOKEN,
+                                   "TELEGRAM_CHAT_ID": "1"}, {})
+        for result in (tg.send_text("subject", "body"), tg.verify()):
+            assert not result.ok
+            assert self.TOKEN not in result.detail
+            assert "AAFake" not in result.detail
+            assert not result.permanent, "an outage is not a rejected token"
+
+    def test_the_discord_webhook_is_taken_out(self, monkeypatch):
+        from autotrader.notifiers import DiscordNotifier
+        self._refused(monkeypatch, "/api/webhooks/1140312345678901234/abcDEF403xyz")
+        hook = DiscordNotifier({}, {"DISCORD_WEBHOOK_URL": self.HOOK}, {})
+        result = hook.send_text("subject", "body")
+        assert not result.ok
+        assert "abcDEF403xyz" not in result.detail
+        assert "1140312345678901234" not in result.detail
+        assert not result.permanent
+
+    def test_nor_does_it_reach_the_log(self, monkeypatch, caplog):
+        import logging
+        from autotrader.notifiers import TelegramNotifier
+        self._refused(monkeypatch, f"/bot{self.TOKEN}/sendMessage")
+        tg = TelegramNotifier({}, {"TELEGRAM_BOT_TOKEN": self.TOKEN,
+                                   "TELEGRAM_CHAT_ID": "1"}, {})
+        from autotrader.listing import Listing
+        from autotrader.state import Change
+        with caplog.at_level(logging.INFO):
+            tg.send([Change(Change.NEW, Listing(id="1", title="Honda Civic"))])
+        assert self.TOKEN not in caplog.text
+        assert "failed" in caplog.text
+
+    def test_a_real_rejection_still_reads_as_one(self, monkeypatch):
+        import requests
+        from autotrader.notifiers import TelegramNotifier
+
+        class Refused:
+            ok, status_code = False, 401
+            def json(self):
+                return {"ok": False, "description": "Unauthorized"}
+        monkeypatch.setattr(requests, "post", lambda *a, **k: Refused())
+        tg = TelegramNotifier({}, {"TELEGRAM_BOT_TOKEN": self.TOKEN,
+                                   "TELEGRAM_CHAT_ID": "1"}, {})
+        assert tg.send_text("subject", "body").permanent

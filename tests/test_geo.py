@@ -148,9 +148,11 @@ class TestAWatchThatMatchesNothing:
         cfg.set("scraping.delay_ms", 0)
         cfg.set("scraping.enrich_details", False)
         cfg.set("archive.mode", "off")
-        # Tight enough that no car in the payload is inside it, so every one
-        # of the nineteen is turned away by distance.
-        cfg.set("filters.near", "K1P 1J1")
+        # Tight enough, and far enough from every province in the payload,
+        # that every one of the nineteen is turned away by distance - even
+        # the one in a town the table cannot place, which is kept whenever
+        # it could be just over a border from the reference.
+        cfg.set("filters.near", "Y1A 1A1")
         cfg.set("filters.max_distance_km", 3)
         cfg.save()
         use_channels(monkeypatch, runner_mod, [Capture()])
@@ -236,3 +238,37 @@ class TestAWatchThatMatchesNothing:
                      fetcher=FakeFetcher(fixture_html("search_next_data")), env={})
         assert report.shut_out == []
         assert report.new == 3
+
+
+class TestATownOverTheBorder:
+    """A reference near a provincial border, and a town just over it that
+    the table does not know. The nearest place it does know in that province
+    was beyond the radius, so the town was hidden - though it was well
+    inside it. The nearest known place is not a bound on an unknown one.
+
+    Drawn on an invented map, so no real place stands for anyone's search.
+    """
+
+    MAP = {
+        # Two provinces meeting on the meridian at 0 degrees.
+        "WA": {"westford": (0.0, -0.4), "far west": (0.0, -5.0)},
+        "EA": {"eastmouth": (0.0, 1.3), "far east": (0.0, 3.0)},
+        # And one a long way off.
+        "NO": {"northby": (18.0, 0.0)},
+    }
+
+    @pytest.fixture(autouse=True)
+    def invented(self, monkeypatch):
+        monkeypatch.setattr(geo, "CITIES", self.MAP)
+
+    def test_an_unknown_town_across_the_border_is_kept(self):
+        here = geo.locate("westford", "WA")
+        assert geo.nearest_in("EA", here) > 100, "the nearest known is out of range"
+        far, away = geo.too_far("Borderville", "EA", here, 100)
+        assert far is False and away is None
+
+    def test_an_unknown_town_in_a_province_far_away_is_still_out(self):
+        here = geo.locate("westford", "WA")
+        assert geo.nearest_in("NO", here) > 1900
+        far, away = geo.too_far("Somewhere", "NO", here, 100)
+        assert far is True and away is None

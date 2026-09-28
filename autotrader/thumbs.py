@@ -16,8 +16,11 @@ import json
 import logging
 import re
 from dataclasses import dataclass, field
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Iterable
+
+from . import clock
 
 log = logging.getLogger(__name__)
 
@@ -34,6 +37,12 @@ MAX_PER_RUN = 24
 # Photos kept per car, for the card and the detail gallery: on most listings
 # a front, a side and an interior.
 KEEP_PER_CAR = 3
+# A photo that has failed this many times running is left alone for a while
+# rather than asked for on every check. A Marketplace photo link expires, and
+# one over the size cap fails the same way every time; asking again only
+# spends requests the cars with working links need.
+GIVE_UP_AFTER = 2
+TRY_AGAIN_AFTER_DAYS = 7
 # What an image is allowed to claim to be.
 OK_TYPES = ("image/webp", "image/jpeg", "image/png", "image/avif")
 EXT = {"image/webp": ".webp", "image/jpeg": ".jpg",
@@ -207,63 +216,118 @@ def sync(entries: Iterable[dict[str, Any]], fetcher: Any,
 
     total = _existing_bytes()
     keep = max(1, int(per_car))
-    for listing_id, entry in wanted.items():
-        have = [f for f in _files_of(index.get(listing_id, {}))
-                if (THUMB_DIR / f["file"]).exists()]
-        urls = [u for u in (entry.get("images") or []) if u][:keep]
-        if len(have) >= min(keep, len(urls)):
-            continue
-
-        for n, url in enumerate(urls):
-            if any(f.get("n", 0) == n for f in have):
+    now = clock.now()
+    # Newest cars first, and every car's first photo before any car's second:
+    # when the budget runs short, the old cars' extra angles go without
+    # rather than the new cars an alert has just pointed at.
+    order = sorted(wanted, key=lambda lid: str(wanted[lid].get("first_seen") or ""),
+                   reverse=True)
+    full = False
+    failed_now: set[str] = set()
+    for first_only in (True, False):
+        for listing_id in order:
+            if listing_id in failed_now:
                 continue
-            if report.fetched >= limit:
-                report.skipped += 1
-                break
-            if total + MAX_BYTES_EACH > budget:
-                report.notes.append(
-                    f"photo budget of {budget / 1e6:.0f} MB is full - "
-                    f"{report.skipped + 1} more would not fit")
-                report.skipped += 1
-                break
+            entry = wanted[listing_id]
+            row = index.get(listing_id) or {}
+            have = [f for f in _files_of(row) if (THUMB_DIR / f["file"]).exists()]
+            urls = [u for u in (entry.get("images") or []) if u][:keep]
+            if len(have) >= min(keep, len(urls)):
+                continue
+            note = row.get("failed") if isinstance(row.get("failed"), dict) else None
 
-            got = _fetch_best(url, fetcher, report)
-            if got is None or got[0] is None:
-                report.failed += 1
-                # Report the failure and move on rather than spend more
-                # requests on the same car.
-                break
-            blob, content_type, note = got
-            name = _safe_name(listing_id, content_type, n)
-            if not name:
-                report.failed += 1
-                report.notes.append(f"{listing_id} is not a safe filename")
-                break
-            if not dry_run:
-                try:
-                    THUMB_DIR.mkdir(parents=True, exist_ok=True)
-                    (THUMB_DIR / name).write_bytes(blob)
-                except OSError as exc:
-                    report.failed += 1
-                    report.notes.append(f"could not write {name}: {exc}")
+            for n in ([0] if first_only else range(1, len(urls))):
+                url = urls[n]
+                if any(f.get("n", 0) == n for f in have):
+                    continue
+                if _given_up(note, url, now):
                     break
-            have.append({"file": name, "bytes": len(blob), "n": n,
-                         "w": note.get("w"), "h": note.get("h")})
-            report.fetched += 1
-            report.bytes_added += len(blob)
-            total += len(blob)
+                if report.fetched >= limit:
+                    report.skipped += 1
+                    break
+                if total + MAX_BYTES_EACH > budget:
+                    full = True
+                    report.skipped += 1
+                    break
 
-        if have:
-            have.sort(key=lambda f: f.get("n", 0))
-            index[listing_id] = {"files": have, "file": have[0]["file"],
-                                 "bytes": sum(f.get("bytes", 0) for f in have),
-                                 "w": have[0].get("w"), "h": have[0].get("h")}
+                got = _fetch_best(url, fetcher, report)
+                if got is None or got[0] is None:
+                    report.failed += 1
+                    failed_now.add(listing_id)
+                    # Written down, so a photo that keeps failing is left
+                    # alone for a while instead of asked for every check.
+                    again = note and note.get("url") == url
+                    note = {"url": url, "at": clock.stamp(now),
+                            "count": int(note.get("count") or 0) + 1 if again else 1}
+                    # Report the failure and move on rather than spend more
+                    # requests on the same car.
+                    break
+                blob, content_type, found = got
+                name = _safe_name(listing_id, content_type, n)
+                if not name:
+                    report.failed += 1
+                    failed_now.add(listing_id)
+                    report.notes.append(f"{listing_id} is not a safe filename")
+                    break
+                if not dry_run:
+                    try:
+                        THUMB_DIR.mkdir(parents=True, exist_ok=True)
+                        (THUMB_DIR / name).write_bytes(blob)
+                    except OSError as exc:
+                        report.failed += 1
+                        failed_now.add(listing_id)
+                        report.notes.append(f"could not write {name}: {exc}")
+                        break
+                if note and note.get("url") == url:
+                    note = None
+                have.append({"file": name, "bytes": len(blob), "n": n,
+                             "w": found.get("w"), "h": found.get("h")})
+                report.fetched += 1
+                report.bytes_added += len(blob)
+                total += len(blob)
 
-    report.kept = len(index)
+            fresh: dict[str, Any] = {}
+            if have:
+                have.sort(key=lambda f: f.get("n", 0))
+                fresh = {"files": have, "file": have[0]["file"],
+                         "bytes": sum(f.get("bytes", 0) for f in have),
+                         "w": have[0].get("w"), "h": have[0].get("h")}
+            if note:
+                fresh["failed"] = note
+            if fresh:
+                index[listing_id] = fresh
+            else:
+                index.pop(listing_id, None)
+
+    if full:
+        # Once, not once per car: the run copies every note into its
+        # warnings, and a page of the same line pushes out the ones that
+        # matter.
+        bare = sum(1 for lid in wanted if not _files_of(index.get(lid) or {}))
+        report.notes.append(
+            f"photo budget of {budget / 1e6:.0f} MB is full - {bare} of "
+            f"{len(wanted)} {'car' if len(wanted) == 1 else 'cars'} "
+            f"{'has' if bare == 1 else 'have'} no photo")
+
+    # Cars with a photo, not rows: a row can hold only a failure note.
+    report.kept = sum(1 for row in index.values() if _files_of(row))
     report.total_bytes = total
     if not dry_run:
         _save_index(index)
     return report
+
+
+def _given_up(note: dict[str, Any] | None, url: str, now: datetime) -> bool:
+    """Has this photo failed often enough, recently enough, to leave alone?
+
+    Only the same address: a car whose link changes is asked again at once.
+    """
+    if not note or note.get("url") != url:
+        return False
+    if int(note.get("count") or 0) < GIVE_UP_AFTER:
+        return False
+    when = clock.parse(note.get("at"))
+    return when is not None and now - when < timedelta(days=TRY_AGAIN_AFTER_DAYS)
 
 
 def _fetch_best(url: str | None, fetcher: Any, report: "Report"

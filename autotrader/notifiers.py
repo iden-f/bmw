@@ -16,6 +16,7 @@ from datetime import datetime
 from email.message import EmailMessage
 from email.utils import formataddr, formatdate
 from typing import Any
+from urllib.parse import urlparse
 
 import requests
 
@@ -70,6 +71,17 @@ def _count(n: int, word: str, plural: str = "") -> str:
     return f"{n} {word if n == 1 else (plural or word + 's')}"
 
 
+# Secrets a channel is set up with. A failed request's error names the
+# address it was sending to, and for Telegram, Discord, Slack, Twilio and a
+# webhook that address holds the secret. The error goes to the run log, the
+# Status tab and, when a channel is switched off, to every other channel.
+SECRET_ENV = ("TELEGRAM_BOT_TOKEN", "DISCORD_WEBHOOK_URL", "SLACK_WEBHOOK_URL",
+              "NTFY_TOKEN", "TWILIO_SID", "TWILIO_TOKEN", "GMAIL_APP_PASSWORD")
+SECRET_CONFIG = ("url", "topic")
+# Shorter than this, a value would blank out ordinary words in the message.
+MIN_SECRET = 8
+
+
 class Notifier:
     """Base class.  Subclasses implement ``_send``."""
 
@@ -81,12 +93,39 @@ class Notifier:
         self.env = env
         self.settings = settings or {}
 
+    def _redact(self, text: str) -> str:
+        """The error with every secret this channel holds taken out.
+
+        An address is taken out whole and by its path too, which is all a
+        connection error quotes. That also removes the digits of a bot or
+        webhook id, which could otherwise read as a 401 or 403 and switch a
+        channel off for an outage.
+        """
+        values = [str((self.env or {}).get(k) or "") for k in SECRET_ENV]
+        values += [str(self.config.get(k) or "") for k in SECRET_CONFIG]
+        found: set[str] = set()
+        for value in (v.strip() for v in values):
+            found |= {value, value.replace(" ", "")}
+            if "://" in value:
+                parts = urlparse(value)
+                found |= {parts.path, parts.query,
+                          parts.path + ("?" + parts.query if parts.query else "")}
+        text = str(text)
+        for secret in sorted((f for f in found if len(f) >= MIN_SECRET),
+                             key=len, reverse=True):
+            text = text.replace(secret, "***")
+        return text
+
+    def _failed(self, exc: Exception) -> Result:
+        return Result(self.name, False, self._redact(str(exc))[:300])
+
     def send(self, changes: list[Change], run: dict[str, Any] | None = None) -> Result:
         try:
             return self._send(changes, run or {})
         except Exception as exc:  # noqa: BLE001 - a channel may never break a run
-            log.warning("%s notification failed: %s", self.name, exc)
-            return Result(self.name, False, str(exc)[:300])
+            failed = self._failed(exc)
+            log.warning("%s notification failed: %s", self.name, failed.detail)
+            return failed
 
     def _send(self, changes: list[Change], run: dict[str, Any]) -> Result:
         raise NotImplementedError
@@ -96,7 +135,7 @@ class Notifier:
         try:
             return self._send_text(subject, body)
         except Exception as exc:  # noqa: BLE001
-            return Result(self.name, False, str(exc)[:300])
+            return self._failed(exc)
 
     def _send_text(self, subject: str, body: str) -> Result:
         raise NotImplementedError
@@ -109,7 +148,7 @@ class Notifier:
         try:
             return self._verify()
         except Exception as exc:  # noqa: BLE001
-            return Result(self.name, False, str(exc)[:300])
+            return self._failed(exc)
 
     def _verify(self) -> Result:
         return Result(self.name, True, "configured (cannot be checked without sending)",
@@ -138,38 +177,67 @@ class TelegramNotifier(Notifier):
             raise RuntimeError(body.get("description") or f"HTTP {response.status_code}")
         return body
 
+    # Telegram rejects a message over 4,096 characters outright, and caps a
+    # media-group caption at 1,024.
+    MAX_TEXT = 4000
+    MAX_CAPTION = 1000
+
+    def _fit(self, changes: list[Change]) -> str:
+        """The digest, shortened by showing fewer cars rather than fewer bytes.
+
+        Cut by characters, the cars at the end vanished behind "...trimmed."
+        while the runner marked them told; fewer cars keeps the "...and N
+        more" line, and a count of what the message left out.
+        """
+        shown = self.limit
+        text = render.as_telegram_html(changes, limit=shown)
+        while len(text) > self.MAX_TEXT and shown > 1:
+            shown -= 1
+            text = render.as_telegram_html(changes, limit=shown)
+        if len(text) > self.MAX_TEXT:
+            text = text[:3900].rsplit("\n", 1)[0] + "\n\n<i>...trimmed.</i>"
+        return text
+
     def _send(self, changes: list[Change], run: dict[str, Any]) -> Result:
         chat_id = self.env["TELEGRAM_CHAT_ID"]
-        text = render.as_telegram_html(changes, limit=self.limit)
-        # Telegram rejects messages over 4096 characters outright.
-        if len(text) > 4000:
-            text = text[:3900].rsplit("\n", 1)[0] + "\n\n<i>...trimmed.</i>"
+        text = self._fit(changes)
 
         photos = [c.listing.thumbnail for c in changes[:10] if c.listing.thumbnail]
         if self.config.get("photos", True) and len(photos) >= 2:
-            # A media group shows a photo grid with the caption on the first
-            # item. If it fails (a URL Telegram cannot fetch), fall through to
-            # the plain message rather than lose the alert.
-            try:
-                media = [{"type": "photo", "media": url} for url in photos]
-                # Telegram caps a media-group caption at 1,024 characters.
-                # Either the whole digest fits in the caption, or the photos
-                # go without one and the text follows as its own message.
-                fits = len(text) <= 1000
-                if fits:
-                    media[0]["caption"] = text
-                    media[0]["parse_mode"] = "HTML"
-                self._api("sendMediaGroup", {"chat_id": chat_id, "media": media})
-                if not fits:
-                    self._api("sendMessage", {
-                        "chat_id": chat_id, "text": text, "parse_mode": "HTML",
-                        "disable_web_page_preview": True})
-                count = len(changes)
+            media = [{"type": "photo", "media": url} for url in photos]
+            if len(text) <= self.MAX_CAPTION:
+                # The whole digest fits in the caption: one message, a photo
+                # grid with the text under it. If it fails (a URL Telegram
+                # cannot fetch) nothing went out, so the plain message below
+                # is not a repeat.
+                media[0]["caption"] = text
+                media[0]["parse_mode"] = "HTML"
+                try:
+                    self._api("sendMediaGroup", {"chat_id": chat_id, "media": media})
+                    return Result(self.name, True,
+                                  f"{_count(len(changes), 'change')} with photos")
+                except Exception as exc:  # noqa: BLE001
+                    log.info("telegram photo group failed (%s); sending text",
+                             self._redact(str(exc)))
+            else:
+                # Too long for a caption, so two messages. The text is the
+                # alert and goes first: if it fails the send has failed and
+                # nothing went out, so the next run's retry repeats nothing.
+                # The photos follow, and a failure there is noted rather than
+                # failing an alert that was delivered.
+                self._api("sendMessage", {
+                    "chat_id": chat_id, "text": text, "parse_mode": "HTML",
+                    "disable_web_page_preview": True})
+                try:
+                    self._api("sendMediaGroup", {"chat_id": chat_id, "media": media})
+                except Exception as exc:  # noqa: BLE001
+                    why = self._redact(str(exc))
+                    log.info("telegram photo group failed after the text (%s)", why)
+                    return Result(self.name, True,
+                                  f"{_count(len(changes), 'change')} "
+                                  f"(photos failed: {why[:120]})")
                 return Result(self.name, True,
-                              f"{count} change{'' if count == 1 else 's'} "
-                              f"with photos")
-            except Exception as exc:  # noqa: BLE001
-                log.info("telegram photo group failed (%s); sending text", exc)
+                              f"{_count(len(changes), 'change')} with photos")
 
         self._api("sendMessage", {"chat_id": chat_id, "text": text,
                                   "parse_mode": "HTML",
@@ -563,7 +631,12 @@ class WebhookNotifier(Notifier):
         url = str(self.config.get("url") or "").strip()
         if not url:
             return Result(self.name, False, "no webhook url configured", skipped=True)
-        requests.post(url, json={"headline": subject, "message": body}, timeout=TIMEOUT)
+        # Read the answer, as _send does: a refused alert counted as sent is
+        # never sent again, and keeps a dead endpoint looking healthy.
+        response = requests.post(url, json={"headline": subject, "message": body},
+                                 timeout=TIMEOUT)
+        if not response.ok:
+            raise RuntimeError(f"HTTP {response.status_code}")
         return Result(self.name, True, "text")
 
     def _verify(self) -> Result:
