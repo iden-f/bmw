@@ -229,3 +229,20 @@ class TestTheOwner:
         assert envelope["changes"] == [{"action": "shortlist", "listing": "abc-1"}]
         assert len(envelope["id"]) == 32 and envelope["at"].endswith("Z")
         ctx.close()
+
+    def test_a_tap_the_bot_never_got_lapses_once_the_data_is_newer(
+            self, browser, private_site):
+        """This page sends a change as it shows it. A tap still unrecorded
+        when the data is plainly newer was never committed, or was refused:
+        what the bot holds is what counts."""
+        taps = json.dumps(json.dumps({
+            "abc-1": {"shortlisted": True, "at": "2000-01-01T00:00:00Z"}}))
+        ctx = browser.new_context(service_workers="block")
+        ctx.add_init_script(f"localStorage.setItem('atw:/:marks', {taps})")
+        page = ctx.new_page()
+        page.goto(private_site["url"] + "#/listings")
+        _unlock(page)
+        page.wait_for_selector(".card", timeout=30000)
+        assert json.loads(page.evaluate("localStorage.getItem('atw:/:marks')")) == {}
+        assert "card--mine" not in page.get_attribute(".card", "class")
+        ctx.close()

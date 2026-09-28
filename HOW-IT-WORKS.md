@@ -316,6 +316,8 @@ manifest and icons. No build step, no framework.
   browser keeps it until the published data has it. One the bot never records
   (the change was not committed, or was refused) lapses at the first publish
   more than half an hour after it was made, and the bot's record shows again.
+  A page that cannot send a change keeps its marks until you take them back,
+  as when served by `python -m autotrader ui`.
 - **Updates.** `sw.js` carries a build stamp written on every publish, so a
   changed page installs a new worker and an installed app offers a reload.
 - **Words.** One word per idea, in the page and in the alerts alike. A

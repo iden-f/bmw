@@ -826,7 +826,10 @@ function clockState() {
 
    With a second Mac on standby, every computer heard in the last two hours
    counts: a standby checks in each pass while the primary stays in charge,
-   so the newest batch alone would hide a primary Facebook signed out. */
+   so the newest batch alone would hide a primary Facebook signed out. And
+   once Facebook has signed the primary out, the standby reads in its place
+   while the primary goes on checking in: Marketplace is still read, and
+   only the sign-in waits. */
 function collectorTiming(m) {
   const last = m?.last_batch;
   if (!last || !last.received) return null;
@@ -839,16 +842,23 @@ function collectorTiming(m) {
   const heard = [[last.host || '', last], ...Object.entries(m.hosts || {}).filter(([, h]) =>
     h && h.received && Date.now() - Date.parse(h.received) < 2 * 3.6e6)];
   const due = Math.max(...heard.map(([, h]) => dueOf(h)).filter(Number.isFinite));
+  // A pass takes a few minutes, and the bot's run after it a few more.
+  const lateFor = at => Date.now() - at > 15 * 60000;
   const out = heard.find(([, h]) => SESSION_SAYS[h.session]);
+  // Another computer that read on its last pass, and is not late for its
+  // next.
+  const reading = out && heard.find(([, h]) =>
+    h.polled && !SESSION_SAYS[h.session] && !lateFor(dueOf(h)));
   return {
     heard: Date.parse(last.received), due,
-    // A pass takes a few minutes, and the bot's run after it a few more.
-    late: Date.now() - due > 15 * 60000,
+    late: lateFor(due),
     signedOut: Boolean(out),
     // What Facebook said, and to which computer when it is not the one
-    // that sent last.
+    // that sent last, or when another is reading.
     says: out ? SESSION_SAYS[out[1].session]
-      + (out[0] && out[0] !== (last.host || '') ? ` (${out[0]})` : '') : '',
+      + (out[0] && (out[0] !== (last.host || '') || reading) ? ` (${out[0]})` : '') : '',
+    // The computer reading in the meantime, and when it last sent.
+    covered: reading ? { host: reading[0] || 'the standby', received: reading[1].received } : null,
   };
 }
 
@@ -863,12 +873,15 @@ function renderClock() {
     if (mt) {
       const dd = document.getElementById('clock-mp');
       const last = app.data.marketplace.last_batch;
-      dd.textContent = mt.signedOut ? 'signed out' : when(last.received);
-      mpCell.dataset.state = mt.signedOut || mt.late ? 'late' : 'ok';
-      dd.title = mt.signedOut ? mt.says
+      // Signed out, and nothing else reading: Marketplace is not being read.
+      const unread = mt.signedOut && !mt.covered;
+      dd.textContent = unread ? 'signed out' : when(last.received);
+      mpCell.dataset.state = unread || mt.late ? 'late' : 'ok';
+      dd.title = unread ? mt.says
         : `Last batch from ${last.host || 'the collector'} ${stamp(last.received)}; `
           + (mt.late ? `the next was due ${when(new Date(mt.due).toISOString())}.`
-                     : `the next is due about ${clockTime(mt.due)}.`);
+                     : `the next is due about ${clockTime(mt.due)}.`)
+          + (mt.covered ? ` ${mt.says}; until then, ${mt.covered.host} is reading in its place.` : '');
     }
   }
   // The strip is in the markup from the first paint, showing dashes, so it
@@ -916,6 +929,16 @@ function standDown(d) {
 let clockTimer = null;
 let lastFetchAt = 0;
 
+/* When the copy now on its way was asked for, or 0. A tab brought back
+   after a night holds a copy as old as the night, and judged before the
+   fresh one lands it says no check has landed: read out, and pushing the
+   page down, for the second or so the fetch takes. So while a copy is on
+   its way the age is not judged again, for at most HOLD_VERDICT: a fetch
+   that hangs must not keep a stale green up. */
+let fetching = 0;
+const HOLD_VERDICT = 15000;
+const judging = () => !fetching || Date.now() - fetching > HOLD_VERDICT;
+
 /* When a change was last sent from this page. A committed change is applied
    and published within minutes, so for a while after one the page looks
    every minute, rather than only once the next check is close. */
@@ -942,7 +965,7 @@ function busy() {
 async function refreshData() {
   if (document.hidden) return;
   if (Date.now() - lastFetchAt < 60000) return;
-  lastFetchAt = Date.now();
+  const asked = lastFetchAt = fetching = Date.now();
   try {
     const { data: fresh, cached } = await fetchData({ cache: 'no-cache' });
     // Offline is re-decided on every refresh: the worker marks a cached
@@ -961,6 +984,10 @@ async function refreshData() {
     if (sheetUp || busy()) {
       renderTrust();
       renderClock();
+      // On Listings only the bar holds the keyboard: the filter box, or a
+      // select handed it back after a pick. Nothing under the bar is typed
+      // into, so the cars take the new data now, and the bar waits.
+      if (!sheetUp && app.view === 'listings') renderListingResults();
       app.renderPending = true;
       return;
     }
@@ -975,6 +1002,8 @@ async function refreshData() {
       if (lock?.kdf?.salt && lock.kdf.salt !== vault.lock.kdf.salt) location.reload();
     }
     /* otherwise offline, or the file is mid-write - the next tick tries again */
+  } finally {
+    if (fetching === asked) fetching = 0;
   }
 }
 
@@ -982,6 +1011,15 @@ function startClock() {
   const tick = () => {
     if (document.hidden) return;
     renderClock();
+    // Only worth asking once the countdown is close to running out, once
+    // the collector's next batch is due, or just after a change was sent:
+    // each one republishes the page. Asked first, so that a copy on its way
+    // holds the verdict below (see judging()).
+    const c = clockState();
+    const mt = collectorTiming(app.data?.marketplace);
+    if ((c && (c.state === 'due' || c.fill > 0.75)) || (mt && Date.now() > mt.due)
+        || (askedAt && Date.now() - askedAt < ASK_WATCH)) refreshData();
+    if (!judging()) return;
     // The pill and the alarm judge the age of the last check, so they are
     // judged again with the strip: a tab left open must not stay green
     // while no check lands.
@@ -993,21 +1031,14 @@ function startClock() {
       render();
       if (was && !was.isConnected) refocus(was);
     }
-    // Only worth asking once the countdown is close to running out, once
-    // the collector's next batch is due, or just after a change was sent:
-    // each one republishes the page.
-    const c = clockState();
-    const mt = collectorTiming(app.data?.marketplace);
-    if ((c && (c.state === 'due' || c.fill > 0.75)) || (mt && Date.now() > mt.due)
-        || (askedAt && Date.now() - askedAt < ASK_WATCH)) refreshData();
   };
   if (clockTimer) clearInterval(clockTimer);
   clockTimer = setInterval(tick, 1000);
   document.addEventListener('visibilitychange', () => {
     if (document.hidden) return;
-    renderClock();
-    renderTrust();
     refreshData();
+    renderClock();
+    if (judging()) renderTrust();
   });
   tick();
 }
@@ -1534,10 +1565,10 @@ function renderListingResults() {
   chips.scrollLeft = chipScroll;
   chips.addEventListener('scroll', () => { chipScroll = chips.scrollLeft; }, { passive: true });
 
-  // The page carries at most dashboard.max_listings cars. The ones left out
-  // are the oldest of those that have gone or that your rules hide, unless
-  // there are more cars to buy than the page can carry. Say so rather than
-  // show short counts.
+  // The page carries at most dashboard.max_listings cars. The cap leaves out
+  // cars your rules hide first, however new, then the oldest of those that
+  // have gone, and reaches cars to buy only once those are all out. Say so
+  // rather than show short counts.
   const short = app.data.health?.left_out || 0;
   if (short && app.search === 'all') {
     const liveLeftOut = (app.data.health?.counts?.active ?? 0) - visible().length;
@@ -1546,7 +1577,7 @@ function renderListingResults() {
       + `page carries, so the counts above stop there. `
       + (liveLeftOut > 0
         ? `${num(liveLeftOut)} of them ${liveLeftOut === 1 ? 'is a car' : 'are cars'} you could buy. `
-        : 'They are the oldest of the cars that have gone or that your rules hide. ')
+        : 'Cars your rules hide are left out first, then the oldest of the cars that have gone. ')
       + `Raise <code class="mono">dashboard.max_listings</code> to bring them back.`));
   }
 
@@ -2922,9 +2953,12 @@ function setupPanel(d) {
   const m = d.marketplace;
   const mt = collectorTiming(m);
   if (mt) {
-    const last = m.last_batch;
+    // Read by whichever computer is reading: a standby in the place of one
+    // Facebook signed out.
+    const last = mt.covered || m.last_batch;
     add(mt.signedOut || mt.late ? 'todo' : 'ok',
-      `Facebook Marketplace, read by ${esc(last.host || 'the collector')}: last batch ${when(last.received)}`,
+      `Facebook Marketplace, read by ${esc(last.host || 'the collector')}${
+        mt.covered ? ' standing in' : ''}: last batch ${when(last.received)}`,
       mt.signedOut ? `${esc(mt.says)}.`
       : mt.late ? 'It is late. On the Mac, <code class="mono">collector/run status</code> says why.'
       : '');
@@ -3019,8 +3053,9 @@ function marketplaceSection(m) {
         ? `was due ${when(new Date(timing.due).toISOString())} — on the Mac, `
           + '<code class="mono">collector/run status</code> says why'
         : `then ${paceOf(last.settings)}`}</dd></div>
-    <div class="stat" data-tone="${session ? 'bad' : 'good'}">
-      <dt>Facebook</dt><dd>${session ? 'Not reading' : 'Signed in'}</dd>
+    <div class="stat" data-tone="${!session ? 'good' : timing.covered ? 'warn' : 'bad'}">
+      <dt>Facebook</dt><dd style="overflow-wrap:anywhere">${!session ? 'Signed in'
+        : timing.covered ? `Read by ${esc(timing.covered.host)}` : 'Not reading'}</dd>
       <dd class="stat__note">${esc(session || 'reading as the signed-in account')}</dd></div>
     ${problems.length ? `<div class="stat" data-tone="warn">
       <dt>Last problem</dt><dd>${when(problems[0].at)}</dd>
@@ -3522,7 +3557,10 @@ function askButton(label, title, instructions, prose) {
    The browser's copy stands in only until the bot has the change. It goes
    once the published data agrees with it, or once the data is plainly newer
    than the tap and still does not: the change was never committed, was
-   refused, or was changed again from another device. */
+   refused, or was changed again from another device. That last only where
+   the change could be sent: on a page that cannot send one (the local
+   viewer, an unlocked copy) the tap is all there is, and it stays until it
+   is taken back. */
 const MARK_KEYS = ['shortlisted', 'muted', 'dismissed', 'note'];
 // A committed change is applied within minutes; this allows for a check
 // already running when it was sent.
@@ -3564,10 +3602,13 @@ const marks = {
   settle() {
     const all = this.all();
     const published = Date.parse(app.data?.generated_at) || 0;
+    // As openAsk() decides whether a tap sends anything.
+    const sends = Boolean(vault.lock && app.data?.repo);
     let changed = false;
     for (const [id, local] of Object.entries(all)) {
       const remote = (byId(id) || {}).you || {};
-      const lapsed = published && published - (Date.parse(local.at) || 0) > MARK_GRACE;
+      const lapsed = sends && published
+        && published - (Date.parse(local.at) || 0) > MARK_GRACE;
       for (const k of MARK_KEYS) {
         if (!(k in local)) continue;
         if (lapsed || (byId(id) && markSays(local, k) === markSays(remote, k))) {
