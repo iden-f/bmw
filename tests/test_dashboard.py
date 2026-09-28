@@ -183,6 +183,63 @@ class TestTheBotsOwnState:
         assert len(published) == 2
         assert all(not l["filtered"] for l in published)
 
+    def test_newer_gone_cars_do_not_crowd_older_live_ones_out_of_the_cap(self, tmp_path):
+        """Two cars for sale since January, three gone since June, room for
+        three. The cut used to keep the three gone ones, and an alert for a
+        live car then opened on "not in the published data"."""
+        cfg, state, sid = self._bench(tmp_path)
+        cfg.set("dashboard.max_listings", 3)
+        state.listings.clear()
+        for n, (month, status) in enumerate([("01", "active"), ("01", "active"),
+                                             ("06", "gone"), ("06", "gone"), ("06", "gone")]):
+            state.record(Listing(id=f"car{n}", url=f"https://www.autotrader.ca/a/x/19_{n}_/",
+                                 title="2019 Honda Civic", price=20000 + n, search_id=sid))
+            state.listings[f"car{n}"].update(first_seen=f"2026-{month}-0{n + 1}T12:00:00+00:00",
+                                             status=status)
+        payload = build_payload(cfg, state, env={})
+
+        assert [l["id"] for l in payload["listings"]] == ["car1", "car0", "car4"]
+        assert payload["health"]["left_out"] == 2
+        assert payload["health"]["counts"]["active"] == 2
+
+    def test_the_cap_cuts_hidden_cars_before_gone_ones(self, tmp_path):
+        cfg, state, sid = self._bench(tmp_path)
+        cfg.set("dashboard.max_listings", 3)
+        state.listings["ask"].update(status="gone")
+        published = [l["id"] for l in build_payload(cfg, state, env={})["listings"]]
+        # Live, then gone, then hidden.
+        assert published == ["keep", "ask", "nope"]
+        cfg.set("dashboard.max_listings", 2)
+        assert [l["id"] for l in build_payload(cfg, state, env={})["listings"]] == ["keep", "ask"]
+
+
+class TestTheBoundsThePageHoldsAChangeTo:
+    """The page offers only what the next check will take: a change refused
+    is otherwise noticed an hour later, as a line under Your recent changes."""
+
+    def test_they_are_the_control_channel_s_own(self, tmp_path):
+        from autotrader import control
+        cfg, state = _payload(tmp_path)
+        bounds = build_payload(cfg, state, {})["bounds"]
+        assert bounds["rules"] == {k: list(v) for k, v in control.RULE_BOUNDS.items()}
+        assert bounds["marketplace"] == {k: [lo, hi] for k, (_, lo, hi)
+                                         in control.MARKETPLACE_SETTINGS.items()}
+        assert bounds["aliases"]["most"] == control.MAX_ALIASES
+
+    def test_the_spelling_rule_reads_the_same_in_a_browser(self, tmp_path):
+        """The pattern is compiled by the page's RegExp, so it has to mean the
+        same there: nothing in it that only Python's re understands."""
+        import re
+        from autotrader import control
+        cfg, state = _payload(tmp_path)
+        pattern = build_payload(cfg, state, {})["bounds"]["aliases"]["pattern"]
+        assert pattern.startswith("^") and pattern.endswith("$")
+        assert not re.search(r"\(\?P|\\[AZz]|\(\?[aiLmsux]", pattern)
+        for name in ("CivicSi", "Civic Si", "Type-R", "EX-L 1.5/T+"):
+            assert re.match(pattern, name) and control._ALIAS.match(name)
+        for name in ("<Civic>", "", " Civic", "x" * 41):
+            assert not re.match(pattern, name)
+
 
 class TestTheCallersThatPassNoEnvironment:
     """`python -m autotrader dashboard` and the local `ui` server both do.

@@ -17,7 +17,7 @@ from typing import Any
 from . import clock
 from .archive import size_report
 from . import geo, insight, qr, thumbs
-from . import budget
+from . import budget, control
 from .config import CHANNEL_SECRETS, Config
 from .listing import name_of, on_marketplace
 from .parser import STRATEGIES
@@ -169,8 +169,13 @@ def build_payload(cfg: Config, state: State, env: dict[str, str] | None = None
                 entry.get("search_id") or "")
         listings.append(item)
 
+    # Cars you can buy first, then the ones that have gone, then the hidden
+    # ones, newest first within each: the cap cuts from the end. A live car
+    # listed for months is the one most likely to come down in price, and
+    # must not give way to a car that has already left the market.
     listings.sort(key=lambda item: (not item.get("filtered"),
-                                    item.get("first_seen") or "", item.get("id")),
+                                    item.get("status") == "active",
+                                    item.get("first_seen") or "", item.get("id") or ""),
                   reverse=True)
     # Count everything, then publish what fits. The cap limits page weight
     # only; counting after it would understate the totals, the hidden count
@@ -369,6 +374,14 @@ def build_payload(cfg: Config, state: State, env: dict[str, str] | None = None
         "score_check": insight.backtest(state.listings.values()),
         "archive": size_report(),
         "config": _safe_config(cfg),
+        # The bounds a change from the page is held to, so the page never
+        # offers a value the next check would refuse.
+        "bounds": {
+            "rules": {name: [low, high] for name, (low, high) in control.RULE_BOUNDS.items()},
+            "marketplace": {name: [low, high] for name, (_, low, high)
+                            in control.MARKETPLACE_SETTINGS.items()},
+            "aliases": {"most": control.MAX_ALIASES, "pattern": control._ALIAS.pattern},
+        },
     }
 
 
