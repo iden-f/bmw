@@ -8,7 +8,8 @@ Every 20 to 30 minutes the collector opens each of your searches in its own
 browser, signed in to Facebook, and keeps what the page itself received: the
 results it arrived with and the ones that loaded as it scrolled. For a car
 that passes your rules it also opens the listing once, for the exact
-odometer and details. It seals what it read with your vault key and sends it
+odometer and details, and sends what it found there with the car from then
+on. It seals what it read with your vault key and sends it
 to your repository, which starts **Check AutoTrader**. The bot applies your
 rules, sends the alerts and updates the dashboard, exactly as for a car from
 AutoTrader. The collector writes none of the bot's data.
@@ -31,7 +32,9 @@ You need a Mac that stays on and signed in to its user account, with
 [Homebrew](https://brew.sh) Python 3.10 or newer (`brew install python`) and
 ideally Google Chrome. On power, set System Settings → Battery (or Energy) →
 *Prevent automatic sleeping when the display is off*. While the collector
-runs it also holds the Mac awake itself.
+runs it also holds the Mac awake itself, but not with the lid closed: a
+MacBook still sleeps when its lid is closed, unless it is on power with an
+external display attached.
 
 ## Set up
 
@@ -77,16 +80,20 @@ alerting; from then on a new car is an alert.
 
 Set the second one up the same way, with `collector/run setup --standby`. It
 checks in but does not read while the first is being heard from. If the
-first goes quiet for 75 minutes it starts reading, and the bot tells you it
-has taken over. When the first comes back, the second stands by again. It
-signs in to Facebook separately (`collector/run login` on it too).
+first goes quiet for 75 minutes, or says Facebook has signed it out or asked
+the account to confirm who it is, the second starts reading, and the bot
+tells you it has taken over. When the first reads again, the second stands
+by again. It reads only while the bot is taking in its own check-ins, so
+the two never read at once because the bot has stopped taking batches in
+(GitHub is down, or **Check AutoTrader** is switched off). It signs in to
+Facebook separately (`collector/run login` on it too).
 
 ## Everyday
 
 | Command | What it does |
 |---|---|
 | `collector/run status` | What is set up, whether it is running, what the last pass did |
-| `collector/run once` | One pass now (`--now` reads even overnight or on standby) |
+| `collector/run once` | One pass now (`--now` reads even overnight, on standby, or while it holds off after Facebook signed it out) |
 | `collector/run login` | Sign in again, after Facebook signs the collector out |
 | `collector/run check` | Try the token and passphrase, and list the searches |
 | `collector/run explain` | Read every search now and say where each car went and why; sends nothing |
@@ -112,7 +119,7 @@ cars it has opened) is in that folder, never in the clone.
 | `quiet_start`, `quiet_end` | `00:30`, `06:30` | Overnight it only checks in, in this Mac's time |
 | `details_per_cycle` | 3 | Listing pages opened per pass, for cars that pass your rules |
 | `scrolls` | 2 | Screens of results per search beyond the first |
-| `role` | `primary` | `standby` reads only when the primary has gone quiet |
+| `role` | `primary` | `standby` reads only when the primary has gone quiet or Facebook will not let it in |
 | `takeover_after_minutes` | 75 | How long a standby waits for the primary |
 | `show_browser` | `false` | Show the browser while it reads |
 | `channel` | `chrome` | Use Google Chrome; empty for Playwright's Chromium |
@@ -171,12 +178,16 @@ Mac. Delete the folder whenever you like.
 ## When something goes wrong
 
 The bot alerts you when the collector has not checked in for two hours, when
-Facebook signs it out, and when it checks in but has read nothing for six
+Facebook signs it out, and when it checks in but has read nothing for nine
 hours. On the Mac, `collector/run status` says which part is missing, and the
 log says why.
 
 - **Signed out, or asked to confirm**: `collector/run login`, sign in, close
-  the window.
+  the window. Until you do, the collector only checks in, for 12 hours at a
+  time, rather than knock on the same page every pass.
+- **It cannot send**: after three sends GitHub refused in a row, the
+  collector only checks in, reading nothing it could not deliver, until
+  GitHub takes one again.
 - **The token was refused**: it expired or lost its permission. Make a new
   one and run `collector/run setup --secrets`.
 - **The passphrase does not open the vault**: it was changed; run

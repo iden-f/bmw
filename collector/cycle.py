@@ -31,6 +31,30 @@ log = logging.getLogger("collector")
 # Kept per car, to send a photo only until the bot has surely had it.
 PHOTO_SENDS = 3
 
+# What a car's own page says that its card does not. Kept per car and sent
+# with it in every later batch: the bot judges each batch as it comes, so a
+# card alone would let back in a car the page showed a rule should hide, and
+# a batch GitHub drops would lose the page for good.
+FACTS = ("mileage_km", "title_status", "transmission", "fuel", "color", "vin",
+         "trim", "make", "model", "seller_type", "created")
+
+# After Facebook signs the collector out or asks the account to confirm who
+# it is, passes only check in for this long, or until collector/run login:
+# every read before then would land on the same page, on an account Facebook
+# is already wary of.
+HOLD_HOURS = 12
+
+# Sends refused in a row before a pass stops reading Facebook and only tries
+# to check in: nothing it read could be delivered anyway.
+SEND_TRIES = 3
+
+# What a collector says when Facebook will not let it read: it holds off,
+# and a standby covers for a primary that says it.
+CANNOT_READ = ("signed_out", "checkpoint")
+# Why it is holding off, for the batch's note.
+HELD_BECAUSE = {"signed_out": "Facebook signed the collector out",
+                "checkpoint": "Facebook asked the account to confirm who it is"}
+
 
 # ------------------------------------------------------------ local memory
 
@@ -115,15 +139,54 @@ def next_wait(cfg: S.Settings) -> float:
 
 def primary_heard(cfg: S.Settings, state: dict[str, Any],
                   now: datetime | None = None) -> str:
-    """The primary heard from recently, if any: a standby then stays out."""
+    """The primary heard from recently, if any: a standby then stays out.
+
+    Not one that last said Facebook signed it out or stopped it at a
+    checkpoint: it checks in but reads nothing, which is what a standby is
+    for.
+    """
     now = now or clock.now()
     for host, heard in ((state.get("marketplace") or {}).get("hosts") or {}).items():
         if host == cfg.host or heard.get("role") != "primary":
+            continue
+        if heard.get("session") in CANNOT_READ:
             continue
         age = clock.minutes_since(heard.get("received"), now)
         if age is not None and age < cfg.takeover_after_minutes:
             return host
     return ""
+
+
+def heard_lately(cfg: S.Settings, state: dict[str, Any],
+                 now: datetime | None = None) -> bool:
+    """Whether the bot has taken in this computer's own batches lately.
+
+    If it has not, this computer is new, or the bot is not taking batches in
+    at all (GitHub is down, the workflow is switched off): then the primary's
+    silence says nothing about the primary, and reading as well would only
+    double the load on the Facebook account.
+    """
+    heard = ((state.get("marketplace") or {}).get("hosts") or {}).get(cfg.host) or {}
+    age = clock.minutes_since(heard.get("received"), now or clock.now())
+    return age is not None and age < 2 * (cfg.every_minutes + cfg.jitter_minutes) + 15
+
+
+def standing_by(cfg: S.Settings, state: dict[str, Any],
+                now: datetime | None = None) -> str:
+    """Why a standby stays out this pass, or "" when it should read."""
+    primary = primary_heard(cfg, state, now)
+    if primary:
+        return f"standing by for {primary}"
+    if not heard_lately(cfg, state, now):
+        return "standing by: the bot has not taken in this computer's batches lately"
+    return ""
+
+
+def held(memory: dict[str, Any], now: datetime | None = None) -> str:
+    """What Facebook last said to the collector, while passes hold off for it."""
+    hold = memory.get("held") or {}
+    hours = clock.hours_since(hold.get("at"), now or clock.now())
+    return str(hold.get("session") or "") if hours is not None and hours < HOLD_HOURS else ""
 
 
 # ------------------------------------------------------------- the pass
@@ -148,15 +211,21 @@ def read(cfg: Config, plan: list[dict[str, Any]], browser: Browser,
     cars = memory.setdefault("cars", {})
     parts: list[dict[str, Any]] = []
     # Cars worth opening, newly seen ones first: they are the ones that alert.
+    # Once each, though two searches find it.
     worth: list[tuple[bool, dict[str, Any], dict[str, Any], Any]] = []
+    queued: set[str] = set()
     session = "ok"
     stamp = clock.stamp()
-    for n, item in enumerate(plan):
-        if n:
-            browser.rest()
+    opened = 0
+    for item in plan:
         texts: list[str] = []
         landed, errors = [], []
         for q in item["queries"]:
+            # The pause a person takes between pages, between the models
+            # of one search as between searches.
+            if opened:
+                browser.rest()
+            opened += 1
             page = browser.visit(q["url"], scrolls=settings.scrolls)
             texts += page.texts
             if pages is not None:
@@ -167,6 +236,7 @@ def read(cfg: Config, plan: list[dict[str, Any]], browser: Browser,
                 errors.append(page.error)
             if page.session != "ok":
                 session = page.session
+                break
         if session != "ok":
             break
         found = M.collect(texts)
@@ -184,17 +254,19 @@ def read(cfg: Config, plan: list[dict[str, Any]], browser: Browser,
         search = by_id.get(item["search"])
         for rec in part["listings"]:
             mine = cars.setdefault(rec["id"], {})
-            fresh = "first" not in mine
-            mine.setdefault("first", stamp)
+            # New this pass, though an earlier search saw it first.
+            fresh = mine.setdefault("first", stamp) == stamp
             mine["seen"] = stamp
             if mine.get("detail") or int(mine.get("tries", 0)) >= 2 \
-                    or rec.get("sold") or search is None:
+                    or rec.get("sold") or search is None or rec["id"] in queued:
                 continue
             if _wanted(rec, item, cfg, search):
                 worth.append((not fresh, rec, item, search))
+                queued.add(rec["id"])
 
-    if not details:
-        return parts, session
+    # Signed out or stopped at a checkpoint: no listing page either.
+    if not details or session != "ok":
+        return _with_facts(parts, cars), session
     # A car worth hearing about gets its own page read once, for the exact
     # odometer and the details the results leave out.
     worth.sort(key=lambda w: w[0])
@@ -203,14 +275,29 @@ def read(cfg: Config, plan: list[dict[str, Any]], browser: Browser,
         browser.rest()
         page = browser.visit(M.ITEM_URL.format(rec["id"]))
         if page.session != "ok":
+            session = page.session
             break
         mine["tries"] = int(mine.get("tries", 0)) + 1
         extra = M.collect(page.texts).get(rec["id"])
         if extra:
             mine["detail"] = stamp
+            facts = {k: extra[k] for k in FACTS if k in extra}
+            if extra.get("mileage_rounded"):
+                facts.pop("mileage_km", None)     # no better than the card's
+            mine["facts"] = facts
             # The card's own photo stays: it is the small one.
             M.merge(rec, extra)
-    return parts, session
+    return _with_facts(parts, cars), session
+
+
+def _with_facts(parts: list[dict[str, Any]], cars: dict[str, Any]) -> list[dict[str, Any]]:
+    """Every car read, with what its own page said, this pass or an earlier one."""
+    for part in parts:
+        for rec in part["listings"]:
+            facts = (cars.get(rec["id"]) or {}).get("facts")
+            if facts:
+                M.merge(rec, facts)
+    return parts
 
 
 def build(settings: S.Settings, parts: list[dict], *, polled: bool, session: str,
@@ -240,8 +327,11 @@ def build(settings: S.Settings, parts: list[dict], *, polled: bool, session: str
 def fit(key: bytes, batch: dict[str, Any], memory: dict[str, Any]) -> str:
     """Seal the batch, trimmed until GitHub will carry it.
 
-    Photos go first for cars already sent a few times, then the oldest cars
-    of the biggest search: the next pass sends them again anyway.
+    Photos go first for cars already sent a few times, then the photos of
+    the oldest cars, which a later batch carries. Only if that is not enough
+    do the oldest cars of the biggest search go: the next pass sends them
+    again anyway. A car left out of a first read would come back later as
+    news, so a photo always goes before a car.
     """
     cars = memory.setdefault("cars", {})
     for part in batch["searches"]:
@@ -250,6 +340,19 @@ def fit(key: bytes, batch: dict[str, Any], memory: dict[str, Any]) -> str:
             if rec.get("photo") and cars.get(rec["id"], {}).get("photos", 0) >= PHOTO_SENDS:
                 rec.pop("photo")
     sealed = M.seal_batch(key, batch)
+    # Every search's newest cars first, so the photos left out are the
+    # oldest cars' of every search, not all of the last one's. They are not
+    # counted as sent.
+    photos = [rec for _, _, rec in sorted(
+        ((n, i, rec) for i, part in enumerate(batch["searches"])
+         for n, rec in enumerate(part["listings"]) if rec.get("photo")),
+        key=lambda t: t[:2])]
+    while len(sealed) > M.PAYLOAD_LIMIT and photos:
+        cut = max(1, len(photos) // 5)
+        for rec in photos[-cut:]:
+            rec.pop("photo")
+        del photos[-cut:]
+        sealed = M.seal_batch(key, batch)
     while len(sealed) > M.PAYLOAD_LIMIT:
         biggest = max(batch["searches"], key=lambda p: len(p["listings"]), default=None)
         if not biggest or not biggest["listings"]:
@@ -282,11 +385,17 @@ def once(settings: S.Settings, *, github: GitHub | None = None,
     note, polled, session, parts = "", False, "ok", []
     if not plan:
         note = "no searches to read"
+    elif (asked := held(memory)) and not force:
+        # Still said, so the bot keeps the alarm and a standby covers.
+        session = asked
+        note = f"held after {HELD_BECAUSE.get(asked, asked)}: run collector/run login"
     elif resting(settings, now) and not force:
         note = "overnight pause"
+    elif int(memory.get("send_failures") or 0) >= SEND_TRIES and not force:
+        note = "waiting for GitHub to accept a batch"
     elif settings.role == "standby" and not force and \
-            (primary := primary_heard(settings, keyring.state())):
-        note = f"standing by for {primary}"
+            (why := standing_by(settings, keyring.state())):
+        note = why
     else:
         polled = True
         with browser_factory(settings).open() as browser:
@@ -295,15 +404,27 @@ def once(settings: S.Settings, *, github: GitHub | None = None,
             else:
                 parts, session = read(cfg, plan, browser, settings, memory)
         if settings.role == "standby":
-            note = "the primary has gone quiet, so this one is reading"
+            note = "the primary is not reading, so this one is"
+        if session in CANNOT_READ:
+            memory["held"] = {"session": session, "at": clock.stamp()}
+        elif session == "ok":
+            memory.pop("held", None)
+        # Which pages were opened is kept even if the send below fails, so
+        # no listing page is opened again for want of a delivery.
+        save_memory(memory)
 
     # A pass that failed before it could send says so in the next one.
     failure = memory.get("last_error")
     batch = build(settings, parts, polled=polled, session=session, note=note,
                   wait=wait, failure=failure)
     sealed = fit(key, batch, memory)
-    github.send(sealed)
+    try:
+        github.send(sealed)
+    except Exception:
+        _send_failed()
+        raise
     memory.pop("last_error", None)
+    memory.pop("send_failures", None)
     summary = {"at": batch["at"], "polled": polled, "session": session, "note": note,
                "searches": [{"search": p["search"], "ok": p["ok"], "cars": len(p["listings"]),
                              "error": p["error"]} for p in parts],
@@ -311,6 +432,14 @@ def once(settings: S.Settings, *, github: GitHub | None = None,
     memory["last"] = summary
     save_memory(memory)
     return summary
+
+
+def _send_failed() -> None:
+    """Count a refused send against the memory as last saved: what was read
+    is in it, the photos this batch would have carried are not."""
+    memory = load_memory()
+    memory["send_failures"] = int(memory.get("send_failures") or 0) + 1
+    save_memory(memory)
 
 
 def forever(settings: S.Settings) -> None:

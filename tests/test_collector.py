@@ -231,10 +231,14 @@ class TestAPass:
         cars = {r["id"]: r for r in last_batch(world)["searches"][0]["listings"]}
         assert cars["200000001"]["mileage_km"] == 51234
         assert cars["200000001"]["transmission"] == "Manual"
-        # Once is enough: the next pass does not open them again.
+        # Once is enough: the next pass does not open them again, and still
+        # sends what they said.
         FakeFacebook.visited = []
         once(world.settings, github=world.github)
         assert not [v for v in FakeFacebook.visited if "/marketplace/item/" in v]
+        cars = {r["id"]: r for r in last_batch(world)["searches"][0]["listings"]}
+        assert cars["200000001"]["mileage_km"] == 51234
+        assert cars["200000001"]["transmission"] == "Manual"
 
     def test_the_bot_takes_in_what_the_collector_sent(self, world):
         from collector.cycle import once
@@ -274,12 +278,14 @@ class TestAPass:
 
 class TestStandby:
 
-    def _state_with(self, world, host, role, minutes_ago):
+    def _state_with(self, world, *heard):
+        """The bot's state with each (host, role, minutes ago) heard from."""
         from autotrader import clock
         from datetime import timedelta
-        heard = (clock.now() - timedelta(minutes=minutes_ago)).isoformat(timespec="seconds")
         state = State(path=world.repo / "state.json")
-        state.data["marketplace"] = {"hosts": {host: {"received": heard, "role": role}}}
+        state.data["marketplace"] = {"hosts": {host: {
+            "received": (clock.now() - timedelta(minutes=ago)).isoformat(timespec="seconds"),
+            "role": role} for host, role, ago in heard}}
         state.save()
         vault = V.Vault.unlock(world.repo, {V.ENV_KEY: PHRASE})
         vault.seal_file(world.repo / "state.json", "state.enc")
@@ -288,7 +294,8 @@ class TestStandby:
     def test_stands_by_while_the_primary_is_heard(self, world):
         from collector.cycle import once
         world.settings.role, world.settings.host = "standby", "collector-b"
-        self._state_with(world, "collector-a", "primary", 20)
+        self._state_with(world, ("collector-a", "primary", 20),
+                         ("collector-b", "standby", 20))
         summary = once(world.settings, github=world.github)
         assert not summary["polled"] and "standing by for collector-a" in summary["note"]
         assert not FakeFacebook.visited
@@ -297,10 +304,22 @@ class TestStandby:
         from collector.cycle import once
         sign_in(world)
         world.settings.role, world.settings.host = "standby", "collector-b"
-        self._state_with(world, "collector-a", "primary", 200)
+        self._state_with(world, ("collector-a", "primary", 200),
+                         ("collector-b", "standby", 20))
         summary = once(world.settings, github=world.github)
         assert summary["polled"] and summary["session"] == "ok"
         assert last_batch(world)["role"] == "standby"
+
+    def test_stands_by_when_the_bot_is_not_taking_batches_in(self, world):
+        from collector.cycle import once
+        sign_in(world)
+        FakeFacebook.visited = []
+        world.settings.role, world.settings.host = "standby", "collector-b"
+        # Neither heard from for three hours: the bot, not the primary, stopped.
+        self._state_with(world, ("collector-a", "primary", 180),
+                         ("collector-b", "standby", 180))
+        summary = once(world.settings, github=world.github)
+        assert not summary["polled"] and not FakeFacebook.visited
 
 
 class TestFitting:

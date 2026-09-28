@@ -68,7 +68,13 @@ def cmd_check(args) -> int:
 
 def cmd_login(args) -> int:
     from .browser import login
+    from .cycle import load_memory, save_memory
     ok = login(S.Settings.load())
+    if ok:
+        # Signing in answers a sign-out or a checkpoint: the next pass reads.
+        memory = load_memory()
+        if memory.pop("held", None):
+            save_memory(memory)
     print("Signed in: the collector can read Marketplace." if ok else
           "Not signed in. Run collector/run login again to finish.")
     return 0 if ok else 1

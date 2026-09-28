@@ -263,9 +263,10 @@ often the Mac reads, and its overnight pause, are the Mac's own; the
 shows when the last one came.
 
 Setting it up takes about fifteen minutes: [collector/README.md](collector/README.md).
-A second Mac can stand by and take over if the first goes quiet. While it
-runs, the collector also asks for a check every half hour, so it keeps the
-schedule below as well as any outside timer would.
+A second Mac can stand by and take over if the first goes quiet or Facebook
+stops letting it in. While it runs, the collector also asks for a check
+every half hour, so it keeps the schedule below as well as any outside timer
+would.
 
 ## Stopping it
 

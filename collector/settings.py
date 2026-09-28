@@ -57,7 +57,8 @@ class Settings:
     # How this computer names itself to the bot. Not the account, not a place.
     host: str = ""
     # "primary" reads Marketplace; "standby" reads only when the primary has
-    # gone quiet, so two computers never double the load on one account.
+    # gone quiet or Facebook will not let it in, so two computers never
+    # double the load on one account.
     role: str = "primary"
     every_minutes: int = 25
     jitter_minutes: int = 5

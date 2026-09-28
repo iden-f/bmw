@@ -226,13 +226,24 @@ the bot stays the only writer of the watch's data.
    the page fetched; nothing is replayed, so Facebook changing its internal
    calls changes nothing. `marketplace.collect` walks that JSON for anything
    shaped like a listing. A car that passes the search's rules has its own
-   page opened once, for the odometer, trim and title status.
+   page opened once, for the odometer, trim and title status. The collector
+   keeps what that page said and sends it with the car in every later batch,
+   so the rules judge the car the same way each time. Between any two pages
+   it opens, one model's query and the next included, it waits the pause a
+   person takes. When Facebook signs the collector out or asks the account
+   to confirm who it is, the pass stops there, opens no listing page, and
+   the passes after it only check in for 12 hours or until
+   `collector/run login`.
 3. **The batch.** `{"v", "id", "at", "host", "role", "polled", "session",
    "settings", "next_at", "last_failure", "searches": [...]}`, sealed like everything else with the name
    `marketplace` and padded to 4 KiB, sent as `repository_dispatch` of type
    `marketplace` with the sealed text in `client_payload.batch`. GitHub
-   carries at most 65,535 characters there, so the oldest cars are left out
-   of an oversized batch; the next one carries them.
+   carries at most 65,535 characters there, so an oversized batch leaves out
+   photos first, the oldest cars' first, and later batches carry them; only
+   if that is not enough are the oldest cars left out, and the next batch
+   carries those. GitHub keeps one run waiting per concurrency group and
+   cancels it when a newer one arrives, so a batch can be dropped; nothing
+   the collector found is sent in one batch only.
 4. **The ingest.** `marketplace ingest` reads the batch from the event file,
    never from the workflow's own text, and refuses one that does not open,
    is over 12 hours old, or whose id it has already taken in. Each search's
@@ -241,17 +252,27 @@ the bot stays the only writer of the watch's data.
    same change handling. The counts are kept per search for the Status tab,
    and `collector/run explain` prints the same sorting car by car.
    Ids are `fb-<item number>`. A search's first batch records what is for
-   sale as a starting point; a car Facebook marks sold is gone at once, one
-   unseen for 10 days is gone quietly, and AutoTrader's absence rules never
-   touch them.
+   sale as a starting point, and so does the first after what it asks
+   Marketplace changes. A changed rule that hides cars rather than asks for
+   fewer (a mileage cap, a keyword) quiets only the cars it lets through, as
+   on AutoTrader. A car Facebook marks sold is gone at once, one unseen for
+   10 days is gone quietly, and AutoTrader's absence rules never touch them.
+   A search whose query for one of its models failed is read only in part:
+   what it read is taken in, its error is kept, and no car is taken for
+   gone on its word.
 5. **Health.** Every batch says whether it read, and whether Facebook still
    lets the collector in. A collector not heard from for two hours, or heard
-   but not reading for six, raises the watchdog; a signed-out session, and a
-   standby taking over, are each said once.
+   but not reading for nine (the overnight pause alone is six), raises the
+   watchdog; a signed-out session, once for each computer, and a standby
+   taking over, are each said once. Only a batch that opened the browser
+   says anything about the session.
 
 Overnight, and on a standby while the primary is heard from, the collector
 still sends an empty batch every half hour. That keeps the watchdog quiet and
-serves as the check's outside timer.
+serves as the check's outside timer. A standby reads when the primary has
+gone quiet or says Facebook will not let it in, and only while the bot is
+taking in the standby's own batches: when the bot takes in nothing, the
+primary's silence says nothing about the primary.
 
 ## Changes from the dashboard
 
@@ -320,8 +341,8 @@ Besides the alerts about cars, these are all of them.
 | **Marketplace needs you to sign in again** | Facebook signed the collector out, asked the account to confirm who it is, or refused its searches. Marketplace is not being read; AutoTrader is. | `collector/run login` on the Mac named in the message. |
 | **Marketplace is being watched again** | The collector is signed in and reading after the message above. | Nothing. |
 | **Marketplace collector has gone quiet** | Nothing from the collector for two hours, though it checks in every half hour even overnight. | `collector/run status` on that Mac: asleep, off, offline or an expired token. |
-| **Marketplace is not being read** | The collector checks in, but no search has read for six hours. It quotes the error. | `collector/run once --now` on the Mac, then its log. |
-| **Marketplace: the standby computer has taken over** | The primary collector went quiet and the standby is reading instead. Nothing is missed. | Look at the primary when convenient. |
+| **Marketplace is not being read** | The collector checks in, but no search has read for nine hours. It quotes the error. | `collector/run once --now` on the Mac, then its log. |
+| **Marketplace: the standby computer has taken over** | The primary collector went quiet, or Facebook stopped letting it in, and the standby is reading instead. Nothing is missed. | Look at the primary when convenient. |
 
 ## Testing
 

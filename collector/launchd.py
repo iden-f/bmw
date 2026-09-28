@@ -1,9 +1,10 @@
 """Keeping the collector running on a Mac: a launchd agent.
 
 The agent starts at login, restarts the collector if it stops, and holds the
-Mac awake while it runs (caffeinate -i), so a closed lid on power or an idle
-screen does not end the watch. It runs as the signed-in user, which is what
-lets it read the Keychain.
+Mac awake while it runs (caffeinate -i), so an idle Mac does not sleep and
+end the watch. That does not cover a closed lid: a MacBook still sleeps when
+its lid is closed, unless it is on power with an external display attached.
+It runs as the signed-in user, which is what lets it read the Keychain.
 """
 
 from __future__ import annotations
