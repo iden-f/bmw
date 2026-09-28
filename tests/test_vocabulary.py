@@ -368,11 +368,16 @@ class TestEveryTriggerTheBotCanRecordHasPageCopy:
         import re
         from autotrader.insight import SCHEDULE_TRIGGERS
         source = self.page()
-        # The page filters these out when listing "the rest came from...".
-        filtered = set(re.findall(r"k !== '(\w+)'", source))
-        assert SCHEDULE_TRIGGERS <= filtered, (
-            f"the page still lists {sorted(SCHEDULE_TRIGGERS - filtered)} as "
-            f"something other than the schedule")
+        # The page filters these out when listing "the rest came from...",
+        # with one rule that, like insight._is_a_schedule, reads only the
+        # part of a named outside timer before its colon.
+        rule = re.search(r"const isSchedule = k => \[([^\]]*)\]\.includes\(String\(k\)\.split\(':'\)\[0\]\)",
+                         source)
+        assert rule, "the page has no isSchedule rule, or it reads the whole trigger"
+        filtered = set(re.findall(r"'(\w+)'", rule.group(1)))
+        assert SCHEDULE_TRIGGERS == filtered, (
+            f"the page and the bot disagree on {sorted(SCHEDULE_TRIGGERS ^ filtered)}")
+        assert "k !== 'schedule'" not in source, "a second, older rule is still in use"
 
 
 class TestThePythonSideHasOneVocabularyToo:

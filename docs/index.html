@@ -54,6 +54,8 @@
 
   --gutter:var(--s4);
   --tabbar:calc(56px + env(safe-area-inset-bottom,0px));
+  /* The sticky header: .topbar__in's 52px and its border. */
+  --topbar:calc(53px + env(safe-area-inset-top,0px));
 }
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme="light"]) {
@@ -83,7 +85,14 @@
 @media (min-width:1100px){ :root{ --gutter:var(--s7); } }
 
 *,*::before,*::after{ box-sizing:border-box; }
-html{ -webkit-text-size-adjust:100%; }
+html{
+  -webkit-text-size-adjust:100%;
+  /* A focused control is scrolled clear of the sticky header, not only to
+     the window's edge, where the header would sit on top of it. */
+  scroll-padding-top:calc(var(--topbar) + var(--s2));
+}
+/* And clear of the tab bar fixed along a phone's bottom edge. */
+@media (max-width:699px){ html{ scroll-padding-bottom:calc(var(--tabbar) + var(--s2)); } }
 body{
   margin:0; background:var(--bg); color:var(--text);
   font:400 var(--t-body)/1.45 var(--font);
@@ -584,6 +593,9 @@ select,.btn{
   cursor:pointer; font-size:var(--t-small);
   transition:background var(--m-state) var(--ease), border-color var(--m-state) var(--ease);
 }
+/* A select is as wide as its longest option, and a search's name can be 80
+   characters: it gives way, showing as much of the choice as fits. */
+select{ max-width:100%; min-width:0; text-overflow:ellipsis; }
 select:hover,.btn:hover{ background:var(--surface-2); }
 .btn--primary{
   background:var(--text); color:var(--bg); border-color:var(--text); font-weight:520;
@@ -633,6 +645,9 @@ select:hover,.btn:hover{ background:var(--surface-2); }
     /* Full-bleed so a chip scrolled to the edge is not clipped by the gutter,
        with the gutter restored as padding inside. */
     margin-inline:calc(var(--s4) * -1); padding-inline:var(--s4);
+    /* The snap points sit inside that padding too, or the row would start
+       scrolled by it, with the first chip and its focus ring on the edge. */
+    scroll-padding-inline:var(--s4);
     /* Room for the focus ring, which is outside the chip's own box. */
     padding-block:3px;
     /* The row is cut off, so say so: the last few pixels fade out. */
@@ -697,10 +712,14 @@ body[data-locked] .clock, body[data-locked] .tabs, body[data-locked] .trust{ dis
 }
 .lock h1{ margin:0; font-size:var(--t-h1); font-weight:560; }
 .lock p{ margin:0; color:var(--text-2); font-size:var(--t-small); }
-.lock .field{ max-width:none; }
+/* flex:none: in this column a field's 200px basis is a height, and the box
+   around the passphrase grew to 200px tall. */
+.lock .field{ flex:none; max-width:none; }
 .lock__keep{ display:flex; gap:var(--s2); align-items:center; font-size:var(--t-small); }
 .lock__msg:empty{ display:none; }
-.lock__msg{ color:var(--bad); }
+/* `p.lock__msg`, not `.lock__msg`: `.lock p` above outranks a bare class,
+   and a wrong passphrase read as grey body copy. */
+.lock p.lock__msg{ color:var(--bad); }
 
 /* ------------------------------------------------------------------ states */
 .state{
@@ -762,9 +781,11 @@ body[data-locked] .clock, body[data-locked] .tabs, body[data-locked] .trust{ dis
   }
 }
 
-.kv{ display:grid; grid-template-columns:auto 1fr; gap:var(--s2) var(--s4); font-size:var(--t-small); }
+/* minmax(0,…) and anywhere: an error quoting a web address is one long word,
+   and it wraps rather than pushing a phone's page sideways. */
+.kv{ display:grid; grid-template-columns:auto minmax(0,1fr); gap:var(--s2) var(--s4); font-size:var(--t-small); }
 .kv dt{ color:var(--text-3); font-size:var(--t-micro); letter-spacing:.06em; text-transform:uppercase; padding-top:2px; }
-.kv dd{ margin:0; font-variant-numeric:tabular-nums; }
+.kv dd{ margin:0; min-width:0; overflow-wrap:anywhere; font-variant-numeric:tabular-nums; }
 
 /* minmax(0,…): a tile never grows past its share for a long unbroken word,
    such as an error quoting a web address. */
@@ -796,12 +817,13 @@ body[data-locked] .clock, body[data-locked] .tabs, body[data-locked] .trust{ dis
   display:block; margin:var(--s1) 0 0; font-size:var(--t-small);
   font-weight:400; color:var(--text-2); letter-spacing:0; overflow-wrap:anywhere;
 }
-/* `dd.num`, not `dd`: the tone colours the figure, not its caption.
-   `.stat[data-tone] dd` ties with `.stat dd.stat__note` at (0,2,1), and
-   coming later it would win. */
-.stat[data-tone="warn"] dd.num{ color:var(--warn); }
-.stat[data-tone="bad"] dd.num{ color:var(--bad); }
-.stat[data-tone="good"] dd.num{ color:var(--good); }
+/* The tone colours the figure, not its caption, and a figure that is a word
+   ("No", "Not reading", "Late") as much as one that is a number.
+   `dd:not(.stat__note)`, not `dd`: `.stat[data-tone] dd` ties with
+   `.stat dd.stat__note` at (0,2,1), and coming later it would win. */
+.stat[data-tone="warn"] dd:not(.stat__note){ color:var(--warn); }
+.stat[data-tone="bad"] dd:not(.stat__note){ color:var(--bad); }
+.stat[data-tone="good"] dd:not(.stat__note){ color:var(--good); }
 
 /* Coverage / run timeline: one mark per check, so a gap is visible as a gap */
 .timeline{
@@ -916,8 +938,10 @@ body[data-locked] .clock, body[data-locked] .tabs, body[data-locked] .trust{ dis
    true of the whole page. GitHub's scheduler is not punctual, so the
    countdown runs to when a check is due, then counts upwards. */
 .clock{ border-bottom:1px solid var(--line); background:var(--surface); }
-.clock__in{ display:flex; gap:18px; align-items:baseline; margin:0;
-  padding:8px 16px; flex-wrap:wrap; }
+/* Block margins and padding only: .wrap centres the strip and gives it the
+   page's gutter, so it lines up with the masthead and the view. */
+.clock__in{ display:flex; gap:18px; align-items:baseline; margin-block:0;
+  padding-block:8px; flex-wrap:wrap; }
 .clock__cell{ display:flex; gap:6px; align-items:baseline; min-width:0; }
 .clock__cell dt{ font-size:var(--t-micro); color:var(--text-2); white-space:nowrap; }
 .clock__cell dd{ margin:0; font-size:var(--t-small); font-weight:560; white-space:nowrap; }
@@ -982,7 +1006,7 @@ body[data-locked] .clock, body[data-locked] .tabs, body[data-locked] .trust{ dis
 <div class="clock" id="clock" data-state="off">
   <dl class="wrap clock__in">
     <div class="clock__cell">
-      <dt>Last check</dt>
+      <dt id="clock-last-term">Last check</dt>
       <dd id="clock-last">&mdash;</dd>
     </div>
     <div class="clock__cell">

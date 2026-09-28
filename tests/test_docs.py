@@ -517,7 +517,10 @@ class TestThePageTheyDescribe:
 
     def test_the_rules_the_searches_tab_changes(self):
         js = (ROOT / "docs" / "app.js").read_text(encoding="utf-8")
-        editable = set(re.findall(r"(\w+):", re.search(r"const rule = \{([^}]*)\}", js).group(1)))
+        # One box per rule, each naming the rule it sets.
+        boxes = re.search(r"const RULE_BOXES = \[(.*?)\n\];", js, re.S).group(1)
+        editable = set(re.findall(r"\brule: '(\w+)'", boxes))
+        assert editable, "the Searches tab edits no rule"
         said = flat("README.md").split("The Searches tab changes")[1].split(";")[0]
         assert set(re.findall(r"`(\w+)`", said)) == editable, (said, editable)
 

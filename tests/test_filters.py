@@ -137,10 +137,14 @@ class TestEveryRejectionNamesItsRule:
         from pathlib import Path
         source = (Path(__file__).resolve().parent.parent
                   / "docs" / "app.js").read_text()
-        line = re.search(r"const rule = \{([^}]*)\}", source)
-        assert line, "the rules editor no longer builds a rule object"
-        shown = set(re.findall(r"(\w+):", line.group(1)))
+        # One box per rule, each naming the rule it sets; the rule object the
+        # preview tests with is built from them.
+        boxes = re.search(r"const RULE_BOXES = \[(.*?)\n\];", source, re.S)
+        assert boxes, "the rules editor no longer lists its boxes"
+        shown = set(re.findall(r"\brule: '(\w+)'", boxes.group(1)))
+        assert len(shown) == 4, shown
         assert shown <= set(self.RULES), shown - set(self.RULES)
+        assert "const rule = Object.fromEntries(RULE_BOXES.map(" in source
         # And the page must hold out the ones it does not show, rather than
         # counting them as passing.
         assert "l.filtered && !(l.filter_rule in rule)" in source

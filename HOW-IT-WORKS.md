@@ -311,6 +311,10 @@ manifest and icons. No build step, no framework.
   `python -m autotrader ui`, it reads `data.json` directly.
 - **Offline.** The service worker keeps the page, the data and the photos.
   Offline, the page shows the saved copy and says how old it is.
+- **Your marks.** A shortlist, mute, dismissal or note shows at once: the
+  browser keeps it until the published data has it. One the bot never records
+  (the change was not committed, or was refused) lapses at the first publish
+  more than half an hour after it was made, and the bot's record shows again.
 - **Updates.** `sw.js` carries a build stamp written on every publish, so a
   changed page installs a new worker and an installed app offers a reload.
 - **Words.** One word per idea, in the page and in the alerts alike. A
@@ -337,7 +341,7 @@ Besides the alerts about cars, these are all of them.
 | **AutoTrader watcher: its own records do not add up** | A bookkeeping rule failed after a check. Sent when the set of broken rules changes. | Read `diagnostics/invariants.json` in an opened vault. |
 | **This month's runner minutes are heading over** | The repository is drawing on an allowance, and the projection passes the ceiling. Nothing has stopped yet. | Make the repository public again, or thin the `cron` in `watch.yml`. |
 | **The watcher has stopped: this month's minutes are spent** | It committed `BUDGET-STOP` and will not check until the file is gone. Each firing is still billed about a minute. | Delete `BUDGET-STOP` to resume. To stop spending meanwhile, disable Check AutoTrader in the Actions tab. |
-| **Switched off <channel> notifications** | A channel rejected the bot's credentials twice. | Fix the secret, then switch the channel back on locally with `set notifications.channels.<name>.enabled true`. |
+| **Switched off <channel> notifications** | A channel rejected the bot's credentials twice. | Fix the secret, then switch the channel back on from **Alerts** on the dashboard's **Status** tab, or locally with `set notifications.channels.<name>.enabled true`. |
 | **AutoTrader watcher: your alerts moved** | The ntfy topic changed. | Subscribe again from the QR code on the **Status** tab. |
 | **AutoTrader: your last N days** | The weekly digest. | Read it, or not. |
 | **Marketplace needs you to sign in again** | Facebook signed the collector out, asked the account to confirm who it is, or refused its searches. Marketplace is not being read; AutoTrader is. | `collector/run login` on the Mac named in the message. |

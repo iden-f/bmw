@@ -92,7 +92,9 @@ def _demo_payload(root: Path) -> dict:
     state.listings["6"].update(status="gone", notified=True)
     state.record(car("1", "2018 Honda Civic Type R", 42000, year=2018,
                      mileage_km=48000, seller="A Dealer"))
-    state.listings["2"]["mark"] = "shortlist"
+    # Marks as the bot records them: the page draws a shortlisted car and
+    # its note differently, and both have had their own faults.
+    state.listings["2"]["you"] = {"shortlisted": True, "note": "check the tyres"}
     # Real image files, served beside the page, so the browser tests render
     # actual photos. Every one of these tests was written after a day in which
     # no photo loaded at all and the page looked completely normal.
@@ -601,11 +603,22 @@ def test_the_coverage_percentage_is_always_shown_with_its_own_fraction():
     """cov.pct is slots covered over slots expected. Printing it beside the
     number of runs gave "79.2% - 51 of 48 expected checks" in the banner while
     the Status tab, two taps away, said 38 of 48. Both true; one sentence."""
+    import re
     js = (DOCS / "app.js").read_text()
-    for line in js.splitlines():
-        if "cov.pct}%" not in line:
-            continue
+    # The percentage is printed from coveragePct(), as `${pct}%` or
+    # `${covPct}%`. A test that matched none of them passed whatever the page
+    # said, so it counts what it checked.
+    shown = [line for line in js.splitlines() if "pct}%" in line]
+    assert shown, "no coverage percentage found in app.js"
+    for line in shown:
         assert "cov.expected" not in line or "slots_covered" in line, line.strip()
+    # And wherever a fraction of the expected slots is printed, near the
+    # percentage or not, its top is the slots covered, not the checks run.
+    fractions = [line for line in js.splitlines() if re.search(r"\} of \$\{cov\.expected", line)]
+    assert fractions, "no coverage fraction found in app.js"
+    for line in fractions:
+        assert re.search(r"\$\{cov\.slots_covered\b[^}]*\} of \$\{cov\.expected", line), \
+            line.strip()
 
 
 def test_the_app_script_parses():
