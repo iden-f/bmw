@@ -452,8 +452,10 @@ class TestTakingAMarkBack:
         import re
         from pathlib import Path
         js = Path("docs/app.js").read_text()
+        # Each row: the mark, the toggle's label (sentence case), the action
+        # and its undo.
         rows = re.findall(
-            r"\['(\w+)', '[^']*', '[^']*', '([\w-]+)', '([\w-]+)'\]", js)
+            r"\['(\w+)', (?:'[A-Z][^']*', ){1,2}'([\w-]+)', '([\w-]+)'\]", js)
         assert rows, "the marks table in the sheet could not be found"
         for key, action, undo in rows:
             assert action in control.ACTIONS, (key, action)

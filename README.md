@@ -112,7 +112,8 @@ That is all. From then on a check is due every two hours, and runs by itself.
   and run **Check AutoTrader** once: it re-encrypts the vault under the new
   passphrase and moves ntfy to a new topic, so subscribe again from the Status
   tab. Then delete `WATCH_PASSPHRASE_PREVIOUS`. Each device asks for the new
-  one on its next visit. Copies made under the old passphrase - old change
+  one on its next visit, and a tab left open as soon as it next looks for new
+  data. Copies made under the old passphrase - old change
   files in the repository's history, or a snapshot someone kept - stay
   readable with it; if it truly leaked, start again in a fresh repository.
 - **A lost passphrase cannot be recovered.** Set a new `WATCH_PASSPHRASE`,

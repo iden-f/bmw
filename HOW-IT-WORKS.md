@@ -282,6 +282,10 @@ manifest and icons. No build step, no framework.
   `python -m autotrader ui`, it reads `data.json` directly.
 - **Offline.** The service worker keeps the page, the data and the photos.
   Offline, the page shows the saved copy and says how old it is.
+- **Your marks.** A shortlist, mute, dismissal or note shows at once: the
+  browser keeps it until the published data has it. One the bot never records
+  (the change was not committed, or was refused) lapses at the first publish
+  more than half an hour after it was made, and the bot's record shows again.
 - **Updates.** `sw.js` carries a build stamp written on every publish, so a
   changed page installs a new worker and an installed app offers a reload.
 - **Words.** One word per idea, in the page and in the alerts alike. A

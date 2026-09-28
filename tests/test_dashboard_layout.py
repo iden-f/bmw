@@ -96,7 +96,9 @@ def _demo_payload(root: Path) -> dict:
     state.listings["6"].update(status="gone", notified=True)
     state.record(car("1", "2018 Honda Civic Type R", 42000, year=2018,
                      mileage_km=48000, seller="A Dealer"))
-    state.listings["2"]["mark"] = "shortlist"
+    # Marks as the bot records them: the page draws a shortlisted car and
+    # its note differently, and both have had their own faults.
+    state.listings["2"]["you"] = {"shortlisted": True, "note": "check the tyres"}
     # Real image files, served beside the page, so the browser tests render
     # actual photos. Every one of these tests was written after a day in which
     # no photo loaded at all and the page looked completely normal.

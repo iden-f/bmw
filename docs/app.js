@@ -88,7 +88,23 @@ const store = {
   },
   set(k, v) {
     try {
-      (store.persist ? localStorage : sessionStorage).setItem(NS + k, JSON.stringify(v));
+      const s = JSON.stringify(v);
+      if (!store.persist) { sessionStorage.setItem(NS + k, s); return; }
+      localStorage.setItem(NS + k, s);
+      // get() reads the tab's copy first, so a copy left there from an
+      // earlier, unkept unlock would hide this write from then on.
+      sessionStorage.removeItem(NS + k);
+    } catch { /* storage blocked */ }
+  },
+  /* Once the owner chooses to keep this device unlocked, what the tab kept
+     for itself until then moves onto the device with it. */
+  keep() {
+    try {
+      for (const k of Object.keys(sessionStorage)) {
+        if (!k.startsWith(NS)) continue;
+        localStorage.setItem(k, sessionStorage.getItem(k));
+        sessionStorage.removeItem(k);
+      }
     } catch { /* storage blocked */ }
   },
   forget() {
@@ -126,6 +142,9 @@ const app = {
   seenIds: new Set(store.get('seenIds', [])),
   freshIds: new Set(),
   draft: null,
+  // Set when the view is out of date under an open sheet: new data landed,
+  // or a mark was set. Closing the sheet redraws it.
+  renderPending: false,
 };
 
 /* ------------------------------------------------------------------ vault
@@ -215,7 +234,12 @@ async function fetchLock() {
 async function savedKey() {
   store.persist = false;
   const saved = store.get(VAULT_KEY, null);
-  if (!saved || saved.salt !== vault.lock.kdf.salt) return false;
+  if (!saved) return false;
+  if (saved.salt !== vault.lock.kdf.salt) {
+    // The old passphrase's key goes; your marks on this device stay.
+    try { localStorage.removeItem(NS + VAULT_KEY); } catch { /* storage blocked */ }
+    return false;
+  }
   try { await openVault(fromB64(saved.key)); store.persist = true; return true; }
   catch { store.forget(); return false; }
 }
@@ -224,7 +248,10 @@ async function unlockWith(passphrase, keep) {
   const master = await deriveMaster(passphrase, vault.lock);
   await openVault(master);
   store.persist = keep;
-  if (keep) store.set(VAULT_KEY, { salt: vault.lock.kdf.salt, key: toB64(master) });
+  if (keep) {
+    store.keep();
+    store.set(VAULT_KEY, { salt: vault.lock.kdf.salt, key: toB64(master) });
+  }
 }
 
 /* Lock forgets everything this page stored, and tells its other open tabs
@@ -543,8 +570,10 @@ function trustState() {
   const run = lastCheck(d);
   // The last firing answers a different question: "did the last attempt go
   // wrong". A run whose every search failed is not a check, so only this
-  // record can carry that failure.
-  const firing = d.last_run || run;
+  // record can carry that failure. A firing that stood down tried nothing,
+  // so it cannot clear a failure before it: the answer comes from the last
+  // one that ran, or that went wrong itself.
+  const firing = (d.runs || []).find(r => !r.skipped || r.ok === false) || d.last_run || run;
 
   // Offline outranks everything else: an old check with no signal is not a
   // broken bot, and the two want opposite actions.
@@ -792,6 +821,12 @@ function renderClock() {
 let clockTimer = null;
 let lastFetchAt = 0;
 
+/* When a change was last sent from this page. A committed change is applied
+   and published within minutes, so for a while after one the page looks
+   every minute, rather than only once the next check is close. */
+let askedAt = 0;
+const ASK_WATCH = 20 * 60000;
+
 async function refreshData() {
   if (document.hidden) return;
   if (Date.now() - lastFetchAt < 60000) return;
@@ -805,44 +840,68 @@ async function refreshData() {
     if (!fresh || (fresh.generated_at === app.data?.generated_at
                    && app.offline === wasOffline)) return;
     app.data = fresh;
-    if (document.getElementById('sheet')?.dataset.open === '1') {
-      renderClock();          // the strip is outside the sheet; the rest waits
+    marks.settle();
+    if (askedAt && Date.parse(fresh.changes?.[0]?.at) >= askedAt) askedAt = 0;
+    // The tabs, the pill and the strip sit outside the sheet and take the
+    // new data now; the view under an open sheet waits until it closes.
+    renderTabs();
+    if (sheetUp) {
+      renderTrust();
+      renderClock();
+      app.renderPending = true;
       return;
     }
     render();
-  } catch { /* offline, or the file is mid-write - the next tick tries again */ }
+  } catch (err) {
+    // A file this key cannot open, beside a lock with a new salt, is a new
+    // passphrase. Retrying the old key would fail every minute while the
+    // pill came to say no check had landed. The reload asks for the new
+    // one and keeps your marks on this device.
+    if (vault.lock && err?.name === 'OperationError') {
+      const lock = await fetchLock();
+      if (lock?.kdf?.salt && lock.kdf.salt !== vault.lock.kdf.salt) location.reload();
+    }
+    /* otherwise offline, or the file is mid-write - the next tick tries again */
+  }
 }
 
 function startClock() {
   const tick = () => {
     if (document.hidden) return;
     renderClock();
-    // Only worth asking once the countdown is close to running out, or once
-    // the collector's next batch is due: each one republishes the page.
+    // The pill and the alarm judge the age of the last check, so they are
+    // judged again with the strip: a tab left open must not stay green
+    // while no check lands.
+    renderTrust();
+    // Only worth asking once the countdown is close to running out, once
+    // the collector's next batch is due, or just after a change was sent:
+    // each one republishes the page.
     const c = clockState();
     const mt = collectorTiming(app.data?.marketplace);
-    if ((c && (c.state === 'due' || c.fill > 0.75)) || (mt && Date.now() > mt.due)) refreshData();
+    if ((c && (c.state === 'due' || c.fill > 0.75)) || (mt && Date.now() > mt.due)
+        || (askedAt && Date.now() - askedAt < ASK_WATCH)) refreshData();
   };
   if (clockTimer) clearInterval(clockTimer);
   clockTimer = setInterval(tick, 1000);
   document.addEventListener('visibilitychange', () => {
     if (document.hidden) return;
     renderClock();
+    renderTrust();
     refreshData();
   });
   tick();
 }
 
+/* What the pill and the alarm last said. The clock asks every second, and
+   only a change is drawn. */
+let trustSaid = '';
+
 function renderTrust() {
   const t = trustState();
-  store.set('lastTrust', { state: t.state, text: t.text, alarm: t.alarm || null });
-  const wrap = document.getElementById('trust');
-  wrap.dataset.state = t.state;
-  document.getElementById('trust-text').textContent = t.text;
   const cov = app.data?.coverage;
   const pct = coveragePct(cov);
   const kept = whoKeptTime(cov);
-  document.getElementById('trust-cov').innerHTML =
+  const covered =
     !cov ? ''
     : pct === null ? '· measuring'
     // A percentage the schedule did not earn is never shown on its own.
@@ -854,8 +913,23 @@ function renderTrust() {
       ? `· <b class="num">${pct}%</b> covered, ${num(kept.mine)} of `
         + `${num(kept.all)} scheduled`
     : `· <b class="num">${pct}%</b> covered`;
+  const said = JSON.stringify([t, covered]);
+  if (said === trustSaid) return;
+  trustSaid = said;
 
+  store.set('lastTrust', { state: t.state, text: t.text, alarm: t.alarm || null });
+  const wrap = document.getElementById('trust');
   const alarm = document.getElementById('alarm');
+  // Their words carry an age that moves on. A screen reader hears them when
+  // the verdict changes, not each time the age does.
+  const same = wrap.dataset.state === t.state
+    && (alarm.hidden ? '' : alarm.dataset.level) === (t.alarm ? t.alarm.level : '');
+  wrap.setAttribute('aria-live', same ? 'off' : 'polite');
+  alarm.setAttribute('aria-live', same ? 'off' : 'polite');
+  wrap.dataset.state = t.state;
+  document.getElementById('trust-text').textContent = t.text;
+  document.getElementById('trust-cov').innerHTML = covered;
+
   if (t.alarm) {
     alarm.hidden = false;
     alarm.dataset.level = t.alarm.level;
@@ -874,6 +948,9 @@ function renderTrust() {
 function renderTabs() {
   const host = document.getElementById('tabs');
   const unread = app.data ? feedEvents().filter(e => isUnread(e)).length : 0;
+  // A refresh in the background redraws the tabs too; a keyboard resting on
+  // one stays on it.
+  const held = host.contains(document.activeElement) && document.activeElement.dataset.viewLink;
   host.innerHTML = '';
   for (const v of VIEWS) {
     const b = el('button', 'tab');
@@ -889,6 +966,7 @@ function renderTabs() {
     b.innerHTML = `<span>${v.label}</span>${n}`;
     b.addEventListener('click', () => go(v.id));
     host.appendChild(b);
+    if (held === v.id) b.focus({ preventScroll: true });
   }
 }
 
@@ -1125,10 +1203,13 @@ function eventRow(e) {
      <span class="ev__title">${esc(name)}</span>${fig}
      <span class="ev__sub">${sub.join('')}</span>`;
   // A photo, because similar titles are hard to tell apart at a glance. The
-  // box has a fixed size, so nothing moves when the picture arrives.
+  // box has a fixed size, so nothing moves when the picture arrives. A car
+  // the page no longer carries keeps the box, with the placeholder in it, so
+  // its row lines up with the rest.
   const car = byId(e.listing_id);
-  if (car) b.prepend(shot(car, 'ev__shot'));
-  b.addEventListener('click', () => openSheet(e.listing_id));
+  b.prepend(shot(car || { filtered: e.filtered }, 'ev__shot'));
+  b.dataset.id = String(e.listing_id);
+  b.addEventListener('click', () => openSheet(e.listing_id, name));
   li.appendChild(b);
   return li;
 }
@@ -1236,7 +1317,8 @@ function renderListings() {
 
   const kept = l => !marks.of(l.id).dismissed;
   // Counts are within the selected search and site, so each chip matches
-  // its grid.
+  // its grid - and, as in every grid but "Not interested", a car marked not
+  // interested is not counted.
   const mine = l => (app.search === 'all' || l.search_id === app.search)
     && (app.site === 'all' || siteOf(l) === app.site);
   const counts = {
@@ -1245,13 +1327,14 @@ function renderListings() {
                             && kept(l)).length,
     private: live().filter(l => mine(l) && !l.filtered && kept(l)
       && l.seller_type === 'private').length,
-    mine: (app.data.listings || []).filter(l => mine(l) && marks.of(l.id).shortlisted).length,
+    mine: (app.data.listings || []).filter(l => mine(l) && kept(l)
+      && marks.of(l.id).shortlisted).length,
     dropped: (app.data.listings || []).filter(l => mine(l) && marks.of(l.id).dismissed).length,
-    drops: live().filter(l => mine(l) && priceMove(l)?.delta < 0).length,
-    new: live().filter(l => mine(l) && !l.filtered && arrivedRecently(l)).length,
-    unpriced: live().filter(l => mine(l) && l.unpriced && !l.filtered).length,
-    hidden: live().filter(l => mine(l) && l.filtered).length,
-    gone: (app.data.listings || []).filter(l => mine(l) && l.status === 'gone').length,
+    drops: live().filter(l => mine(l) && kept(l) && priceMove(l)?.delta < 0).length,
+    new: live().filter(l => mine(l) && kept(l) && !l.filtered && arrivedRecently(l)).length,
+    unpriced: live().filter(l => mine(l) && kept(l) && l.unpriced && !l.filtered).length,
+    hidden: live().filter(l => mine(l) && kept(l) && l.filtered).length,
+    gone: (app.data.listings || []).filter(l => mine(l) && kept(l) && l.status === 'gone').length,
   };
   const chips = el('div', 'chips');
   chips.setAttribute('role', 'group');
@@ -1367,8 +1450,12 @@ function noResults() {
   // different next step.
   if (!narrowing.length) {
     const all = app.data.listings || [];
-    const hidden = all.filter(l => l.status === 'active' && l.filtered);
-    const gone = all.filter(l => l.status === 'gone');
+    // Counted as the chip each offer opens: a car marked not interested
+    // shows under its own chip and no other.
+    const kept = l => !marks.of(l.id).dismissed;
+    const hidden = all.filter(l => l.status === 'active' && l.filtered && kept(l));
+    const gone = all.filter(l => l.status === 'gone' && kept(l));
+    const dropped = all.filter(l => !kept(l));
     if (!all.length) {
       s.innerHTML = `<h2>No cars yet</h2>
         <p>The searches have not turned up a car. The Searches tab says how many
@@ -1397,6 +1484,16 @@ function noResults() {
         what: 'the live list',
         label: `Show the ${gone.length} gone`,
         clear: () => { app.chip = 'gone'; },
+      });
+      return s;
+    }
+    if (dropped.length) {
+      s.innerHTML = `<h2>Every car left is one you marked not interested</h2>
+        <p>They are kept under their own chip, out of the lists you scroll.</p>`;
+      offer({
+        what: 'your marks',
+        label: `Show the ${dropped.length} not interested`,
+        clear: () => { app.chip = 'dropped'; },
       });
       return s;
     }
@@ -1538,6 +1635,8 @@ function siteName(l) {
 function card(l) {
   const b = el('button', 'card');
   b.type = 'button';
+  // So focus can find this car again once a re-render has replaced the card.
+  b.dataset.id = String(l.id);
   if (l.status === 'gone') b.classList.add('card--gone');
   if (l.filtered) b.classList.add('card--hidden');
   if (siteOf(l) === 'marketplace') b.classList.add('card--mp');
@@ -2830,6 +2929,7 @@ const CHANGE_NOTE = 'Opens GitHub with the change filled in. Commit it, and a '
    popup blockers refuse a window opened after an await. */
 function openAsk(title, instructions, prose) {
   if (!vault.lock || !app.data?.repo) return;
+  askedAt = Date.now();
   const tab = window.open('about:blank', '_blank');
   askUrl(title, instructions, prose).then(url => {
     if (!url) { if (tab) tab.close(); return; }
@@ -2854,6 +2954,7 @@ function askButton(label, title, instructions, prose) {
   a.target = '_blank'; a.rel = 'noopener';
   a.style.cssText = 'display:inline-flex;align-items:center;text-decoration:none';
   a.setAttribute('aria-disabled', 'true');
+  a.addEventListener('click', () => { askedAt = Date.now(); });
   askUrl(title, instructions, prose).then(url => {
     a.href = url;
     a.removeAttribute('aria-disabled');
@@ -2861,34 +2962,87 @@ function askButton(label, title, instructions, prose) {
   return a;
 }
 
-/* Your marks on a car. Kept in the browser for instant feedback and in the
-   repository so they survive a new device; the local copy wins. */
+/* Your marks on a car. The bot's record, published as `you`, is the one that
+   counts and the one every device sees. A tap is also kept in the browser,
+   so it shows at once, and it keeps what it set - false and an empty note
+   too - so taking back a mark the bot holds shows at once as well.
+
+   The browser's copy stands in only until the bot has the change. It goes
+   once the published data agrees with it, or once the data is plainly newer
+   than the tap and still does not: the change was never committed, was
+   refused, or was changed again from another device. */
+const MARK_KEYS = ['shortlisted', 'muted', 'dismissed', 'note'];
+// A committed change is applied within minutes; this allows for a check
+// already running when it was sent.
+const MARK_GRACE = 30 * 60000;
+const markSays = (m, k) => k === 'note' ? String(m[k] || '') : Boolean(m[k]);
 const marks = {
   all() { return store.get('marks', {}); },
   of(id) {
-    const local = this.all()[String(id)] || {};
+    const local = { ...(this.all()[String(id)] || {}) };
+    delete local.at;
     const remote = (byId(id) || {}).you || {};
     return { ...remote, ...local };
   },
+  // True while this device shows a mark the bot has not recorded.
+  pending(id) {
+    const local = this.all()[String(id)] || {};
+    const remote = (byId(id) || {}).you || {};
+    return MARK_KEYS.some(k => k in local && markSays(local, k) !== markSays(remote, k));
+  },
   set(id, patch) {
     const all = this.all();
-    all[String(id)] = { ...(all[String(id)] || {}), ...patch };
-    for (const [k, v] of Object.entries(patch)) if (!v) delete all[String(id)][k];
+    // Shortlisting and dismissing exclude each other, as they do in the bot.
+    if (patch.shortlisted) patch = { ...patch, dismissed: false };
+    if (patch.dismissed) patch = { ...patch, shortlisted: false };
+    all[String(id)] = { ...(all[String(id)] || {}), ...patch, at: new Date().toISOString() };
     store.set('marks', all);
+    // The view under the sheet shows marks too; it is redrawn on closing.
+    app.renderPending = true;
+  },
+  // Run whenever new data lands.
+  settle() {
+    const all = this.all();
+    const published = Date.parse(app.data?.generated_at) || 0;
+    let changed = false;
+    for (const [id, local] of Object.entries(all)) {
+      const remote = (byId(id) || {}).you || {};
+      const lapsed = published && published - (Date.parse(local.at) || 0) > MARK_GRACE;
+      for (const k of MARK_KEYS) {
+        if (!(k in local)) continue;
+        if (lapsed || (byId(id) && markSays(local, k) === markSays(remote, k))) {
+          delete local[k];
+          changed = true;
+        }
+      }
+      if (!MARK_KEYS.some(k => k in local)) { delete all[id]; changed = true; }
+    }
+    if (changed) store.set('marks', all);
   },
 };
 
 /* ----------------------------------------------------------------- sheet */
 let lastFocus = null;
+// Whether a car is open, from the moment openSheet runs: data-open follows
+// a frame later, for the slide.
+let sheetUp = false;
+// The frame that slides the sheet in and the timer that hides it once it
+// has slid out. Each cancels the other, so a quick close and reopen cannot
+// leave the sheet hidden with the page locked behind it.
+let sheetFrame = 0, sheetTimer = 0;
 
-function openSheet(id) {
+function openSheet(id, title) {
   const l = byId(id);
   const sheet = document.getElementById('sheet');
   const scrim = document.getElementById('scrim');
   const body = document.getElementById('sheet-body');
-  lastFocus = document.activeElement;
+  // Redrawn in place after a mark, the sheet keeps where it was opened from.
+  if (!sheetUp) lastFocus = document.activeElement;
+  sheetUp = true;
 
   if (!l) {
+    // Named by what opened it, never by the car shown before.
+    document.getElementById('sheet-title').textContent = title || 'Listing not found';
     body.innerHTML = '';
     body.appendChild(emptyState('That listing is not in the published data',
       'It may have been dropped when the file was trimmed, or the link may be from an older alert.'));
@@ -2897,23 +3051,49 @@ function openSheet(id) {
     body.innerHTML = '';
     body.appendChild(sheetBody(l));
   }
+  clearTimeout(sheetTimer);
   sheet.hidden = false; scrim.hidden = false;
-  requestAnimationFrame(() => { sheet.dataset.open = '1'; scrim.dataset.open = '1'; });
+  cancelAnimationFrame(sheetFrame);
+  sheetFrame = requestAnimationFrame(() => { sheet.dataset.open = '1'; scrim.dataset.open = '1'; });
   document.body.style.overflow = 'hidden';
   document.getElementById('sheet-close').focus();
-  if (l) history.replaceState(null, '', `#/listing/${encodeURIComponent(l.id)}`);
+  // Unless this device is kept unlocked, a car's id stays out of the
+  // browser's history: nothing about your cars may outlive the tab.
+  if (l && store.persist) history.replaceState(null, '', `#/listing/${encodeURIComponent(l.id)}`);
 }
 
 function closeSheet() {
   const sheet = document.getElementById('sheet');
   const scrim = document.getElementById('scrim');
+  sheetUp = false;
+  cancelAnimationFrame(sheetFrame);
   sheet.dataset.open = '0'; scrim.dataset.open = '0';
   document.body.style.overflow = '';
   const done = () => { sheet.hidden = true; scrim.hidden = true; };
+  clearTimeout(sheetTimer);
   if (matchMedia('(prefers-reduced-motion: reduce)').matches) done();
-  else setTimeout(done, 180);
+  else sheetTimer = setTimeout(done, 180);
   history.replaceState(null, '', `#/${app.view}`);
-  if (lastFocus && lastFocus.isConnected) lastFocus.focus();
+  // What changed while the sheet was open - new data, or a mark you set - is
+  // drawn now, and focus goes back to the same car in the new drawing.
+  const was = lastFocus;
+  if (app.renderPending) render();
+  refocus(was);
+}
+
+/* Focus back on the control the sheet was opened from, or on its twin - the
+   same car, drawn the same way - when a re-render has replaced it. */
+function refocus(was) {
+  if (was && was.isConnected) { was.focus(); return; }
+  const id = was?.dataset?.id;
+  const drawn = was?.classList?.contains('card') ? '.card'
+    : was?.classList?.contains('ev') ? '.ev' : '';
+  const within = `[data-view="${app.view}"] ${drawn}[data-id="${CSS.escape(id || '')}"]`;
+  const twin = id && drawn && (document.querySelector(
+    within + (was.dataset.kind ? `[data-kind="${CSS.escape(was.dataset.kind)}"]` : ''))
+    || document.querySelector(within));
+  if (twin) twin.focus();
+  else document.getElementById('main').focus({ preventScroll: true });
 }
 
 function sheetBody(l) {
@@ -2960,11 +3140,19 @@ function sheetBody(l) {
     frag.appendChild(box);
   }
 
+  // A car that has left the market says so above its price, and the price
+  // is struck through as it is on the card: it is what was asked, not what
+  // anyone is asking now.
+  const gone = l.status === 'gone';
+  const seen = gone ? when(l.last_seen) : '';
   const price = el('div');
   price.style.marginBottom = 'var(--s4)';
   price.innerHTML =
+    (gone ? `<p style="margin:0 0 var(--s2)"><span class="flag flag--gone">${KIND.removed.group}${
+      seen ? ` · last seen ${esc(seen)}` : ''}</span></p>` : '') +
     `<div style="display:flex;align-items:baseline;gap:var(--s3);flex-wrap:wrap">
-      <span class="num" style="font-size:var(--t-display);font-weight:560;letter-spacing:-.02em">
+      <span class="num" style="font-size:var(--t-display);font-weight:560;letter-spacing:-.02em${
+        gone && !l.unpriced ? ';text-decoration:line-through;color:var(--text-3)' : ''}">
         ${l.unpriced ? 'Call for price' : money(l.price)}</span>
       ${move ? `<span class="card__was num">${money(move.was)}</span>
         <span class="num ${move.delta < 0 ? 'drop' : 'rise'}" style="font-weight:520">${signed(move.delta)}</span>` : ''}
@@ -3010,7 +3198,8 @@ function sheetBody(l) {
     ['Distance', (l.distance_km ?? null) === null ? null
       : l.distance_km < 1 ? `in ${esc(l.distance_from || 'your area')}`
       : `${km(l.distance_km)} km from ${esc(l.distance_from || 'home')}`],
-    ['On the market', l.days_listed === undefined ? null : daysListed(l.days_listed)], ['Colour', l.color], ['Body', l.body],
+    [gone ? 'Was on the market' : 'On the market',
+      l.days_listed === undefined ? null : daysListed(l.days_listed)], ['Colour', l.color], ['Body', l.body],
     ['Transmission', l.transmission], ['Drivetrain', l.drivetrain], ['Fuel', l.fuel],
     ['Location', [l.location, l.province].filter(Boolean).join(', ')],
     ['Seller', l.seller], ['Watched by', l.search_name],
@@ -3052,14 +3241,17 @@ function sheetBody(l) {
   yours.style.marginTop = 'var(--s6)';
   const mine = marks.of(l.id);
   const name = carName(l);
-  for (const [key, on, off, action, undo] of [
-    ['shortlisted', 'On your shortlist', 'Shortlist', 'shortlist', 'unshortlist'],
-    ['muted', 'Muted', 'Mute this car', 'mute-listing', 'unmute-listing'],
-    ['dismissed', 'Dismissed', 'Not interested', 'dismiss', 'undismiss'],
+  // Toggles: the label stays put and aria-pressed carries the state, so
+  // a screen reader never hears a label that already says the opposite.
+  for (const [key, label, action, undo] of [
+    ['shortlisted', 'Shortlist', 'shortlist', 'unshortlist'],
+    ['muted', 'Mute this car', 'mute-listing', 'unmute-listing'],
+    ['dismissed', 'Not interested', 'dismiss', 'undismiss'],
   ]) {
     const active = !!mine[key];
-    const b = el('button', 'chip', active ? on : off);
+    const b = el('button', 'chip', label);
     b.type = 'button';
+    b.dataset.key = key;
     b.setAttribute('aria-pressed', String(active));
     b.addEventListener('click', () => {
       marks.set(l.id, { [key]: !active });
@@ -3070,10 +3262,18 @@ function sheetBody(l) {
         [{ action: active ? undo : action, listing: String(l.id) }],
         `${active ? undo : action} for ${name} — opened from the dashboard.`);
       openSheet(l.id);
+      document.querySelector(`#sheet-body [data-key="${key}"]`)?.focus();
     });
     yours.appendChild(b);
   }
   frag.appendChild(yours);
+  if (marks.pending(l.id)) {
+    // Say which marks are only on this device so far.
+    frag.appendChild(el('p', 'note', vault.lock && app.data.repo
+      ? 'Shown from this device until the bot records the change. Commit it on '
+        + 'GitHub to keep it; a change never committed lapses here after a later check.'
+      : 'Kept on this device only for now: changes are sent from the published, locked dashboard.'));
+  }
 
   // A free-text note to yourself, shown on the card as well.
   const noteBox = el('div', 'note-edit');
@@ -3100,6 +3300,8 @@ function sheetBody(l) {
       [{ action: 'note', listing: String(l.id), text }],
       `A note on ${name} — opened from the dashboard.`);
     openSheet(l.id);
+    // Save is disabled again once saved; the note itself keeps the focus.
+    document.getElementById(field.id)?.focus();
   });
   noteBox.appendChild(label);
   noteBox.appendChild(field);
@@ -3111,7 +3313,10 @@ function sheetBody(l) {
 
   const go = el('div', 'bar');
   go.style.marginTop = 'var(--s3)';
-  const a = el('a', 'btn btn--primary', `Open on ${siteName(l)}`);
+  // The listing of a car that has gone is kept, but it is no longer the
+  // thing to do next.
+  const a = gone ? el('a', 'btn', `Old listing on ${siteName(l)} (may no longer load)`)
+    : el('a', 'btn btn--primary', `Open on ${siteName(l)}`);
   a.href = l.url; a.rel = 'noopener'; a.target = '_blank';
   a.style.cssText = 'display:inline-flex;align-items:center;text-decoration:none';
   go.appendChild(a);
@@ -3185,6 +3390,7 @@ function skeleton() {
 
 function render() {
   if (!app.data) return;
+  app.renderPending = false;
   eagerSlots = 6;
   // The masthead names every site being watched.
   const sites = document.querySelector('.brand span');
@@ -3205,11 +3411,20 @@ function route() {
   if (what === 'listing' && arg) {
     const view = app.view || 'feed';
     go(view, { silent: true, focus: false });
-    openSheet(decodeURIComponent(arg));
+    // A mangled link must not stop the page: taken as it came, it names no
+    // car, and the sheet says so.
+    let id = arg;
+    try { id = decodeURIComponent(arg); } catch { /* keep it as it came */ }
+    openSheet(id);
+    // The link is in the history already; nothing more about the car goes
+    // there unless this device is kept unlocked.
+    if (!store.persist) history.replaceState(null, '', `#/${app.view}`);
     return;
   }
-  if (VIEWS.some(v => v.id === what)) go(what, { silent: true, focus: false });
-  else go('feed', { silent: true, focus: false });
+  go(VIEWS.some(v => v.id === what) ? what : 'feed', { silent: true, focus: false });
+  // Back with a car open: the address has left the car, so the sheet goes
+  // too, after go() so its own address is the view's.
+  if (sheetUp) closeSheet();
 }
 
 function showLock() {
@@ -3260,6 +3475,7 @@ async function start() {
     // cache, marked so the page can say it is offline.
     const { data, cached } = await fetchData({ cache: 'no-cache' });
     app.data = data;
+    marks.settle();
     if (cached) app.offline = true;
   } catch (err) {
     if (!app.data) {
@@ -3314,7 +3530,7 @@ async function start() {
     // Escape. Never while typing: a "/" inside the search box is a slash.
     const typing = /^(input|textarea|select)$/i.test(
       (document.activeElement || {}).tagName || '');
-    const sheetOpen = document.getElementById('sheet').dataset.open === '1';
+    const sheetOpen = sheetUp;
     if (!typing && !sheetOpen && !e.metaKey && !e.ctrlKey && !e.altKey) {
       if (e.key >= '1' && e.key <= String(VIEWS.length)) {
         e.preventDefault();
@@ -3343,7 +3559,7 @@ async function start() {
         return;
       }
     }
-    if (e.key === 'Tab' && document.getElementById('sheet').dataset.open === '1') {
+    if (e.key === 'Tab' && sheetUp) {
       const f = document.getElementById('sheet').querySelectorAll(
         'a[href],button,input,select,[tabindex]:not([tabindex="-1"])');
       if (!f.length) return;
