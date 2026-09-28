@@ -1,5 +1,6 @@
 """End-to-end behaviour, including the failure modes that killed version 1."""
 import json
+import re
 
 
 from autotrader import notifiers, runner as runner_mod
@@ -129,6 +130,37 @@ def test_a_new_outage_after_a_recovery_is_told(bench):
     for _ in range(3):
         bench.run(fail=BlockedError("anti-bot page"))
     assert len(bench.sink.alerts_matching("needs attention")) == 2
+
+
+def test_one_search_recovering_is_not_a_new_outage(bench):
+    """Two searches broken and told of; one came back, and the other's
+    outage was pushed again, high priority, because the list had changed.
+    The one that came back breaking again is news."""
+    bench.cfg.add_search("https://www.autotrader.ca/cars/honda/accord/?rcp=15&loc=K1P",
+                         "Another search")
+
+    class Down(FakeFetcher):
+        def __init__(self, html, down):
+            super().__init__(html)
+            self.down = down
+
+        def get(self, url, referer=None, allow_block=False):
+            if any(word in url for word in self.down):
+                self.urls.append(url)
+                raise FetchError(f"HTTP 503 from {url}", status=503)
+            return super().get(url, referer, allow_block)
+
+    def check(*down):
+        next_check()
+        run(bench.cfg, State.load(bench.path / "state.json"),
+            fetcher=Down(bench.cards, down))
+        return len(bench.sink.alerts_matching("needs attention"))
+
+    check()
+    plan = [("civic", "accord")] * 3 + [("civic",)] * 2 + [("civic", "accord")] * 3
+    assert [check(*down) for down in plan] == [0, 0, 1, 1, 1, 1, 1, 2]
+    last = bench.sink.alerts_matching("needs attention")[-1][1]
+    assert "Another search" in last and "Example search" in last
 
 
 def test_the_alert_says_how_long_it_has_been_broken_not_just_how_often(bench):
@@ -534,6 +566,63 @@ class TestTheFiguresTheRulesJudge:
         sent = [(c.kind, c.listing.id, c.new_price) for d in bench.sink.digests for c in d]
         assert sent == [(Change.PRICE_DROP, "68819631", 94000)], sent
         assert self._entry(bench, "68819631")["price"] == 94000
+
+    def test_a_drop_on_a_car_first_stored_from_its_card_is_announced(
+            self, bench, archive_html):
+        """Its page could not be read on the first check, so the card's figure
+        was stored. When the card dropped and the page agreed, the page's
+        answer kept the old card figure, so the card never looked settled:
+        the page was read on every check and the drop never announced."""
+        class NoPageFirst(FakeFetcher):
+            refuse = True
+
+            def get(self, url, referer=None, allow_block=False):
+                if "_68819631_" in url and NoPageFirst.refuse:
+                    self.urls.append(url)
+                    raise FetchError(f"HTTP 503 from {url}", status=503)
+                return super().get(url, referer, allow_block)
+
+        details = {i: archive_html(i) for i in ("13166607", "68819631", "13221555")}
+        next_check()
+        run(bench.cfg, State.load(bench.path / "state.json"),
+            fetcher=NoPageFirst(bench.cards, details))
+        assert self._entry(bench, "68819631")["price_source"] == "search"
+        bench.sink.digests.clear()
+        NoPageFirst.refuse = False
+        cards = bench.cards.replace("$102,199", "$94,000")
+        details["68819631"] = (details["68819631"]
+                               .replace('"price":"102199"', '"price":"94000"')
+                               .replace('"price": "102199"', '"price": "94000"'))
+        asked, drops = [], 0
+        for _ in range(4):
+            next_check()
+            fetcher = NoPageFirst(cards, details)
+            drops += run(bench.cfg, State.load(bench.path / "state.json"),
+                         fetcher=fetcher).price_drops
+            asked.append(len([u for u in fetcher.urls if "_68819631_" in u]))
+        assert asked == [1, 0, 0, 0], "the page answered, so it is left alone"
+        assert drops == 1
+        sent = [(c.kind, c.listing.id, c.new_price) for d in bench.sink.digests for c in d]
+        assert sent == [(Change.PRICE_DROP, "68819631", 94000)], sent
+        assert self._entry(bench, "68819631")["price"] == 94000
+
+    def test_a_listing_page_that_gives_no_price_is_asked_once(self, bench, archive_html):
+        """The card moved and the page loaded without a figure. That is its
+        answer: asking again on every check spends a request for nothing."""
+        bench.run()
+        assert self._entry(bench, "68819631")["price_source"] == "detail"
+        cards = bench.cards.replace("$102,199", "$94,000")
+        details = {i: archive_html(i) for i in ("13166607", "68819631", "13221555")}
+        details["68819631"] = re.sub(r'"price"\s*:\s*"?102199"?', '"price":""',
+                                     details["68819631"])
+        asked = []
+        for _ in range(3):
+            next_check()
+            fetcher = FakeFetcher(cards, details)
+            run(bench.cfg, State.load(bench.path / "state.json"), fetcher=fetcher)
+            asked.append(len([u for u in fetcher.urls if "_68819631_" in u]))
+        assert asked == [1, 0, 0]
+        assert self._entry(bench, "68819631")["price"] == 102199
 
 
 class TestAnotherSearchsRuleWaitsForTheOwner:

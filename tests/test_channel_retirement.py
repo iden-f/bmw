@@ -1,5 +1,6 @@
 """A channel with dead credentials must switch itself off, not fail forever."""
 import json
+from pathlib import Path
 
 import pytest
 
@@ -113,15 +114,21 @@ class TestRetirement:
 
     def test_the_way_back_it_gives_is_one_that_exists(self, bench, monkeypatch):
         """It sent the owner to a switch on the dashboard's Searches tab that
-        the page has never had. config.json is sealed in the vault, so the
-        way back is the vault's own round trip."""
+        the page has never had. The switch is under Alerts on the Status tab,
+        named as the page names it, and the vault's own round trip is there
+        for a computer."""
         import shlex
 
         from autotrader.cli import build_parser
         self._wire(bench, monkeypatch, [Dead({}, {}, {}), bench.sink])
         bench.run(); bench.run(search_html=self._with_new_car(bench))
         body = next(b for s, b in bench.sink.alerts if "Switched off email" in s)
-        assert "dashboard" not in body and "Searches tab" not in body
+        assert "Searches tab" not in body
+        assert "Status tab" in body and "Alerts" in body
+        # The button as docs/app.js labels it, from the channel's own label.
+        assert '"Switch Email (Gmail) back on"' in body
+        page = (Path(__file__).resolve().parent.parent / "docs" / "app.js").read_text()
+        assert "askButton(`Switch ${label} back on`" in page
         commands = [part.strip() for line in body.splitlines()
                     for part in line.split("&&") if "python -m autotrader" in part]
         assert any("set notifications.channels.email.enabled true" in c for c in commands)

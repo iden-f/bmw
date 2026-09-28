@@ -417,10 +417,14 @@ class State:
             entry["price"] = old_price
             entry["price_source"] = old_source
             entry["price_disputed"] = listing.price
-            # And the card figure that page last answered for. Taking the
-            # new one would make the card look settled, so a check that
-            # failed once would never be asked again and the move be lost.
-            if existing.get("card_price") is not None:
+            # And the card figure that page last answered for, when the page
+            # was not read this time. Taking the new one would make the card
+            # look settled, so a check that failed once would never be asked
+            # again and the move be lost. A page that was read has answered
+            # for this card, whatever it said: keeping the old figure would
+            # have it read on every check, and the card's own move, which the
+            # next check compares card with card, never be announced.
+            if not listing.enriched and existing.get("card_price") is not None:
                 entry["card_price"] = existing["card_price"]
         elif listing.price is not None and listing.price != old_price:
             history.append({"at": now, "price": listing.price})

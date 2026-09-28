@@ -742,15 +742,16 @@ class TestTheCheckSendsTheWeek:
 
     MONDAY_AFTERNOON = "2026-10-05T15:07:00+00:00"
 
-    def setup(self, tmp_path, monkeypatch, *, ok=True):
+    def setup(self, tmp_path, monkeypatch, *, ok=True, **data):
         from autotrader import cli
         from autotrader.config import Config
         from autotrader.notifiers import Result
         from autotrader.state import State
         monkeypatch.chdir(tmp_path)
-        Config.defaults(tmp_path / "config.json").save()
-        state = State(path=tmp_path / "state.json")
-        state.data["first_ok_at"] = "2026-09-01T00:00:00+00:00"
+        if not (tmp_path / "config.json").exists():
+            Config.defaults(tmp_path / "config.json").save()
+        state = State.load(tmp_path / "state.json")
+        state.data.update(data or {"first_ok_at": "2026-09-01T00:00:00+00:00"})
         state.save()
         sent = []
 
@@ -787,3 +788,69 @@ class TestTheCheckSendsTheWeek:
         assert weekly() == 0
         assert sent == []
         assert "weekly_sent" not in state().data
+
+    FAILED_ONE = {"ok": False, "searches_run": 1, "searches_failed": 1,
+                  "errors": ["Other search: HTTP 404"]}
+
+    def test_a_watch_whose_every_check_has_an_error_still_gets_it(
+            self, tmp_path, monkeypatch):
+        """The week was anchored on the first check with no error at all. With
+        one search broken on every check that never came, and the digest the
+        watchdog used to send every Monday stopped without a word."""
+        runs = [{"at": f"2026-10-0{d}T12:07:00+00:00", **self.FAILED_ONE}
+                for d in (4, 3, 2, 1)]
+        weekly, sent, state = self.setup(
+            tmp_path, monkeypatch, runs=runs, watch_started="2026-09-01T00:07:00+00:00",
+            searches={"a": {"first_ok": "2026-09-01T00:07:00+00:00",
+                            "last_ok": "2026-10-04T12:07:00+00:00"},
+                      "b": {"consecutive_failures": 30, "last_ok": None}})
+        assert weekly() == 0
+        assert sent == ["AutoTrader: your last 7 days"]
+        assert state().data["weekly_sent"] == "2026-W41"
+
+    def test_a_watch_that_has_read_nothing_is_not_owed_one(self, tmp_path, monkeypatch):
+        weekly, sent, state = self.setup(
+            tmp_path, monkeypatch, runs=[{"at": "2026-10-04T12:07:00+00:00",
+                                          **self.FAILED_ONE, "searches_run": 0}],
+            watch_started="2026-09-01T00:07:00+00:00",
+            searches={"b": {"consecutive_failures": 30, "last_ok": None}})
+        assert weekly() == 0
+        assert sent == []
+
+    def test_one_search_that_never_loads_does_not_stop_it(self, tmp_path, monkeypatch,
+                                                           fixture_html):
+        from autotrader import runner as runner_mod
+        from autotrader.config import Config
+        from autotrader.http import FetchError
+        from autotrader.runner import run
+        from autotrader.state import State
+
+        from .helpers import Capture, FakeFetcher, next_check, use_channels
+
+        class OneGone(FakeFetcher):
+            def get(self, url, referer=None, allow_block=False):
+                if "/toyota/" in url:
+                    self.urls.append(url)
+                    raise FetchError(f"HTTP 404 from {url}", status=404)
+                return super().get(url, referer, allow_block)
+
+        monkeypatch.chdir(tmp_path)
+        cfg = Config.defaults(tmp_path / "config.json")
+        cfg.add_search("https://www.autotrader.ca/cars/honda/civic/?rcp=25", "Example search")
+        cfg.add_search("https://www.autotrader.ca/cars/toyota/corolla/?rcp=25", "Other search")
+        cfg.set("scraping.delay_ms", 0)
+        cfg.set("scraping.retries", 0)
+        cfg.set("scraping.enrich_details", False)
+        cfg.set("archive.mode", "off")
+        cfg.save()
+        use_channels(monkeypatch, runner_mod, [Capture()])
+        clock.freeze("2026-09-28T10:00:00+00:00")
+        for _ in range(4):
+            next_check(60 * 12)
+            report = run(cfg, State.load(tmp_path / "state.json"),
+                         fetcher=OneGone(fixture_html("search_next_data")), env={})
+            assert report.searches_run == 1 and report.errors
+        assert not State.load(tmp_path / "state.json").data.get("first_ok_at")
+        weekly, sent, state = self.setup(tmp_path, monkeypatch, weekly_sent=None)
+        assert weekly() == 0
+        assert sent == ["AutoTrader: your last 7 days"]

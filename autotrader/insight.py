@@ -709,9 +709,9 @@ def weekly_due(sent: str | None, began: str | None,
                now: datetime | None = None) -> str | None:
     """The week whose digest is owed now, as "2026-W40", or None.
 
-    ``sent`` is the week last sent. ``began`` is when the watch first checked
-    successfully: one that began after this week's hour has no week to report
-    on yet, so its first digest is the next Monday's.
+    ``sent`` is the week last sent. ``began`` is when the watch first read a
+    search: one that began after this week's hour has no week to report on
+    yet, so its first digest is the next Monday's.
     """
     now = (now or clock.now()).astimezone(timezone.utc)
     monday = (now - timedelta(days=now.weekday())).replace(

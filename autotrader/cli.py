@@ -1202,9 +1202,14 @@ def cmd_weekly(args: argparse.Namespace) -> int:
     state = State.load(args.state)
     week = None
     if args.if_due:
-        # Every check asks; the first after Monday's hour is told yes.
-        week = insight.weekly_due(state.data.get("weekly_sent"),
-                                  state.data.get("first_ok_at"))
+        # Every check asks; the first after Monday's hour is told yes. The
+        # week is owed from the first read of any search: a watch with one
+        # search broken on every check never has a check with no error at
+        # all, and its digest would stop without a word.
+        began = state.data.get("first_ok_at") or min(
+            (h["first_ok"] for h in (state.data.get("searches") or {}).values()
+             if isinstance(h, dict) and h.get("first_ok")), default=None)
+        week = insight.weekly_due(state.data.get("weekly_sent"), began)
         if week is None:
             print("The weekly digest is not due.")
             return 0

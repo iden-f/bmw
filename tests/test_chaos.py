@@ -483,6 +483,21 @@ class TestConfirmingARemoval:
             "https://www.autotrader.ca/a/honda/civic/toronto/ontario/19_13166607_/",
             archive_html("13166607"))) is True
 
+    PARDON = ("<html><head><title>Pardon Our Interruption</title></head><body>"
+              "<h1>Pardon Our Interruption</h1><p>As you were browsing, something "
+              "about your browser made us think you were a bot.</p></body></html>")
+
+    @pytest.mark.parametrize("landed_at", [
+        "https://www.autotrader.ca/distil_r_captcha.html?r=x",
+        ASKED,
+    ])
+    def test_an_anti_bot_page_says_nothing_about_the_car(self, landed_at, fixture_html):
+        """A challenge the site redirects to has no car's id in its address,
+        so it read as a redirect elsewhere: two of them and the car was
+        called sold, when the site had only turned the check away."""
+        for page in (self.PARDON, fixture_html("search_blocked")):
+            assert _still_listed(self.ASKED, self._landing(landed_at, page)) is None
+
 
 class TestKnowingWhereTheResultsEnd:
     """"Complete" is what licenses a removal, so it must not be guessed."""

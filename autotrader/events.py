@@ -586,8 +586,13 @@ def thin_coverage(cfg, state, record: dict[str, Any],
         return None
     expected = int(health.get("expected_interval_minutes", 30) or 30)
     now = now or clock.now()
+    # Nor once the file is deleted, over the hours it stood: measured from
+    # when watching began again, as from a schedule that changed.
+    since = max((stamp for stamp in (state.schedule_changed_at,
+                                     state.data.get("watch_resumed_at"))
+                 if clock.parse(stamp)), key=clock.parse, default=None)
     cover = insight.coverage(state.data.get("runs") or [], expected, now=now,
-                             since_change=state.schedule_changed_at)
+                             since_change=since)
     if cover.get("checks", 0) < 2 or cover["pct"] >= floor:
         return None
 

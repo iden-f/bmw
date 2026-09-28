@@ -22,9 +22,9 @@ from . import archive as archive_mod
 from . import thumbs as thumbs_mod
 from . import dashboard, diagnose, filters, invariants, notifiers
 from . import provision, render, shape, validate
-from .config import Config, secrets_present
+from .config import CHANNEL_SECRETS, Config, secrets_present
 from .enrich import detail_from_html, enrich, page_identifies
-from .http import BlockedError, BudgetExhausted, FetchError, Fetcher
+from .http import BlockedError, BudgetExhausted, FetchError, Fetcher, looks_blocked
 from .listing import Listing, on_marketplace
 from .parser import looks_like_no_results, parse_search_page
 from .state import (BASELINE_REASON, HIDDEN_REASON_PREFIX, RULES_CHANGED_REASON,
@@ -278,6 +278,10 @@ def _still_listed(url: str, fetcher: Fetcher) -> bool | None:
     body = (response.text or "")[:200000].lower()
     if any(marker in body for marker in GONE_MARKERS):
         return False
+    # The site turned the check away. A challenge it redirects to has no
+    # car's id in its address, and must not read as a redirect elsewhere.
+    if looks_blocked(response.text or "", response.status):
+        return None
     # A removed listing is often redirected to a results page or to another
     # car, and either still parses as "a car". Only this car's own page says
     # it is still listed; a retitled slug keeps its id, so it still counts.
@@ -1841,6 +1845,9 @@ def _charge_the_budget(cfg: Config, state: State, report: "RunReport",
             + BILLED_WHILE_STOPPED + "\n",
             encoding="utf-8")
         report.warnings.append(verdict["text"])
+        # When the watch stopped, so the check that finds it lifted can say
+        # when watching began again.
+        state.data["budget_stopped_at"] = utcnow()
         if notify and not state.data.get("budget_told") == verdict["month"]:
             results = notifiers.alert(
                 cfg, "The watcher has stopped: this month's minutes are spent",
@@ -1854,6 +1861,10 @@ def _charge_the_budget(cfg: Config, state: State, report: "RunReport",
         if stop_file.exists():
             stop_file.unlink()
             report.warnings.append("the budget stop has cleared")
+        # A check is running, so the stop is lifted: the coverage alarm
+        # measures from here, not across the hours the bot stopped itself.
+        if state.data.pop("budget_stopped_at", None):
+            state.data["watch_resumed_at"] = utcnow()
         state.data.pop("budget_told", None)
         if verdict["state"] == "over":
             report.warnings.append(verdict["text"])
@@ -1926,10 +1937,14 @@ def _retire_dead_channels(cfg: Config, state: State, report: RunReport,
                 f"It failed that way {strikes} runs in a row, so it is now off "
                 f"and will stop filling the log.\n\n"
                 f"Still delivering via: {', '.join(alive)}.\n\n"
-                # The only way back there is. config.json lives sealed in
-                # the vault, and the dashboard has no switch for a channel.
-                f"To bring it back, fix the credentials, then switch it on "
-                f"again in config.json from a clone of your fork (README, "
+                # The switch the page shows a channel switched off with its
+                # secrets still set, named as the page names it. config.json
+                # lives sealed in the vault, so the other way back is the
+                # vault's own round trip.
+                f"To bring it back, fix the credentials, then press \"Switch "
+                f"{CHANNEL_SECRETS.get(channel, {}).get('label', channel)} back "
+                f"on\" under Alerts on the dashboard's Status tab. Or switch it "
+                f"on again in config.json from a clone of your fork (README, "
                 f"\"Running it locally\"):\n\n"
                 f"  python -m autotrader vault pull && python -m autotrader vault open\n"
                 f"  python -m autotrader set notifications.channels.{channel}.enabled true\n"
@@ -2016,7 +2031,12 @@ def _health_check(cfg: Config, state: State, report: RunReport,
     told = state.data.get("health_told") or {}
     which = ",".join(sorted(broken_ids))
     since = clock.hours_since(told.get("at"))
-    if told.get("searches") == which and since is not None and since < HEALTH_RETOLD_HOURS:
+    told_ids = set(filter(None, str(told.get("searches") or "").split(",")))
+    if set(broken_ids) <= told_ids and since is not None and since < HEALTH_RETOLD_HOURS:
+        # Nothing newly broken: one that came back is good news, not a
+        # second outage. Keep only what is still broken, so one that
+        # breaks again is.
+        state.data["health_told"] = {"searches": which, "at": told.get("at")}
         return
     body = ("Your AutoTrader watcher cannot read one or more searches:\n\n"
             + "\n".join(broken))

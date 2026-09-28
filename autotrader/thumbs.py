@@ -234,14 +234,15 @@ def sync(entries: Iterable[dict[str, Any]], fetcher: Any,
             urls = [u for u in (entry.get("images") or []) if u][:keep]
             if len(have) >= min(keep, len(urls)):
                 continue
-            note = row.get("failed") if isinstance(row.get("failed"), dict) else None
+            notes = _failures(row.get("failed"))
 
             for n in ([0] if first_only else range(1, len(urls))):
                 url = urls[n]
                 if any(f.get("n", 0) == n for f in have):
                     continue
-                if _given_up(note, url, now):
-                    break
+                if _given_up(notes.get(url), now):
+                    # Left alone, and the car's other photos still asked for.
+                    continue
                 if report.fetched >= limit:
                     report.skipped += 1
                     break
@@ -256,9 +257,12 @@ def sync(entries: Iterable[dict[str, Any]], fetcher: Any,
                     failed_now.add(listing_id)
                     # Written down, so a photo that keeps failing is left
                     # alone for a while instead of asked for every check.
-                    again = note and note.get("url") == url
-                    note = {"url": url, "at": clock.stamp(now),
-                            "count": int(note.get("count") or 0) + 1 if again else 1}
+                    # One note to each address: one note to the car was
+                    # written over by the next photo that failed, and the
+                    # first was asked again.
+                    before = notes.get(url) or {}
+                    notes[url] = {"at": clock.stamp(now),
+                                  "count": int(before.get("count") or 0) + 1}
                     # Report the failure and move on rather than spend more
                     # requests on the same car.
                     break
@@ -278,8 +282,7 @@ def sync(entries: Iterable[dict[str, Any]], fetcher: Any,
                         failed_now.add(listing_id)
                         report.notes.append(f"could not write {name}: {exc}")
                         break
-                if note and note.get("url") == url:
-                    note = None
+                notes.pop(url, None)
                 have.append({"file": name, "bytes": len(blob), "n": n,
                              "w": found.get("w"), "h": found.get("h")})
                 report.fetched += 1
@@ -292,8 +295,10 @@ def sync(entries: Iterable[dict[str, Any]], fetcher: Any,
                 fresh = {"files": have, "file": have[0]["file"],
                          "bytes": sum(f.get("bytes", 0) for f in have),
                          "w": have[0].get("w"), "h": have[0].get("h")}
-            if note:
-                fresh["failed"] = note
+            # Only the addresses the car still has, so the note cannot grow.
+            notes = {u: v for u, v in notes.items() if u in urls}
+            if notes:
+                fresh["failed"] = notes
             if fresh:
                 index[listing_id] = fresh
             else:
@@ -317,12 +322,26 @@ def sync(entries: Iterable[dict[str, Any]], fetcher: Any,
     return report
 
 
-def _given_up(note: dict[str, Any] | None, url: str, now: datetime) -> bool:
+def _failures(saved: Any) -> dict[str, dict[str, Any]]:
+    """A car's failure notes, by photo address.
+
+    The last version kept one note to a car, naming its address, and is
+    read as that one address's note.
+    """
+    if not isinstance(saved, dict):
+        return {}
+    if isinstance(saved.get("url"), str):
+        return {saved["url"]: {"count": saved.get("count"), "at": saved.get("at")}}
+    return {url: note for url, note in saved.items() if isinstance(note, dict)}
+
+
+def _given_up(note: dict[str, Any] | None, now: datetime) -> bool:
     """Has this photo failed often enough, recently enough, to leave alone?
 
-    Only the same address: a car whose link changes is asked again at once.
+    The note is its address's own: a car whose link changes is asked again
+    at once.
     """
-    if not note or note.get("url") != url:
+    if not note:
         return False
     if int(note.get("count") or 0) < GIVE_UP_AFTER:
         return False

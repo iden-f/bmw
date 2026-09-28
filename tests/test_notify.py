@@ -711,24 +711,76 @@ class TelegramStub(notifiers.TelegramNotifier):
         return {"ok": True}
 
 
+def _visible(text):
+    """What Telegram counts: the text its HTML leaves, in UTF-16 units."""
+    import html
+    import re
+    plain = html.unescape(re.sub(r"<[^>]+>", "", text))
+    return len(plain.encode("utf-16-le")) // 2
+
+
 class TestTelegramNamesWhatItSays:
     """Cut at 3,900 characters, a twelve-car digest showed eleven cars and
     "...trimmed.", and the runner marked all twelve told. The twelfth was
     never named on Telegram at all."""
 
     def test_a_long_digest_shows_fewer_cars_and_says_how_many_more(self):
-        changes = _offers(12, photos=False)
-        assert len(render.as_telegram_html(changes, limit=12)) > 4000, \
+        changes = _offers(30, photos=False)
+        assert _visible(render.as_telegram_html(changes, limit=30)) > 4000, \
             "the digest has to be too long for this to test anything"
-        tg = TelegramStub()
+        tg = TelegramStub(limit=30)
         assert tg.send(changes).ok
         [(method, payload)] = tg.calls
         text = payload["text"]
-        assert len(text) <= 4000
+        assert _visible(text) <= 4000
         assert "trimmed" not in text
         import re
         shown = len(re.findall(r"number \d\d", text))
-        assert f"...and {12 - shown} more." in text, text[-200:]
+        assert 12 < shown < 30
+        assert f"...and {30 - shown} more." in text, text[-200:]
+
+    def test_its_links_do_not_count_against_the_limit(self):
+        """Telegram measures the text after reading its HTML, so an address
+        costs nothing. Measured with its addresses, twelve cars that fit
+        with room to spare lost three, and the runner marked them told."""
+        changes = _offers(12, photos=False)
+        text = render.as_telegram_html(changes, limit=12)
+        assert len(text) > 4000 >= _visible(text), \
+            "only the addresses may take it over, for this to test anything"
+        tg = TelegramStub()
+        assert tg.send(changes).ok
+        [(method, payload)] = tg.calls
+        import re
+        assert len(re.findall(r"number \d\d", payload["text"])) == 12
+        assert "more." not in payload["text"]
+
+    def test_every_car_marked_told_was_named(self, bench, monkeypatch):
+        import re
+
+        from autotrader import runner as runner_mod
+        from autotrader.state import State
+
+        from .helpers import use_channels
+
+        outbox = TelegramStub()
+        owner = _a_search_not_read_this_time(bench)
+        bench.run()
+        use_channels(monkeypatch, runner_mod, [outbox])
+        state = State.load(bench.path / "state.json")
+        owed = []
+        for change in _offers(12, photos=False):
+            change.listing.search_id = owner
+            state.record(change.listing)
+            owed.append(Change(Change.NEW, change.listing))
+        state.defer(owed)
+        state.save()
+        bench.run(minutes_later=200)
+        after = State.load(bench.path / "state.json")
+        told = {c.listing.title[-2:] for c in owed
+                if after.listings[c.listing.id].get("notified_at")}
+        named = {n for _, payload in outbox.calls
+                 for n in re.findall(r"number (\d\d)", payload.get("text") or "")}
+        assert told and told <= named, sorted(told - named)
 
 
 class TestTelegramPhotosAreANicety:
@@ -738,19 +790,20 @@ class TestTelegramPhotosAreANicety:
 
     def test_a_digest_too_long_for_a_caption_sends_its_text_first(self):
         tg = TelegramStub()
-        assert tg.send(_offers(5)).ok
+        assert _visible(render.as_telegram_html(_offers(8))) > 1000
+        assert tg.send(_offers(8)).ok
         assert [m for m, _ in tg.calls] == ["sendMessage", "sendMediaGroup"]
 
     def test_if_the_text_fails_no_album_goes_out(self):
         tg = TelegramStub(fail={"sendMessage"})
-        result = tg.send(_offers(5))
+        result = tg.send(_offers(8))
         assert not result.ok
         assert [m for m, _ in tg.calls] == ["sendMessage"], \
             "nothing went out, so the retry next run repeats nothing"
 
     def test_if_the_photos_fail_after_the_text_the_alert_was_delivered(self):
         tg = TelegramStub(fail={"sendMediaGroup"})
-        result = tg.send(_offers(5))
+        result = tg.send(_offers(8))
         assert result.ok
         assert "photos failed" in result.detail
         assert [m for m, _ in tg.calls] == ["sendMessage", "sendMediaGroup"]
@@ -758,7 +811,7 @@ class TestTelegramPhotosAreANicety:
     def test_a_digest_that_fits_a_caption_is_one_album(self):
         tg = TelegramStub(limit=2)
         changes = _offers(2)
-        assert len(render.as_telegram_html(changes, limit=2)) <= 1000
+        assert _visible(render.as_telegram_html(changes, limit=2)) <= 1000
         assert tg.send(changes).ok
         [(method, payload)] = tg.calls
         assert method == "sendMediaGroup"

@@ -42,10 +42,15 @@ MIN_DAYS_TO_PROJECT = 2
 
 STOP_FILE = "BUDGET-STOP"
 # How the stop is lifted. The workflow reads the file before the bot runs, so
-# nothing the bot does can lift it, a new month included.
-RESUME = (f"Delete {STOP_FILE} on main to start checking again. It does not "
-          f"lift by itself when the month turns: the workflow stops before "
-          f"the bot runs for as long as the file is there.")
+# nothing the bot does can lift it, a new month included. And the month's
+# minutes only grow, so a check before it turns writes the file again.
+RESUME = (f"Delete {STOP_FILE} on main to start checking again. Until the "
+          f"month turns, the next check writes it straight back, because "
+          f"this month's minutes stay past the ceiling: to check sooner, "
+          f"first raise budget.included_minutes to your plan's allowance, or "
+          f"budget.stop_at, in config.json. It does not lift by itself when "
+          f"the month turns either: the workflow stops before the bot runs "
+          f"for as long as the file is there.")
 
 # The only labels a minute can carry. "unknown" counts as drawing wherever a
 # decision is made: wrongly assuming a charge costs a sentence on the

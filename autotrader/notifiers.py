@@ -6,9 +6,11 @@ is down cannot fail a run and lose what it found.
 
 from __future__ import annotations
 
+import html
 import json
 import logging
 import os
+import re
 import smtplib
 import ssl
 from dataclasses import dataclass
@@ -182,6 +184,17 @@ class TelegramNotifier(Notifier):
     MAX_TEXT = 4000
     MAX_CAPTION = 1000
 
+    @staticmethod
+    def _visible(text: str) -> int:
+        """How long Telegram counts ``text``: what its HTML leaves, in UTF-16.
+
+        Its limits apply after the tags are read, so a car's address costs
+        nothing. Measured with them, a digest it would take whole lost cars
+        the runner then marked told.
+        """
+        plain = html.unescape(re.sub(r"<[^>]+>", "", text))
+        return len(plain.encode("utf-16-le")) // 2
+
     def _fit(self, changes: list[Change]) -> str:
         """The digest, shortened by showing fewer cars rather than fewer bytes.
 
@@ -191,10 +204,10 @@ class TelegramNotifier(Notifier):
         """
         shown = self.limit
         text = render.as_telegram_html(changes, limit=shown)
-        while len(text) > self.MAX_TEXT and shown > 1:
+        while self._visible(text) > self.MAX_TEXT and shown > 1:
             shown -= 1
             text = render.as_telegram_html(changes, limit=shown)
-        if len(text) > self.MAX_TEXT:
+        if self._visible(text) > self.MAX_TEXT:
             text = text[:3900].rsplit("\n", 1)[0] + "\n\n<i>...trimmed.</i>"
         return text
 
@@ -205,7 +218,7 @@ class TelegramNotifier(Notifier):
         photos = [c.listing.thumbnail for c in changes[:10] if c.listing.thumbnail]
         if self.config.get("photos", True) and len(photos) >= 2:
             media = [{"type": "photo", "media": url} for url in photos]
-            if len(text) <= self.MAX_CAPTION:
+            if self._visible(text) <= self.MAX_CAPTION:
                 # The whole digest fits in the caption: one message, a photo
                 # grid with the text under it. If it fails (a URL Telegram
                 # cannot fetch) nothing went out, so the plain message below

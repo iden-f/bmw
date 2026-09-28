@@ -450,6 +450,34 @@ class TestABudgetStopIsNotGitHub:
         assert events.thin_coverage(self._cfg(), state, {},
                                     stop_file=stop) is None
 
+    def test_nor_once_the_file_is_deleted(self, tmp_path):
+        """The file was deleted and checks began again, and the next watchdog
+        measured a day that was mostly the stop: "covered only 17%", and
+        GitHub's scheduler blamed for the hours the bot stopped itself."""
+        from datetime import timedelta
+        now = clock.now()
+        cfg = {"health": {"expected_interval_minutes": 30, "coverage_floor_pct": 50}}
+
+        def at(hours):
+            return (now - timedelta(hours=hours)).isoformat(timespec="seconds")
+
+        def state(resumed):
+            state = State(path=tmp_path / "s.json")
+            # Three days of checks, two days stopped, three hours of checks.
+            half_hours = [h / 2 for h in range(6)] + [51 + h / 2 for h in range(144)]
+            state.data["runs"] = [{"at": at(h), "ok": True, "searches_run": 2,
+                                   "searches_failed": 0, "trigger": "schedule"}
+                                  for h in half_hours]
+            if resumed:
+                state.data["watch_resumed_at"] = at(3)
+            return state
+
+        stop = tmp_path / "BUDGET-STOP"
+        said = events.thin_coverage(cfg, state(resumed=False), {}, stop_file=stop, now=now)
+        assert said and "GitHub's scheduler" in said["body"], "the case it is about"
+        assert events.thin_coverage(cfg, state(resumed=True), {},
+                                    stop_file=stop, now=now) is None
+
     def test_the_watchdog_command_looks_for_the_file(self, tmp_path, monkeypatch,
                                                       capsys):
         from autotrader import cli

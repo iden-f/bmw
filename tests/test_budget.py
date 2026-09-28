@@ -238,6 +238,25 @@ class TestStoppingRatherThanSpending:
         assert "Delete BUDGET-STOP on main" in body, body
         assert "does not lift by itself when the month turns" in body, body
 
+    def test_the_way_to_resume_works_before_the_month_turns(self, watcher):
+        """It said only to delete the file. Mid-month that bought one billed
+        check, which wrote the file straight back, and three hours later the
+        watchdog said to delete it again."""
+        self.spend_the_month(watcher, 400.0)
+        watcher.run()
+        stop = watcher.path / "BUDGET-STOP"
+        stop.unlink()
+        watcher.run()
+        assert stop.exists(), "the month is still over, so the next check stops again"
+        [(_, body)] = [(s, b) for s, b in watcher.sink.alerts if "minutes are spent" in s]
+        assert "writes it straight back" in body, body
+        assert "budget.included_minutes" in body and "budget.stop_at" in body, body
+        assert "Delete BUDGET-STOP on main" in body, body
+        # Both keys are ones `set` takes.
+        from autotrader.config import Config
+        defaults = Config.defaults(watcher.path / "unused.json")
+        assert defaults.get("budget.included_minutes") and defaults.get("budget.stop_at")
+
     def test_a_stop_alert_nobody_received_is_sent_again(self, watcher):
         """Marked as told only once a channel took it."""
         from autotrader.notifiers import Result
@@ -292,6 +311,22 @@ class TestStoppingRatherThanSpending:
         report = watcher.run()
         assert not (watcher.path / "BUDGET-STOP").exists()
         assert any("cleared" in w for w in report.warnings), report.warnings
+
+    def test_a_check_after_the_stop_says_when_watching_began_again(self, watcher):
+        """So the coverage alarm measures from there, not across the hours the
+        bot stopped itself."""
+        self.spend_the_month(watcher, 400.0)
+        watcher.run()
+        assert watcher.state().data.get("budget_stopped_at")
+        assert not watcher.state().data.get("watch_resumed_at")
+        state = watcher.state()
+        state.data["actions"]["days"] = {"2026-09-01": 1.0}
+        state.save()
+        (watcher.path / "BUDGET-STOP").unlink()          # the owner deletes it
+        watcher.run()
+        after = watcher.state().data
+        assert "budget_stopped_at" not in after
+        assert after.get("watch_resumed_at")
 
     def test_accounting_never_fails_a_check(self, watcher, monkeypatch):
         """A photo may not fail a check and neither may a spreadsheet."""

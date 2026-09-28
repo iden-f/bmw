@@ -512,6 +512,48 @@ class TestAPhotoThatNeverComesIsLeftAlone:
         row = json.loads(thumbs.INDEX.read_text())[car(1)["id"]]
         assert "failed" not in row
 
+    @staticmethod
+    def three(i: int) -> dict:
+        """A car with three photos, as most AutoTrader cars have."""
+        return dict(car(i), images=[f"https://cdn.test/{i}-{n}.webp" for n in range(3)])
+
+    def test_a_car_whose_photos_all_fail_is_left_alone_too(self, here):
+        """The note held one address, so giving up on the first photo and
+        failing the second wrote over it, and the first was asked again:
+        a request on every check, for good."""
+        cdn = self.refusing()
+        asked = []
+        for _ in range(10):
+            before = len(cdn.calls)
+            thumbs.sync([self.three(1)], cdn)
+            asked.append(len(cdn.calls) - before)
+        assert asked[-4:] == [0, 0, 0, 0], asked
+        assert all(cdn.calls.count(url) == thumbs.GIVE_UP_AFTER
+                   for url in self.three(1)["images"]), cdn.calls
+
+    def test_a_dead_first_photo_does_not_keep_the_others_away(self, here):
+        class FirstDead(CDN):
+            def get(self, url, referer=None, allow_block=False):
+                if url.endswith("-0.webp"):
+                    self.calls.append(url)
+                    return Response(b"not found", 404, "text/plain")
+                return super().get(url, referer, allow_block)
+
+        for _ in range(4):
+            thumbs.sync([self.three(1)], FirstDead())
+        kept = {f["n"] for f in thumbs._files_of(
+            json.loads(thumbs.INDEX.read_text())[car(1)["id"]])}
+        assert kept == {1, 2}
+
+    def test_a_note_written_by_the_last_version_still_holds(self, here):
+        from autotrader import clock
+        thumbs.THUMB_DIR.mkdir(parents=True)
+        thumbs.INDEX.write_text(json.dumps({car(1)["id"]: {"failed": {
+            "url": car(1)["images"][0], "count": 2, "at": clock.stamp(clock.now())}}}))
+        cdn = self.refusing()
+        thumbs.sync([car(1)], cdn)
+        assert cdn.calls == []
+
     def test_a_car_with_only_a_failure_is_not_counted_as_kept(self, here):
         report = thumbs.sync([car(1), car(2)], CDN(mode="404"))
         assert report.kept == 0
