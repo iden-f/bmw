@@ -213,8 +213,11 @@ DEFAULTS: dict[str, Any] = {
         # A car unseen for this long while its search reads fine is gone.
         "gone_after_days": 10,
         # The watchdog: no word from the collector, or no successful read.
+        # The collector's overnight pause is six hours, so the last read of
+        # the night and the first of the morning are that far apart already:
+        # nine gives a failing morning a few passes before the alarm.
         "silent_after_hours": 2,
-        "unread_after_hours": 6,
+        "unread_after_hours": 9,
     },
     "health": {
         "alert_after_failures": 3,

@@ -242,6 +242,30 @@ class TestThePlan:
         cfg.data["searches"][0]["filters"]["min_year"] = 2016
         assert M.plan(cfg)[0]["scope"] != before
 
+    @pytest.mark.parametrize("near, place", [
+        ("Ottawa, ON", "ottawa"),
+        ("Écoville, QC", "ecoville"),          # folded, not dropped
+        ("Saint-Écoville-sur-Mer", "saintecovillesurmer"),
+        ("12 Oaks, ON", "12oaks"),
+        ("K1P 1A1", ""),                        # a postal code is no city
+        ("K1P 1A1, ON", ""),
+        ("k1p1a1", ""),
+        ("K1P", ""),
+        ("ON", ""),                             # nor is a province
+        ("Ontario", ""),
+        ("", ""),
+    ])
+    def test_the_place_is_the_city_as_marketplace_spells_it(self, near, place):
+        assert M._place(near) == place
+
+    def test_a_link_s_postal_code_asks_where_the_account_is(self, cfg):
+        cfg.data["searches"][0]["url"] = SEARCH_URL + "&loc=K1P%201A1"
+        cfg.data["searches"][0]["filters"].pop("near")
+        [item] = M.plan(cfg)
+        assert item["place"] == ""
+        assert item["queries"][0]["url"].startswith(
+            "https://www.facebook.com/marketplace/search/?")
+
     def test_a_paused_search_is_not_asked(self, cfg):
         cfg.data["searches"][0]["enabled"] = False
         assert M.plan(cfg) == []
@@ -389,6 +413,24 @@ class TestTakingABatchIn:
         assert entry["status"] == "gone"
         assert entry["gone_reason"].startswith("not seen on Marketplace for")
 
+    def test_a_search_read_only_in_part_keeps_its_error_and_removes_nothing(self, watch):
+        # One of its models' queries timed out; the other read.
+        watch.send(part(watch.sid, rec("100000001"), rec("100000002")))
+        clock.freeze(clock.now() + timedelta(days=M.GONE_AFTER_DAYS + 1))
+        try:
+            report = watch.send(part(watch.sid, rec("100000002"),
+                                     error="TimeoutError: Timeout 45000ms exceeded."))
+        finally:
+            clock.freeze(None)
+        assert watch.state.listings["fb-100000001"]["status"] == "active"
+        health = watch.state.data["marketplace"]["searches"][watch.sid]
+        assert health["last_error"].startswith("TimeoutError") and health["last_error_at"]
+        assert any("read only in part" in w for w in report.warnings)
+        assert report.searches_run == 1 and report.searches_failed == 0
+        # The next whole read clears it.
+        watch.send(part(watch.sid, rec("100000002")))
+        assert "last_error" not in watch.state.data["marketplace"]["searches"][watch.sid]
+
     def test_a_search_that_failed_removes_nothing(self, watch):
         watch.send(part(watch.sid, rec("100000001")))
         clock.freeze(clock.now() + timedelta(days=M.GONE_AFTER_DAYS + 1))
@@ -423,6 +465,81 @@ class TestTakingABatchIn:
         assert watch.sent() == []
 
 
+class TestARuleChangedOnTheDashboard:
+    """Loosening a rule lets in cars that were for sale all along. On
+    AutoTrader that is recorded, not announced; the same edit must not send
+    an alert for every Marketplace car it lets in."""
+
+    def test_loosening_one_announces_only_what_is_new(self, watch):
+        rules = watch.cfg.data["searches"][0]["filters"]
+        rules["max_mileage_km"] = 150000
+        cars = [rec(str(100000010 + i), mileage_km=160000 + 1000 * i) for i in range(8)]
+        watch.send(part(watch.sid, *cars))
+        watch.send(part(watch.sid, *cars))
+        rules["max_mileage_km"] = 200000
+        report = watch.send(part(watch.sid, *cars, rec("100000099")))
+        assert report.qualified == 8
+        # The car that is really new since the last batch is still news.
+        assert [c.listing.id for c in watch.sent()] == ["fb-100000099"]
+        assert not watch.state.listings["fb-100000010"]["filtered"]
+        # And the next change after that is news again.
+        rules["max_mileage_km"] = 150000
+        watch.send(part(watch.sid, *cars))
+        rules["max_mileage_km"] = 200000
+        watch.send(part(watch.sid, *cars))
+        assert [c.listing.id for c in watch.sent()] == ["fb-100000099"]
+
+    def test_a_car_coming_inside_a_rule_that_stayed_is_still_news(self, watch):
+        rules = watch.cfg.data["searches"][0]["filters"]
+        watch.send(part(watch.sid, rec("100000001", mileage_km=160000)))
+        rules["max_mileage_km"] = 150000
+        watch.send(part(watch.sid, rec("100000001", mileage_km=160000)))
+        assert watch.state.listings["fb-100000001"]["filtered"]
+        # The rule stays; the car's own figure comes inside it: that is news.
+        watch.send(part(watch.sid, rec("100000001", mileage_km=140000)))
+        [change] = watch.sent()
+        assert change.kind == Change.QUALIFIED
+
+    def test_an_alternative_spelling_starts_nothing_over(self, watch):
+        watch.send(part(watch.sid, rec("100000001")))
+        watch.cfg.data["searches"][0]["filters"]["aliases"] = ["Civic Si"]
+        report = watch.send(part(watch.sid, rec("100000001"), rec("100000002")))
+        assert not report.baselines
+        assert [c.listing.id for c in watch.sent()] == ["fb-100000002"]
+
+    def test_a_watch_from_before_this_starts_nothing_over(self, watch):
+        watch.send(part(watch.sid, rec("100000001")))
+        watch.state.data["marketplace"]["searches"][watch.sid].pop("rule_scope", None)
+        watch.cfg.data["searches"][0]["filters"]["max_mileage_km"] = 200000
+        report = watch.send(part(watch.sid, rec("100000001"), rec("100000002")))
+        assert not report.baselines
+        assert [c.listing.id for c in watch.sent()] == ["fb-100000002"]
+
+
+class TestAnOddCreationTime:
+
+    def test_milliseconds_do_not_stop_the_batch(self, watch):
+        ms = int(clock.now().timestamp()) * 1000
+        b = batch(part(watch.sid, rec("100000001"), rec("100000002", created=ms)))
+        watch.send(part(watch.sid, rec("100000003")))
+        M.ingest(watch.cfg, watch.state, b, env={})
+        assert {"fb-100000001", "fb-100000002"} <= set(watch.state.listings)
+        assert b["id"] in watch.state.data["marketplace"]["batch_ids"]
+        # Announced as new: a figure that is not a date says nothing of its age.
+        assert {c.listing.id for c in watch.sent()} == {"fb-100000001", "fb-100000002"}
+
+    @pytest.mark.parametrize("created", [10 ** 20, 1_700_000_000_000, 5, True, "1700000000"])
+    def test_the_collector_does_not_send_one(self, created):
+        doc = node("100000001", "2018 Honda civic")
+        doc["listing"]["creation_time"] = created
+        assert "created" not in M.collect([search_page(doc)])["100000001"]
+
+    def test_a_real_one_is_kept(self):
+        doc = node("100000001", "2018 Honda civic")
+        doc["listing"]["creation_time"] = 1_700_000_000
+        assert M.collect([search_page(doc)])["100000001"]["created"] == 1_700_000_000
+
+
 class TestAutoTraderLeavesMarketplaceCarsAlone:
 
     def test_absence_from_an_autotrader_read_is_not_a_sale(self, watch):
@@ -449,6 +566,47 @@ class TestSignedOut:
         report = watch.send(session="signed_out")
         assert report.ok and any("signed the collector out" in w for w in report.warnings)
 
+    def test_a_check_in_says_nothing_about_the_session(self, watch):
+        # Overnight, and on "no searches to read", the collector sends "ok"
+        # without opening the browser. That is not Facebook letting it back in.
+        for _ in range(2):
+            watch.send(session="signed_out")
+            watch.send(polled=False)
+        assert len(watch.sink.alerts_matching("sign in again")) == 1
+        assert watch.sink.alerts_matching("watched again") == []
+        watch.send(part(watch.sid, rec("100000001")))
+        assert len(watch.sink.alerts_matching("watched again")) == 1
+
+    def test_each_computer_is_told_about_on_its_own(self, watch):
+        def standby(*parts, **kw):
+            b = batch(*parts, host="collector-b", **kw)
+            b["role"] = "standby"
+            return M.ingest(watch.cfg, watch.state, b, env={})
+
+        watch.send(session="signed_out")
+        # The standby reading in its place is not the primary being back.
+        for _ in range(2):
+            standby(part(watch.sid, rec("100000001")))
+            watch.send(session="signed_out")
+        assert len(watch.sink.alerts_matching("sign in again")) == 1
+        assert watch.sink.alerts_matching("watched again") == []
+        assert len(watch.sink.alerts_matching("standby computer has taken over")) == 1
+        # The standby signed out too is its own news, with its own name.
+        standby(session="signed_out")
+        [_, (_, body)] = watch.sink.alerts_matching("sign in again")
+        assert "(collector-b)" in body
+        watch.send(part(watch.sid, rec("100000001")))
+        assert len(watch.sink.alerts_matching("watched again")) == 1
+        assert "standby_told" not in watch.state.data["marketplace"]
+
+    def test_what_was_told_before_each_computer_had_its_own_carries_over(self, watch):
+        watch.state.data.setdefault("marketplace", {})["session_told"] = "signed_out"
+        watch.send(session="signed_out")
+        assert watch.sink.alerts_matching("sign in again") == []
+        watch.send(part(watch.sid, rec("100000001")))
+        assert len(watch.sink.alerts_matching("watched again")) == 1
+        assert "session_told" not in watch.state.data["marketplace"]
+
 
 # ======================================================== the watchdog
 
@@ -456,6 +614,24 @@ class TestTheWatchdog:
 
     def test_silent_until_a_collector_has_ever_reported(self, watch):
         assert events.marketplace_silence(watch.cfg, watch.state, {}) is None
+
+    def test_a_failed_first_read_after_the_night_is_not_an_alarm(self, watch):
+        # The last read of the night, six and a half hours before the first
+        # of the morning, which failed.
+        watch.send(part(watch.sid, rec("100000001")))
+        clock.freeze(clock.now() + timedelta(hours=6.5))
+        try:
+            watch.send(part(watch.sid, ok=False, error="the page did not load"))
+            assert events.marketplace_silence(watch.cfg, watch.state, {}) is None
+        finally:
+            clock.freeze(None)
+        clock.freeze(clock.now() + timedelta(hours=9.5))
+        try:
+            watch.send(part(watch.sid, ok=False, error="the page did not load"))
+            said = events.marketplace_silence(watch.cfg, watch.state, {})
+        finally:
+            clock.freeze(None)
+        assert said["subject"] == "Marketplace is not being read"
 
     def test_a_collector_gone_quiet_is_said_once(self, watch):
         watch.send(polled=False)
@@ -467,7 +643,7 @@ class TestTheWatchdog:
 
     def test_checking_in_but_not_reading_is_its_own_alarm(self, watch):
         watch.send(part(watch.sid, rec("100000001")))
-        clock.freeze(clock.now() + timedelta(hours=7))
+        clock.freeze(clock.now() + timedelta(hours=10))
         try:
             watch.send(part(watch.sid, ok=False, error="the page did not load"))
             said = events.marketplace_silence(watch.cfg, watch.state, {})

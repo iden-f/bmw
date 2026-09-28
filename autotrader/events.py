@@ -499,7 +499,7 @@ def marketplace_silence(cfg, state, record: dict[str, Any],
     read = [str(h.get("last_ok") or "") for h in (section.get("searches") or {}).values()]
     last_read = max(read) if read else ""
     unread_for = clock.hours_since(last_read, now) if last_read else None
-    limit = float(conf.get("unread_after_hours", 6) or 0)
+    limit = float(conf.get("unread_after_hours", 9) or 0)
     if limit > 0 and unread_for is not None and unread_for >= limit \
             and last.get("polled"):
         key = f"unread:{last_read}"

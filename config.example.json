@@ -118,7 +118,7 @@
     "new_within_days": 7,
     "gone_after_days": 10,
     "silent_after_hours": 2,
-    "unread_after_hours": 6
+    "unread_after_hours": 9
   },
   "health": {
     "alert_after_failures": 3,

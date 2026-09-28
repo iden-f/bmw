@@ -18,6 +18,7 @@ import json
 import logging
 import math
 import re
+import unicodedata
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Any, Iterable, Iterator
@@ -43,6 +44,10 @@ _PLACEHOLDER_PRICES = {1234, 12345, 123456, 1111, 11111, 111111}
 _LOWEST_REAL_PRICE = 500
 
 _ITEM_ID = re.compile(r"^\d{5,20}$")
+# When Facebook says a car was listed, in seconds: from 2001 to 2100. A
+# figure outside is not a date (milliseconds, say), and one past the year
+# 9999 would stop every batch that carries the car.
+CREATED_MIN, CREATED_MAX = 1_000_000_000, 4_102_444_800
 _SCRIPT = re.compile(r'<script type="application/json"[^>]*>(.*?)</script>', re.S)
 _MILEAGE = re.compile(
     r"^\s*([\d][\d.,]*)\s*(k)?\s*(km|kms|kilometres|kilometers|mi|miles)\b", re.I)
@@ -61,7 +66,10 @@ PROVINCES = {
 BATCH_NAME = "marketplace"
 BATCH_VERSION = 1
 # Long enough for a queued workflow run, short enough that a captured batch
-# cannot be replayed into a later week.
+# cannot be replayed into a later week. A queued run can also be dropped:
+# GitHub keeps one run waiting per concurrency group and cancels it when a
+# newer one arrives, so a batch is never the only copy of what the collector
+# found on a car's own page.
 BATCH_MAX_AGE_HOURS = 12
 BATCH_IDS_KEPT = 500
 # repository_dispatch refuses a client_payload over 65,535 characters.
@@ -245,6 +253,12 @@ def _photo(node: dict[str, Any]) -> str:
     return ""
 
 
+def _a_date(value: Any) -> bool:
+    """Whether a listing's creation_time can be read as when it was listed."""
+    return isinstance(value, int) and not isinstance(value, bool) \
+        and CREATED_MIN < value < CREATED_MAX
+
+
 def _word(value: Any) -> str:
     """AUTOMATIC -> Automatic; a colour stays as the seller typed it."""
     text = str(value or "").replace("_", " ").strip()
@@ -303,7 +317,7 @@ def record_of(node: dict[str, Any]) -> dict[str, Any]:
     if photo:
         rec["photo"] = photo
     created = node.get("creation_time")
-    if isinstance(created, int) and created > 1_000_000_000:
+    if _a_date(created):
         rec["created"] = created
     for key, name in (("is_sold", "sold"), ("is_pending", "pending")):
         if isinstance(node.get(key), bool):
@@ -619,10 +633,27 @@ def judge(cfg, search, records: Iterable[dict[str, Any]],
 
 # ------------------------------------------------------- what to search for
 
+# A postal code, or the first half of one: "K1P 1A1", "K1P".
+_POSTAL = re.compile(r"[a-z]\d[a-z](?:\s*\d[a-z]\d)?", re.I)
+
+
 def _place(near: str) -> str:
-    """ "Ottawa, ON" -> "ottawa", the form Marketplace uses in its paths."""
-    city = str(near or "").split(",")[0].strip().lower()
-    return re.sub(r"[^a-z0-9]", "", city)
+    """ "Ottawa, ON" -> "ottawa", the form Marketplace uses in its paths.
+
+    Accents are folded, not dropped ("Écoville" is "ecoville"). A postal code
+    or a province names no city, so it gives "": the search then uses the
+    place the account set on Marketplace.
+    """
+    head, comma, _ = str(near or "").partition(",")
+    city = head.strip()
+    # "ON", or "Ontario" alone, is a province. A name before a comma is the
+    # city, even one spelled as its province is.
+    province = _province(city) and (len(city) == 2 or not comma)
+    if not city or province or _POSTAL.fullmatch(city):
+        return ""
+    plain = "".join(c for c in unicodedata.normalize("NFKD", city)
+                    if not unicodedata.combining(c))
+    return re.sub(r"[^a-z0-9]", "", plain.lower())
 
 
 # What a search asks Marketplace. A change to any of these is a new starting
@@ -729,7 +760,7 @@ def ingest(cfg, state: State, batch: dict[str, Any], *,
     Returns the same report a check does, so the log line and the alerts read
     the same whichever site the car came from.
     """
-    from .runner import RunReport, _deliver, _hide, _take
+    from .runner import RunReport, _deliver, _hide, _take, rule_scope_of
     report = RunReport(dry_run=dry_run, trigger="marketplace")
     env = env if env is not None else {}
     section = _section(state)
@@ -744,8 +775,7 @@ def ingest(cfg, state: State, batch: dict[str, Any], *,
         MARKETPLACE_PREFIX + str(r.get("id")):
             datetime.fromtimestamp(int(r["created"]), tz=timezone.utc)
         for part in batch.get("searches") or [] for r in part.get("listings") or []
-        if isinstance(r, dict) and isinstance(r.get("created"), int)
-        and r["created"] > 1_000_000_000}
+        if isinstance(r, dict) and _a_date(r.get("created"))}
 
     def silence(listing_id: str, reason: str) -> None:
         if not dry_run:
@@ -815,7 +845,13 @@ def ingest(cfg, state: State, batch: dict[str, Any], *,
                                    f"read ({health['last_error']})")
             continue
         report.searches_run += 1
-        read_ok.add(search.id)
+        # A search reads one query per model, and one query failing leaves
+        # it read only in part: what was read is taken in, but the error is
+        # kept, and the cars the failed query would have shown are not
+        # taken for gone.
+        partial = str(part.get("error") or "")[:300]
+        if not partial:
+            read_ok.add(search.id)
         item = wanted.get(search.id) or {}
         rules = cfg.rules_for(search)
         search_filters = dict(rules["filters"])
@@ -836,16 +872,28 @@ def ingest(cfg, state: State, batch: dict[str, Any], *,
         # point: dozens of cars already for sale are not dozens of new ones.
         scope = str(part.get("scope") or "")
         baseline = health.get("scope") != scope
-        health.update({"scope": scope, "last_ok": now, "last_count": len(on_sale),
-                       "consecutive_failures": 0,
+        # A changed rule that hides a car rather than asks Marketplace for
+        # less (a mileage cap, a keyword) quiets only the cars it lets
+        # through, as on AutoTrader. A search last read before this was
+        # kept has nothing to compare with.
+        rule_scope = rule_scope_of(search, cfg)
+        rules_changed = "rule_scope" in health and not baseline \
+            and health["rule_scope"] != rule_scope
+        health.update({"scope": scope, "rule_scope": rule_scope, "last_ok": now,
+                       "last_count": len(on_sale), "consecutive_failures": 0,
                        "landed": str(part.get("landed") or "")[:400],
                        "other_examples": judged.other_examples()})
         # Where every car read went, for the Status tab: most of what a loose
         # Marketplace search returns is not the model asked for, and that
         # should read as expected. Counted once every search has had its say.
         settled.append((health, judged))
-        health.pop("last_error", None)
-        if baseline and on_sale:
+        if partial:
+            health["last_error"], health["last_error_at"] = partial, now
+            report.warnings.append(f"{search.name}: Marketplace was read only "
+                                   f"in part ({partial})")
+        else:
+            health.pop("last_error", None)
+        if (baseline or rules_changed) and on_sale:
             report.baselines.append(search.name)
 
         if judged.other:
@@ -860,7 +908,7 @@ def ingest(cfg, state: State, batch: dict[str, Any], *,
         _take(kept, unpriced, state=state, report=report, rules=rules,
               search_filters=search_filters, search_notify=search_notify,
               baseline=baseline, queue=queue, silence=silence,
-              starting_point=STARTING_POINT)
+              starting_point=STARTING_POINT, rules_changed=rules_changed)
         for listing, verdict in dropped:
             rejected.setdefault(listing.id, (listing, verdict))
 
@@ -985,35 +1033,56 @@ def _failure(raw: Any) -> dict[str, str] | None:
 
 def _session_alarm(cfg, state: State, report, heard: dict[str, Any],
                    env: dict[str, str], notify: bool) -> None:
-    """Say once when Facebook stops letting the collector in, and once when
-    it lets it back in. Every batch in between is the same news."""
+    """Say once when Facebook stops letting a collector in, and once when
+    it lets it back in. Every batch in between is the same news.
+
+    Only a batch that opened the browser says how the session is: an
+    overnight check-in or a standby standing by carries "ok" without having
+    asked Facebook anything. Each computer signs in on its own, so each is
+    told about on its own, and a standby reading while the primary is
+    signed out does not count as the primary being back.
+    """
     from . import notifiers
     section = _section(state)
-    session = heard["session"]
-    told = section.get("session_told")
+    session, host = heard["session"], heard["host"]
     if session in SESSION_WORDS:
         # A warning, not a failure: every batch until the owner signs in
         # would otherwise fail its workflow run and email them about it.
         report.warnings.append(f"Marketplace: {SESSION_WORDS[session]}.")
-        if told != session and notify:
+    if not heard["polled"]:
+        return
+    told = section.get("session_told")
+    if not isinstance(told, dict):
+        # Kept before each computer was told about on its own: it was about
+        # whichever one sends next.
+        told = {host: told} if told else {}
+    if session in SESSION_WORDS:
+        if told.get(host) != session and notify:
             body = (f"{SESSION_WORDS[session]}, so Marketplace is not being "
-                    f"watched. On the computer that collects it ({heard['host']}), "
+                    f"watched. On the computer that collects it ({host}), "
                     f"run:\n\n    collector/run login\n\nand sign in to Facebook "
                     f"in the window that opens.")
             report.channel_results.extend(notifiers.alert(
                 cfg, "Marketplace needs you to sign in again", body, env))
-        section["session_told"] = session
-    elif told and session == "ok":
-        section.pop("session_told", None)
+        told[host] = session
+    elif session == "ok" and told.pop(host, None):
         if notify:
             report.channel_results.extend(notifiers.alert(
                 cfg, "Marketplace is being watched again",
                 "The collector is signed in and reading Marketplace again.", env))
+    if told:
+        section["session_told"] = told
+    else:
+        section.pop("session_told", None)
 
 
 def _standby_note(cfg, state: State, report, heard: dict[str, Any],
                   env: dict[str, str], notify: bool) -> None:
-    """Say once when a standby computer starts reading in the primary's place."""
+    """Say once when a standby computer starts reading in the primary's place.
+
+    The primary is back once it reads again: one Facebook has signed out
+    still sends a batch every pass, and none of them is a return.
+    """
     from . import notifiers
     section = _section(state)
     if not heard["polled"]:
@@ -1025,8 +1094,9 @@ def _standby_note(cfg, state: State, report, heard: dict[str, Any],
             if notify:
                 report.channel_results.extend(notifiers.alert(
                     cfg, "Marketplace: the standby computer has taken over",
-                    f"The primary collector went quiet, so {heard['host']} is "
-                    f"reading Marketplace now. Nothing is missed; check the "
-                    f"primary when you can (collector/run status on it).", env))
-    elif heard["role"] == "primary":
+                    f"The primary collector went quiet, or Facebook stopped "
+                    f"letting it in, so {heard['host']} is reading Marketplace "
+                    f"now. Nothing is missed; check the primary when you can "
+                    f"(collector/run status on it).", env))
+    elif heard["role"] == "primary" and heard["session"] == "ok":
         section.pop("standby_told", None)
