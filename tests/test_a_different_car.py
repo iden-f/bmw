@@ -339,6 +339,22 @@ class TestARealRunDropsThem:
         self.a_model_rule_for(bench, "Nothing At All")
         assert bench.run(search_html=site, minutes_later=180).invariants == []
 
+    def test_a_car_another_search_keeps_is_not_dropped(self, bench, fixture_html):
+        """Two searches read the same page. One's models rule turns every car
+        away; the other has no rule and keeps them all. A car one search does
+        not want may be another's, and it may just have been an alert."""
+        site = self.named_site(fixture_html)
+        bench.cfg.add_search("https://www.autotrader.ca/cars/honda/civic/?rcp=15&prx=-1",
+                             "Another search")
+        bench.cfg.save()
+        bench.run(search_html=site)
+        stored = set(State.load(bench.path / "state.json").listings)
+        assert stored
+        self.a_model_rule_for(bench, "Nothing At All")
+        report = bench.run(search_html=site, minutes_later=180)
+        assert report.discarded == 0
+        assert set(State.load(bench.path / "state.json").listings) == stored
+
     def test_keeping_the_right_model_keeps_its_cars(self, bench, fixture_html):
         site = self.named_site(fixture_html)
         bench.run(search_html=site)

@@ -415,14 +415,47 @@ class TestAScopeChangeIsABaseline:
         assert report.baselines == []
         assert all(h.get("rule_scope") for h in bench.state().data["searches"].values())
 
-    def test_a_baseline_does_not_call_anything_removed(self, bench):
-        """Narrowing a search must not announce the excluded cars as sold."""
+    def test_a_narrower_rule_does_not_call_anything_removed(self, bench):
+        """Narrowing a search must not announce the excluded cars as sold:
+        a rule hides a car, and a hidden car is still on the page. Time
+        passes between the checks, so the grace for a missing car could run
+        out if one were missing."""
+        next_check()
         bench.run()
         bench.cfg.set("filters.max_price", 85000)
         bench.cfg.save()
         for _ in range(3):
+            next_check()
             report = bench.run()
         assert report.removed == 0
+
+    def test_a_baseline_does_not_call_anything_removed(self, bench):
+        """A search whose scope changed reads what it covers now as a starting
+        point, so a car missing from it proves nothing. Here a car has
+        already missed one check; the next, which would be its second, comes
+        after the search's pages changed. Narrowing only a rule never made a
+        baseline, so the test that did that could not see this at all."""
+        from .test_live_data import remove_car
+        gone = "727d36cb-6045-44ea-bb97-7e3c022e2674"
+        without = remove_car(bench.html, gone)
+        next_check()
+        bench.run()
+        next_check()
+        assert bench.run(without).removed == 0          # one miss, within the grace
+
+        bench.cfg.set("scraping.max_pages", 4)
+        bench.cfg.save()
+        next_check()
+        report = bench.run(without)
+        assert report.baselines == ["Example search"]
+        assert report.removed == 0, "a starting point called a car gone"
+        assert bench.state().listings[gone]["status"] == "active"
+
+        # And the check after it can: the car was only spared, not lost.
+        for _ in range(2):
+            next_check()
+            report = bench.run(without)
+        assert bench.state().listings[gone]["status"] == "gone"
 
 
 class TestTheDashboardShowsWhoWasNotToldAbout:

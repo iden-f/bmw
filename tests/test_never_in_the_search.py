@@ -78,6 +78,27 @@ class TestTheSweepEmptiesItself:
             "a car the site once listed is not a rail; it is a car that has "
             "gone, and the removal path decides that")
 
+    def test_a_car_already_gone_keeps_its_record(self, bench, fixture_html):
+        """A car recorded as gone is absent from every read by definition,
+        and one from before results were stamped has no stamp. Dropping it
+        would take its history with it; `prune` retires it on age instead."""
+        declaring = fixture_html("search_2026_full")
+        bench.run(declaring)
+        state = State.load(bench.path / "state.json")
+        sold = a_car(55)
+        state.record(sold)
+        state.listings[sold.id].update(search_id=bench.cfg.searches[0].id,
+                                       status="gone",
+                                       removed_at="2026-09-01T00:00:00+00:00")
+        state.listings[sold.id].pop("in_results_at", None)
+        state.save()
+
+        report = bench.run(declaring, minutes_later=200)
+        after = State.load(bench.path / "state.json")
+        assert sold.id in after.listings, "a gone car's history was thrown away"
+        assert after.listings[sold.id]["status"] == "gone"
+        assert report.discarded == 0
+
     def test_a_car_you_shortlisted_is_never_dropped(self, bench, fixture_html):
         declaring = fixture_html("search_2026_full")
         bench.run(declaring)

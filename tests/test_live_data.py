@@ -637,17 +637,33 @@ class RotatingSite:
         pass
 
 
+class TimeoutSite(RotatingSite):
+    """The same site, whose listing pages time out: all of them, or only
+    the one named in ``unreadable``. A results page still reads."""
+
+    def __init__(self, *a, unreadable=None, **kw):
+        super().__init__(*a, **kw)
+        self.unreadable = unreadable
+
+    def get(self, url, referer=None, allow_block=False):
+        if "/offers/" in url and (self.unreadable is None or self.unreadable in url):
+            self.spent += 1
+            self.detail_hits.append(url)
+            raise FetchError(f"timed out reading {url}")
+        return super().get(url, referer, allow_block)
+
+
 class TestARotatingResultWindow:
     def _watch(self, live, site):
         next_check()
         return run(live.cfg, State.load(live.path / "state.json"),
                    fetcher=site, env={})
 
-    def _site(self, live, **kw):
+    def _site(self, live, kind=RotatingSite, **kw):
         live.cfg.set("scraping.max_pages", 2)
         live.cfg.set("scraping.results_per_page", 6)
         live.cfg.save()
-        return RotatingSite(live.html, all_ids(live.html), window=6, **kw)
+        return kind(live.html, all_ids(live.html), window=6, **kw)
 
     def test_a_car_that_only_left_the_sample_is_not_reported_as_sold(self, live):
         site = self._site(live)
@@ -723,6 +739,45 @@ class TestARotatingResultWindow:
             before = len(site.detail_hits)
             self._watch(live, site)
             assert len(site.detail_hits) - before <= 12
+
+    def test_a_listing_page_that_cannot_be_read_says_nothing(self, live):
+        """A timeout or a 503 on a car's own page is the site having a bad
+        minute, not the car selling. Taken as a sale, an outage on listing
+        pages would write off every car the rotation hid."""
+        live.run()
+        site = self._site(live, TimeoutSite)
+        removed = []
+        for _ in range(3):
+            site.rotate()
+            removed.append(self._watch(live, site).removed)
+        assert site.detail_hits, "no listing page was asked"
+        assert removed == [0, 0, 0], removed
+
+    def test_a_car_whose_page_never_reads_is_gone_only_after_the_limit(self, live):
+        """But not pending for ever: a car absent from every read whose own
+        page never answers is gone after GONE_UNKNOWN_LIMIT checks that
+        could not tell, and no other car goes with it."""
+        from autotrader.runner import GONE_UNKNOWN_LIMIT
+        live.run()
+        sold = all_ids(live.html)[0]
+        site = self._site(live, TimeoutSite, sold=sold, unreadable=sold)
+
+        asked = 0
+        while True:
+            site.rotate()
+            before = sum(sold in u for u in site.detail_hits)
+            self._watch(live, site)
+            asked += sum(sold in u for u in site.detail_hits) - before
+            entries = json.loads((live.path / "state.json").read_text())["listings"]
+            if entries[sold]["status"] == "gone" or asked > GONE_UNKNOWN_LIMIT:
+                break
+            assert asked < GONE_UNKNOWN_LIMIT, f"still active after {asked} unknowns"
+        assert asked == GONE_UNKNOWN_LIMIT, asked
+        assert entries[sold]["status"] == "gone"
+        assert "gone_checks" not in entries[sold]
+        others = [e for i, e in entries.items() if i != sold]
+        assert all(e["status"] == "active" for e in others), \
+            "the cars the rotation hid were written off with it"
 
     def test_a_search_we_read_to_the_end_still_needs_no_verification(self, live):
         """Nothing changes for a search small enough to read completely.

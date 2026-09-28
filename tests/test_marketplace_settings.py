@@ -77,6 +77,27 @@ class TestOtherSpellings:
         assert "fb-100000001" not in st.listings and report.discarded == 1
         assert st.listings["fb-100000002"]["status"] == "active"
 
+    def test_a_car_another_search_hides_is_kept_hidden(self, cfg, tmp_path):
+        """No longer this search's model, but another search's rule hides
+        it: a hidden car is kept and explained, not dropped."""
+        cfg.add_search("https://www.autotrader.ca/cars/honda/civic/?prx=-1", "Another search")
+        cfg.data["searches"][1]["filters"] = {"models": ["Civic"], "max_price": 10000}
+        cfg.save()
+        st = State(path=tmp_path / "s.json")
+        first, other = cfg.searches[0].id, cfg.searches[1].id
+        car = rec("100000001")
+        M.ingest(cfg, st, batch(part(first, car)), env={}, notify=False)
+        assert st.listings["fb-100000001"]["search_id"] == first
+
+        cfg.data["searches"][0]["filters"]["models"] = ["Accord"]
+        report = M.ingest(cfg, st, batch(part(first, car), part(other, car)),
+                          env={}, notify=False)
+        entry = st.listings.get("fb-100000001")
+        assert entry is not None, "a car another search hid was dropped"
+        assert entry["filtered"] is True
+        assert "$10,000" in entry["filter_reason"], entry["filter_reason"]
+        assert report.discarded == 0
+
     def test_one_written_by_hand_is_one_name_not_its_letters(self, cfg):
         cfg.data["searches"][0]["filters"]["aliases"] = "Civik"
         assert M.plan(cfg)[0]["aliases"] == ["Civik"]
