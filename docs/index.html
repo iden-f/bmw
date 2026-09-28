@@ -199,7 +199,9 @@ a{ color:var(--ev-new); text-underline-offset:2px; }
   padding:1px var(--s1); border-radius:var(--r-sm);
 }
 .tab[aria-current="page"] .tab__n{ color:var(--text-2); }
-.tab__n[data-unread="1"]{
+/* Also on the current tab: the rule above is more specific, and on the Feed
+   tab itself it turned the count grey on this colour, which is unreadable. */
+.tab__n[data-unread="1"], .tab[aria-current="page"] .tab__n[data-unread="1"]{
   background:var(--ev-new); color:var(--bg); font-weight:560;
 }
 .tab__n:empty{ display:none; }
