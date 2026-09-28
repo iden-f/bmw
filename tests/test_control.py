@@ -18,6 +18,7 @@ Three properties, and every test below is one of them:
 
 from __future__ import annotations
 
+import copy
 import json
 
 import pytest
@@ -579,6 +580,39 @@ class TestANumberThatIsNotOne:
                               ' "value": Infinity}]')
         out = control.apply(cfg_with(), state_with(), items)
         assert len(out.rejected) == 2 and not out.changed
+
+    @pytest.mark.parametrize("item", [
+        {"action": "set-rule", "search": "Alpha", "rule": "max_price", "value": 45000.5},
+        {"action": "set-rule", "rule": "min_year", "value": "2018.5"},
+        {"action": "set-marketplace", "setting": "radius_km", "value": 45.5}])
+    def test_a_fraction_of_a_whole_number_is_refused_not_cut(self, item):
+        """int(45.5) is 45: a radius of 45.5 was saved as 45 without a word."""
+        cfg = cfg_with()
+        before = copy.deepcopy(cfg.data)
+        out = control.apply(cfg, state_with(), [item])
+        assert not out.changed and cfg.data == before
+        assert "needs a whole number" in out.rejected[0], out.rejected
+
+    def test_a_whole_number_written_with_a_point_is_taken(self):
+        cfg = cfg_with()
+        out = control.apply(cfg, state_with(), [
+            {"action": "set-rule", "search": "Alpha", "rule": "max_price", "value": 45000.0},
+            {"action": "set-rule", "rule": "price_drop_min_pct", "value": 2.5}])
+        assert out.changed, out.rejected
+        assert cfg.data["searches"][0]["filters"]["max_price"] == 45000
+        assert type(cfg.data["searches"][0]["filters"]["max_price"]) is int
+        assert cfg.get("notifications.price_drop_min_pct") == 2.5
+
+    @pytest.mark.parametrize("value", [True, False])
+    @pytest.mark.parametrize("item", [
+        {"action": "set-rule", "search": "Alpha", "rule": "max_price"},
+        {"action": "set-rule", "rule": "price_drop_min_pct"},
+        {"action": "set-marketplace", "setting": "radius_km"}])
+    def test_a_yes_or_no_is_not_a_number(self, item, value):
+        """Python counts true as 1, so a max_price of true was a $1 ceiling."""
+        cfg = cfg_with()
+        out = control.apply(cfg, state_with(), [dict(item, value=value)])
+        assert not out.changed and "needs a number" in out.rejected[0], out.rejected
 
 
 class TestADistanceNeedsAPlace:

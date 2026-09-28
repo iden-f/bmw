@@ -15,7 +15,8 @@ from typing import Any
 from . import dashboard, notifiers, words
 from .archive import prune as prune_archives
 from .archive import size_report
-from .config import CHANNEL_SECRETS, Config, ConfigError
+from .config import (CHANNEL_SECRETS, Config, ConfigError, known_setting,
+                     nearest_setting)
 from .http import Fetcher
 from .listing import Listing, name_of, on_marketplace
 from .parser import parse_search_page
@@ -281,6 +282,21 @@ def cmd_set(args: argparse.Namespace) -> int:
         print(_ok(f"{target.name}: {args.key} = {value!r}"))
         return 0
 
+    # A mistyped key would be written as readily as a real one, and nothing
+    # would read it: the change would look made and do nothing.
+    if not known_setting(args.key):
+        print(_bad(f"there is no setting called {args.key!r}, so nothing was changed"))
+        hint = nearest_setting(args.key)
+        if hint and hint == f"filters.{args.key}":
+            # A rule: every search's, or one search's.
+            print(f"   {DIM}did you mean {hint}, or {args.key} with --search?{RESET}")
+        elif hint:
+            print(f"   {DIM}did you mean {hint}?{RESET}")
+        else:
+            print(f"   {DIM}a setting is named with its section, like "
+                  f"notifications.price_drop_min_abs; a rule for one search "
+                  f"takes --search{RESET}")
+        return 1
     before = cfg.get(args.key, "<unset>")
     cfg.set(args.key, value)
     # Switching a channel back on clears why it was switched off, or setup

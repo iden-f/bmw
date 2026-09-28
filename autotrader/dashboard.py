@@ -446,7 +446,10 @@ def _marketplace(cfg: Config, state: State) -> dict[str, Any] | None:
     last = section.get("last_batch")
     if not last:
         return None
-    names = {s.id: s.name for s in cfg.searches}
+    # Only the searches still read there: one switched off for Marketplace
+    # loses its row at the next batch, and until then (or for good, if the
+    # collector has stopped) its last error is not news.
+    names = {s.id: s.name for s in cfg.searches if s.marketplace}
     return {
         "last_batch": last,
         "hosts": section.get("hosts") or {},

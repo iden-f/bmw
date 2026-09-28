@@ -844,9 +844,9 @@ def weekly_text(summary: dict[str, Any]) -> str:
                      f"as much on which cars are listed as on what they cost")
         lines.append(line + ".")
     if summary.get("checks_hours") is not None:
-        lines.append(f"{_count(summary['checks'], 'successful check')} in the "
-                     f"last {_span(summary['checks_hours'])}, as far back as "
-                     f"the bot keeps a log of its runs.")
+        lines.append(f"{_count(summary['checks'], 'successful check')} in "
+                     f"{words.the_last(summary['checks_hours'])}, as far back "
+                     f"as the bot keeps a log of its runs.")
     else:
         lines.append(f"Built from {_count(summary['checks'], 'successful check')} "
                      f"this week.")
@@ -1084,7 +1084,7 @@ def market(entries: Iterable[dict[str, Any]], *, now: datetime | None = None,
             "cars_with_two_prices": len(tracked),
             "thin": len(tracked) < 20 or watch_days < 14,
             "note": (f"{len(tracked)} of {len(entries)} cars have been priced "
-                     f"more than once, over {_span(watch_hours)} of watching. "
+                     f"more than once, in {_span(watch_hours)} of watching. "
                      f"Anything below described as a trend is really a "
                      f"snapshot until that number grows."),
         },

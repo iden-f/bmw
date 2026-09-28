@@ -245,6 +245,62 @@ DEFAULTS: dict[str, Any] = {
 }
 
 
+# Every rule filters.check reads. DEFAULTS starts a config with some of them;
+# the rest are off until they are set, globally or for one search.
+FILTER_RULES = ("min_price", "max_price", "min_year", "max_year", "max_mileage_km",
+                "max_distance_km", "near", "models", "aliases", "provinces",
+                "include_keywords", "exclude_keywords", "exclude_sellers",
+                "require_price")
+# Settings read with a fallback of their own and not written into DEFAULTS.
+OPTIONAL_SETTINGS = ("dashboard.photos", "health.coverage_floor_pct")
+
+
+def _setting_paths(node: Any = DEFAULTS, prefix: str = "") -> list[str]:
+    """Every dotted path DEFAULTS spells out, containers included."""
+    out: list[str] = []
+    for key, value in node.items():
+        path = f"{prefix}{key}"
+        out.append(path)
+        if isinstance(value, dict):
+            out += _setting_paths(value, path + ".")
+    return out
+
+
+def known_setting(path: str) -> bool:
+    """Is ``path`` a setting something reads?
+
+    A mistyped one is written as happily as a real one, and then nothing
+    reads it: `set price_drop_min_abs 500` wrote a key at the top of the
+    file, where the floor it meant is notifications.price_drop_min_abs.
+    Anything under a channel counts, since each channel has settings of its
+    own.
+    """
+    parts = path.split(".")
+    if parts[:2] == ["notifications", "channels"] and len(parts) > 2:
+        return parts[2] in CHANNEL_SECRETS
+    if len(parts) == 2 and parts[0] == "filters" and parts[1] in FILTER_RULES:
+        return True
+    return path in OPTIONAL_SETTINGS or path in _setting_paths()
+
+
+def nearest_setting(path: str) -> str | None:
+    """The setting ``path`` most likely meant, when one stands out.
+
+    The one setting with the same last word, or else one spelled almost the
+    same. None rather than a guess among several.
+    """
+    import difflib
+    known = [*_setting_paths(), *(f"filters.{r}" for r in FILTER_RULES),
+             *OPTIONAL_SETTINGS]
+    known = list(dict.fromkeys(known))
+    last = path.rsplit(".", 1)[-1]
+    same = [k for k in known if k.rsplit(".", 1)[-1] == last]
+    if len(same) == 1:
+        return same[0]
+    close = difflib.get_close_matches(path, known, n=1, cutoff=0.85)
+    return close[0] if close else None
+
+
 class ConfigError(ValueError):
     """Raised when a config file cannot be used as-is."""
 

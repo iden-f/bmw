@@ -28,6 +28,7 @@ from . import clock, filters, geo
 from .listing import MARKETPLACE_PREFIX, Listing, on_marketplace
 from .state import STARTING_POINT, SWITCHED_OFF, Change, State, utcnow
 from .urls import describe_search
+from .words import many
 
 log = logging.getLogger(__name__)
 
@@ -954,14 +955,23 @@ def ingest(cfg, state: State, batch: dict[str, Any], *,
     # they were still watched: they are written off, quietly, with the reason.
     # Its health goes too, so an old error does not stay on the Status tab
     # and the first read after it is switched back on is a starting point.
+    # Your doing, not the market's: they are not counted as removed, which
+    # would say in the run's line that they left the site.
     off = {s.id for s in cfg.active_searches if not s.marketplace}
     for sid in off:
         health_all.pop(sid, None)
+    released: dict[str, str] = {}
     for lid, entry in list(state.listings.items()):
         if on_marketplace(lid) and entry.get("status") == "active" \
                 and entry.get("search_id") in off:
             if state.mark_gone(lid, SWITCHED_OFF):
-                report.removed += 1
+                released[lid] = str(entry.get("search_id"))
+    if released:
+        whose = ("its search" if len(released) == 1 else "their search"
+                 if len(set(released.values())) == 1 else "their searches")
+        report.warnings.append(
+            f"no longer watching {many(len(released), 'Marketplace car')}: "
+            f"Marketplace is switched off for {whose}.")
 
     # A car not seen for days while its search reads fine has gone. Absence
     # proves less here than on AutoTrader - results are capped and ranked -

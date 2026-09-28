@@ -167,6 +167,33 @@ class TestReadingASearchOnMarketplaceOrNot:
         # Quietly: nothing is owed an alert.
         assert entry.get("pending") is None and entry.get("notified") is not False
 
+    def test_its_cars_are_not_counted_as_leaving_the_market(self, cfg, tmp_path):
+        """The run's line said "2 removed" for two cars still for sale: the
+        owner stopped watching them, and the market had nothing to do with
+        it."""
+        st = State(path=tmp_path / "s.json")
+        sid = cfg.searches[0].id
+        M.ingest(cfg, st, batch(part(sid, rec("100000001"), rec("100000002"))),
+                 env={}, notify=False)
+        apply(cfg, st, {"action": "set-marketplace", "search": sid, "enabled": False})
+        report = M.ingest(cfg, st, batch(), env={}, notify=False)
+        assert report.removed == 0 and "removed" not in report.summary()
+        assert st.data["marketplace"]["batches"][0]["removed"] == 0
+        # Said once, as what it is.
+        assert report.warnings == ["no longer watching 2 Marketplace cars: "
+                                   "Marketplace is switched off for their search."]
+        assert M.ingest(cfg, st, batch(), env={}, notify=False).warnings == []
+
+    def test_its_row_leaves_the_status_tab_with_the_switch(self, cfg, tmp_path):
+        """Not only at the next batch: a collector that has stopped sends
+        none, and the old error stayed on the page for good."""
+        st = State(path=tmp_path / "s.json")
+        sid = cfg.searches[0].id
+        M.ingest(cfg, st, batch(part(sid, ok=False, error="the page came back empty")),
+                 env={}, notify=False)
+        apply(cfg, st, {"action": "set-marketplace", "search": sid, "enabled": False})
+        assert build_payload(cfg, st, {})["marketplace"]["searches"] == []
+
     def test_a_batch_still_reading_it_is_not_taken_in(self, cfg, tmp_path):
         # A pass planned before the switch, or a Mac not yet updated.
         st = State(path=tmp_path / "s.json")
@@ -177,6 +204,8 @@ class TestReadingASearchOnMarketplaceOrNot:
             report = M.ingest(cfg, st, batch(part(sid, rec("100000001", price=21000),
                                                   rec("100000003"))), env={}, notify=False)
             assert report.new == 0 and report.relisted == 0
+            # Nor is its health row made again from what it read.
+            assert sid not in st.data["marketplace"]["searches"]
         assert "fb-100000003" not in st.listings
         entry = st.listings["fb-100000001"]
         assert entry["status"] == "gone" and "relisted_at" not in entry

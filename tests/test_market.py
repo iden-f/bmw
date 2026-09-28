@@ -10,6 +10,8 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 
+import pytest
+
 from autotrader import insight
 
 NOW = datetime(2026, 9, 12, 12, 0, tzinfo=timezone.utc)
@@ -408,6 +410,32 @@ class TestMeasuringTheRightWatch:
         assert insight._span(3.4) == "3 hours"
         assert insight._span(0.2) == "12 minutes"
         assert insight._span(72) == "3 days"
+
+    @pytest.mark.parametrize("hours, said", [
+        (0, "in under a minute of watching"), (1 / 60, "in 1 minute of watching"),
+        (0.2, "in 12 minutes of watching"), (1, "in 1 hour of watching"),
+        (72, "in 3 days of watching")])
+    def test_the_snapshot_note_reads_as_a_sentence_for_any_span(self, hours, said):
+        """A watch begun this minute was "priced more than once, over under
+        an hour of watching"."""
+        began = (NOW - timedelta(hours=hours)).isoformat(timespec="seconds")
+        note = insight.market([car(1, first=0)], now=NOW, since=began)["window"]["note"]
+        assert said in note, note
+        assert "over under" not in note
+
+    @pytest.mark.parametrize("hours, said", [
+        (0.0, "in the last minute,"), (1 / 60, "in the last minute,"),
+        (0.5, "in the last 30 minutes,"), (1, "in the last hour,"),
+        (14.8, "in the last 15 hours,"), (72, "in the last 3 days,")])
+    def test_how_far_back_the_checks_reach_reads_as_a_sentence(self, hours, said):
+        """"1 successful check in the last under an hour"."""
+        text = insight.weekly_text({"days": 7, "new": 0, "drops": 0, "rises": 0,
+                                    "priced": 0, "gone": 0, "back": 0,
+                                    "qualified": 0, "live": 0, "median": None,
+                                    "checks": 1, "checks_hours": hours})
+        assert said in text, text
+
+
 
 
 class TestTheDenominatorCanMove:

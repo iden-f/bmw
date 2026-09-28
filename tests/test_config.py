@@ -169,6 +169,34 @@ class TestTheSetCommand:
         cfg = self._set(path, "price_drop_min_abs", "500", "--search", "Civic")
         assert cfg.rules_for(cfg.searches[0])["price_drop_min_abs"] == 500
 
+    @pytest.mark.parametrize("key, hint", [
+        ("price_drop_min_abs", "did you mean notifications.price_drop_min_abs?"),
+        ("notifications.price_drop_min_ab", "did you mean notifications.price_drop_min_abs?"),
+        ("max_price", "did you mean filters.max_price, or max_price with --search?"),
+        ("notifications.channels.pager.enabled", ""),
+        ("notifications.digest.every", ""),
+        ("colour", "a setting is named with its section")])
+    def test_a_key_nothing_reads_is_refused(self, path, key, hint, capsys):
+        """`set price_drop_min_abs 500` wrote a key at the top of the file,
+        said it had, and the floor stayed at $250."""
+        from autotrader import cli
+        before = path.read_text()
+        assert cli.main(["--config", str(path), "set", key, "500"]) == 1
+        assert path.read_text() == before
+        out = capsys.readouterr().out
+        assert "nothing was changed" in out and hint in out, out
+
+    @pytest.mark.parametrize("key, value, read", [
+        ("notifications.price_drop_min_abs", "500", 500),
+        ("filters.max_distance_km", "100", 100),
+        ("dashboard.photos", "false", False),
+        ("marketplace.gone_after_days", "14", 14),
+        ("notifications.channels.ntfy.icon", "https://example.org/car.png",
+         "https://example.org/car.png"),
+        ("notifications.channels.telegram.enabled", "false", False)])
+    def test_a_key_something_reads_is_still_set(self, path, key, value, read):
+        assert self._set(path, key, value).get(key) == read
+
 
 def test_a_bare_command_runs_against_the_files_it_was_given(tmp_path, monkeypatch):
     """With no command a check runs; the --config and --state typed before

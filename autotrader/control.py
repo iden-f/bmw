@@ -149,13 +149,22 @@ def parse(body: str) -> list[dict[str, Any]]:
 
 
 def _number(value: Any, name: str, kind: type) -> Any:
-    try:
-        out = kind(value)
-    except (TypeError, ValueError, OverflowError):
-        # OverflowError: int() of an infinity, which JSON's 1e999 is.
-        raise Rejected(f"{name} needs a number; got {value!r}.") from None
-    if not math.isfinite(out):
+    # A yes/no is not a number, though Python counts true as 1: a max_price
+    # of true would have been a $1 ceiling.
+    if isinstance(value, bool) or not isinstance(value, (int, float, str)):
         raise Rejected(f"{name} needs a number; got {value!r}.")
+    try:
+        # Read as a float first: int() would have turned 45.5 into 45 without
+        # a word. JSON's 1e999 reads as an infinity, and Python's reader
+        # takes NaN; neither is a number here.
+        number = float(value)
+    except (TypeError, ValueError, OverflowError):
+        raise Rejected(f"{name} needs a number; got {value!r}.") from None
+    if not math.isfinite(number):
+        raise Rejected(f"{name} needs a number; got {value!r}.")
+    if kind is int and not number.is_integer():
+        raise Rejected(f"{name} needs a whole number; got {value!r}.")
+    out = kind(number)
     low, high = RULE_BOUNDS.get(name, (float("-inf"), float("inf")))
     if not low <= out <= high:
         # Not :g, which would show a person "1e+07".

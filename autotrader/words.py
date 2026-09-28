@@ -20,15 +20,33 @@ def span(hours: float | None) -> str:
     """How long something has been going on, in the unit that fits.
 
     Minutes under an hour and hours under two days, so a young watch is never
-    described as "0 days".
+    described as "0 days". Under half a minute is "under a minute", as the
+    page says it.
+
+    It follows a verb ("held 3 hours") or comes before "ago". After "over" or
+    "in the last" it can make no sense: see the_last.
     """
     hours = max(0.0, float(hours or 0))
     if hours < 1:
         minutes = int(round(hours * 60))
-        return "under an hour" if minutes < 1 else many(minutes, "minute")
+        return "under a minute" if minutes < 1 else many(minutes, "minute")
     if hours < 48:
         return many(int(round(hours)), "hour")
     return days(int(hours // 24))
+
+
+def the_last(hours: float | None) -> str:
+    """"the last 3 hours", for a span that runs up to now.
+
+    "In the last under a minute" and "in the last 1 hour" are not how anyone
+    says it.
+    """
+    text = span(hours)
+    if text in ("under a minute", "1 minute"):
+        return "the last minute"
+    if text == "1 hour":
+        return "the last hour"
+    return f"the last {text}"
 
 
 def days(count: int) -> str:
