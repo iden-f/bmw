@@ -857,8 +857,11 @@ function collectorTiming(m) {
     // that sent last, or when another is reading.
     says: out ? SESSION_SAYS[out[1].session]
       + (out[0] && (out[0] !== (last.host || '') || reading) ? ` (${out[0]})` : '') : '',
-    // The computer reading in the meantime, and when it last sent.
-    covered: reading ? { host: reading[0] || 'the standby', received: reading[1].received } : null,
+    // The computer reading in the meantime, and when it last sent. It
+    // stands in only when it is the standby: a primary that reads while a
+    // held standby checks in signed out is simply reading as usual.
+    covered: reading ? { host: reading[0] || 'the standby', received: reading[1].received,
+                         standingIn: reading[1].role === 'standby' } : null,
   };
 }
 
@@ -881,7 +884,9 @@ function renderClock() {
         : `Last batch from ${last.host || 'the collector'} ${stamp(last.received)}; `
           + (mt.late ? `the next was due ${when(new Date(mt.due).toISOString())}.`
                      : `the next is due about ${clockTime(mt.due)}.`)
-          + (mt.covered ? ` ${mt.says}; until then, ${mt.covered.host} is reading in its place.` : '');
+          + (!mt.covered ? '' : mt.covered.standingIn
+            ? ` ${mt.says}; until then, ${mt.covered.host} is reading in its place.`
+            : ` ${mt.says}; ${mt.covered.host} is reading as usual.`);
     }
   }
   // The strip is in the markup from the first paint, showing dashes, so it
@@ -2958,7 +2963,7 @@ function setupPanel(d) {
     const last = mt.covered || m.last_batch;
     add(mt.signedOut || mt.late ? 'todo' : 'ok',
       `Facebook Marketplace, read by ${esc(last.host || 'the collector')}${
-        mt.covered ? ' standing in' : ''}: last batch ${when(last.received)}`,
+        mt.covered?.standingIn ? ' standing in' : ''}: last batch ${when(last.received)}`,
       mt.signedOut ? `${esc(mt.says)}.`
       : mt.late ? 'It is late. On the Mac, <code class="mono">collector/run status</code> says why.'
       : '');

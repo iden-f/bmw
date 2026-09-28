@@ -1822,6 +1822,11 @@ def _charge_the_budget(cfg: Config, state: State, report: "RunReport",
     from . import budget as budget_mod
 
     if not cfg.get("budget.enabled", True):
+        # Switching the guard off is another way to lift a stop: this check
+        # is the watch resuming, so the coverage alarm measures from here.
+        if not Path(budget_mod.STOP_FILE).exists() \
+                and state.data.pop("budget_stopped_at", None):
+            state.data["watch_resumed_at"] = utcnow()
         return {}
 
     # Billed on the job's wall-clock life, not the run's working time: the

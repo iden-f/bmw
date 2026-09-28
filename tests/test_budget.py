@@ -328,6 +328,22 @@ class TestStoppingRatherThanSpending:
         assert "budget_stopped_at" not in after
         assert after.get("watch_resumed_at")
 
+    def test_switching_the_guard_off_after_a_stop_also_says_when_watching_began_again(
+            self, watcher):
+        """The other way to lift a stop: guard off, file deleted. Without the
+        stamp, the coverage alarm blamed GitHub's scheduler for the stop."""
+        self.spend_the_month(watcher, 400.0)
+        watcher.run()
+        assert watcher.state().data.get("budget_stopped_at")
+        watcher.cfg.set("budget.enabled", False)
+        watcher.cfg.save()
+        (watcher.path / "BUDGET-STOP").unlink()
+        watcher.run()
+        after = watcher.state().data
+        assert not (watcher.path / "BUDGET-STOP").exists()
+        assert "budget_stopped_at" not in after
+        assert after.get("watch_resumed_at")
+
     def test_accounting_never_fails_a_check(self, watcher, monkeypatch):
         """A photo may not fail a check and neither may a spreadsheet."""
         from autotrader import budget as budget_mod

@@ -2046,6 +2046,33 @@ class TestTheCollectorOnThePage:
         assert not errors, errors
         ctx.close()
 
+    def test_a_primary_reading_while_a_held_standby_checks_in_is_not_standing_in(
+            self, browser, site, payload):
+        """The standby took over, was signed out, and is held for hours,
+        checking in each pass. The primary is back and reads as usual: it is
+        not standing in for anyone, though the standby still needs a sign-in."""
+        from datetime import datetime, timedelta, timezone
+        d = self.payload_with(payload)
+        now = datetime.now(timezone.utc)
+        primary = dict(d["marketplace"]["last_batch"], host="collector-a", role="primary",
+                       polled=True, session="ok")
+        standby = dict(primary, host="collector-b", role="standby", polled=False,
+                       session="signed_out", note="held after a sign-out",
+                       received=(now - timedelta(minutes=12)).isoformat(timespec="seconds"))
+        d["marketplace"]["last_batch"] = primary
+        d["marketplace"]["hosts"] = {"collector-a": primary, "collector-b": standby}
+        ctx, page, errors = self.open(browser, site, d, "#/status")
+        page.wait_for_selector("#clock-mp-cell:not([hidden])")
+        title = page.get_attribute("#clock-mp", "title")
+        assert "(collector-b)" in title and "collector-a is reading as usual" in title
+        assert "in its place" not in title
+        setup = page.locator("section.section", has=page.locator("h2", has_text="What is set up"))
+        row = setup.locator("li", has_text="Facebook Marketplace")
+        assert "standing in" not in row.text_content()
+        assert "(collector-b)" in row.text_content()
+        assert not errors, errors
+        ctx.close()
+
     def test_one_spelling_set_by_hand_still_draws_the_searches_tab(self, browser, site, payload):
         d = self.payload_with(payload)
         d["searches"][0]["rules"]["filters"]["aliases"] = "Civik"
