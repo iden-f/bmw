@@ -77,9 +77,10 @@ All in `autotrader/`, in the order the data moves.
 - **`filters`**: your rules on top of the link. A car a rule hides is kept and
   explained; a result the `models` rule rejects is discarded.
 - **`state`**: the ledger. Every car, its price history, what you were told,
-  and the last 60 run summaries, written atomically in a `finally` block.
-  Change detection lives here: new, price drop, price rise, now priced, gone,
-  back, and back inside your rules.
+  and a summary of every run in the last 30 hours (at most 400 of them; a
+  firing that stood down keeps only a few fields), written atomically in a
+  `finally` block. Change detection lives here: new, price drop, price rise,
+  now priced, gone, back, and back inside your rules.
 - **`invariants`**: audits the ledger after every check. Every car must be
   told about, owed an alert, or quiet for a recorded reason. A violation fails
   the check and names the entries in `diagnostics/invariants.json`.

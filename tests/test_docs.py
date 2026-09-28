@@ -481,8 +481,10 @@ class TestTheNumbersTheyQuote:
         assert f"at most {thumbs.MAX_PER_RUN} new photos" in flat("HOW-IT-WORKS.md")
 
     def test_the_run_history_depth(self):
-        from autotrader.state import MAX_RUN_HISTORY
-        assert f"last {MAX_RUN_HISTORY} run" in flat("HOW-IT-WORKS.md")
+        from autotrader.state import MAX_RUN_HISTORY, RUN_LOG_HOURS
+        doc = flat("HOW-IT-WORKS.md")
+        assert f"every run in the last {RUN_LOG_HOURS} hours" in doc
+        assert f"at most {MAX_RUN_HISTORY} of them" in doc
 
     def test_the_budget_guard(self):
         from autotrader import budget

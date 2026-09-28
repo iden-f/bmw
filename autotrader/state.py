@@ -44,7 +44,19 @@ SEARCH_REMOVED_QUIET = "the search that was watching this was removed"
 log = logging.getLogger(__name__)
 
 STATE_PATH = Path(os.getenv("AUTOTRADER_STATE", "state.json"))
-MAX_RUN_HISTORY = 60
+# The run log keeps every run of the RUN_LOG_HOURS before its newest, so the
+# day the coverage figure measures is always inside it. It kept sixty runs,
+# stand-downs included, which on a watch started four times an hour reached
+# back fifteen hours. MAX_RUN_HISTORY caps it for a watch started far more
+# often than that.
+RUN_LOG_HOURS = 30
+MAX_RUN_HISTORY = 400
+# Set on the oldest run the log keeps once it has let go of any before it:
+# before that run nothing is known either way (see insight._log_reaches).
+RUNS_DROPPED = "earlier_runs_dropped"
+# A firing that stood down keeps only what it has to say, and these even when
+# they are empty; a day of them then costs less than sixty full records did.
+_STAND_DOWN_KEEPS = ("at", "ok", "skipped", "duration_s", "trigger")
 # Keys record() sets itself; everything else on an entry is carried forward.
 _MANAGED_KEYS = {"first_seen", "last_seen", "status", "notified", "price_history",
                  "price_disputed"}
@@ -67,6 +79,14 @@ def retired_by_owner(entry: dict[str, Any]) -> bool:
     if why:
         return why in (SEARCH_REMOVED, SWITCHED_OFF)
     return entry.get("quiet_reason") == SEARCH_REMOVED_QUIET
+
+
+def _stood_down(run: dict[str, Any]) -> dict[str, Any]:
+    """A firing that stood down, without the zeros and empty lists of a
+    check it never made."""
+    return {key: value for key, value in run.items()
+            if key in _STAND_DOWN_KEEPS
+            or value not in (None, "", 0, False, [], {})}
 
 
 def _note_told(entry: dict[str, Any], stamp: str) -> None:
@@ -224,6 +244,10 @@ class State:
         stay visible as violations.
         """
         filled = {"unpriced": 0, "quiet_reason": 0, "notified_at": 0}
+        # A run log written under the old cap: stand-downs made compact, and
+        # marked as having lost its earliest runs, so the hours before it are
+        # not read as hours nothing ran.
+        self._keep_runs(self.data.get("runs") or [])
         for entry in self.listings.values():
             if "unpriced" not in entry:
                 entry["unpriced"] = entry.get("price") is None
@@ -729,7 +753,41 @@ class State:
             oldest = min([r.get("at") for r in runs if r.get("at")]
                          + [summary["at"]])
             self.data["watch_started"] = oldest
-        self.data["runs"] = ([summary] + runs)[:MAX_RUN_HISTORY]
+        self._keep_runs([summary] + runs)
+
+    def _keep_runs(self, runs: list[dict[str, Any]]) -> None:
+        """Keep the run log to RUN_LOG_HOURS, and MAX_RUN_HISTORY runs.
+
+        Measured back from its newest run, not from now, so a watch whose
+        timer died still shows the last runs it made. The run before those
+        hours is kept too: without it, a run after a day of silence would be
+        the whole log, and the silence would read as unknown rather than as
+        a day with no check in it.
+        """
+        runs = [_stood_down(r) if r.get("skipped") else r
+                for r in runs if isinstance(r, dict)]
+        stamps = [clock.parse(r.get("at")) for r in runs]
+        known = [t for t in stamps if t is not None]
+        kept = runs
+        if known:
+            horizon = max(known) - timedelta(hours=RUN_LOG_HOURS)
+            inside = [i for i, t in enumerate(stamps) if t is None or t >= horizon]
+            before = [i for i, t in enumerate(stamps) if t is not None and t < horizon]
+            # Newest first, so the first run before the horizon is the one
+            # that ran last before it.
+            kept = [runs[i] for i in sorted(inside + before[:1])]
+        kept = kept[:MAX_RUN_HISTORY]
+        # Whether a run before the oldest one kept has been let go, now or by
+        # an earlier check. A log whose oldest run came after the watch began
+        # has lost the ones before it, as every log cut at sixty runs has.
+        began = clock.parse(self.data.get("watch_started"))
+        oldest = min((t for t in (clock.parse(r.get("at")) for r in kept) if t),
+                     default=None)
+        marked = [r.pop(RUNS_DROPPED, None) for r in kept]
+        if kept and (len(kept) < len(runs) or any(marked)
+                     or (began and oldest and oldest > began)):
+            kept[-1][RUNS_DROPPED] = True
+        self.data["runs"] = kept
 
     @property
     def runs(self) -> list[dict[str, Any]]:

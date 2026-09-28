@@ -15,7 +15,8 @@ from typing import Any, Iterable
 from . import clock, words
 from .events import delivery_state, told_about
 from .listing import name_of
-from .state import MAX_RUN_HISTORY, STARTING_POINT_REASONS, retired_by_owner
+from .state import (MAX_RUN_HISTORY, RUNS_DROPPED, STARTING_POINT_REASONS,
+                    retired_by_owner)
 
 # Below this many comparables a car is not scored, and the page says why.
 MIN_COMPARABLES = 6
@@ -464,10 +465,11 @@ def coverage(runs: list[dict[str, Any]], expected_minutes: int = 30,
         start = began
         new_install = True
         partial = False
-    # Nor over hours the run log no longer reaches. It keeps the newest
-    # MAX_RUN_HISTORY runs, stand-downs included, which on a busy schedule is
-    # less than a day, and before its oldest run nothing is known either way.
-    # Counting those hours as unwatched reported missed checks that happened.
+    # Nor over hours the run log no longer reaches. It keeps RUN_LOG_HOURS
+    # of runs, and one run before them, so a day is inside it; but a log cut
+    # at MAX_RUN_HISTORY, or at the sixty runs it once kept, reaches less far,
+    # and before its oldest run nothing is known either way. Counting those
+    # hours as unwatched reported missed checks that happened.
     reach = _log_reaches(runs)
     truncated = reach is not None and reach > start
     if truncated:
@@ -608,12 +610,14 @@ def coverage(runs: list[dict[str, Any]], expected_minutes: int = 30,
 
 
 def _log_reaches(runs: list[dict[str, Any]]) -> datetime | None:
-    """Where a full run log begins, or None while it still holds every run.
+    """Where a run log that has let runs go begins, or None while it still
+    holds every run.
 
-    Only a full log has lost anything: one with room left is the whole
-    history, and hours before its oldest run really had no run.
+    State.record_run marks the oldest run it keeps once it has dropped any
+    before it, and a log at MAX_RUN_HISTORY is full. Any other log is the
+    whole history, and hours before its oldest run really had no run.
     """
-    if len(runs) < MAX_RUN_HISTORY:
+    if len(runs) < MAX_RUN_HISTORY and not any(r.get(RUNS_DROPPED) for r in runs):
         return None
     stamps = [t for t in (_dt(r.get("at")) for r in runs) if t is not None]
     return min(stamps) if stamps else None
@@ -666,8 +670,8 @@ def minutes_spent(runs: list[dict[str, Any]], window_hours: int = 24,
     """
     now = now or clock.now()
     start = now - timedelta(hours=window_hours)
-    # A full run log can begin inside the window. The sums then cover only
-    # the hours it reaches, and the window says how many that is.
+    # A run log that has let runs go can begin inside the window. The sums
+    # then cover only the hours it reaches, and the window says how many.
     reach = _log_reaches(runs)
     if reach is not None and reach > start:
         start = reach
@@ -772,9 +776,9 @@ def weekly(entries: Iterable[dict[str, Any]], runs: list[dict[str, Any]],
         if asked:
             then.append(int(asked[-1]["price"]))
 
-    # Checks that read the site. The run log keeps only the newest runs, so
-    # on a busy schedule it can reach back less than the week, and the
-    # digest says how far it does reach rather than calling it the week.
+    # Checks that read the site. The run log keeps about a day of runs, so
+    # it reaches back less than the week, and the digest says how far it
+    # does reach rather than calling it the week.
     looked = [_dt(r.get("at")) for r in runs if _read_the_site(r)]
     reach = _log_reaches(runs)
 

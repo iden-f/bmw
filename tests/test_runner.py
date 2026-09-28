@@ -365,13 +365,13 @@ class TestFirstRunSelfCheck:
         assert "Nothing was recorded" in report
 
     def test_a_long_outage_does_not_make_the_bot_new_again(self, bench):
-        """The run log keeps sixty runs. A day and a half of failed firings
+        """The run log keeps thirty hours. A day and a half of failed firings
         pushed the last good check out of it, and the next good check was
         treated as the first: the self-check was sent again, and the guards
         that trust a proven parser were switched off."""
-        from autotrader.state import MAX_RUN_HISTORY
+        from autotrader.state import RUN_LOG_HOURS
         bench.run()
-        for _ in range(MAX_RUN_HISTORY + 1):
+        for _ in range(RUN_LOG_HOURS * 2 + 2):
             bench.run(fail=FetchError("connection reset"), minutes_later=30)
         saved = json.loads((bench.path / "state.json").read_text())
         assert not any(r.get("ok") for r in saved["runs"]), "the log forgot"

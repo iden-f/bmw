@@ -436,8 +436,6 @@ class TestMeasuringTheRightWatch:
         assert said in text, text
 
 
-
-
 class TestTheDenominatorCanMove:
     """A rate whose denominator holds cases that could not have gone the other
     way is not a rate. Every one of 83 cars first read this morning counted as
@@ -578,18 +576,40 @@ class TestTheWeekAgoIsAWeekAgo:
         assert out["checks_hours"] is None
         assert "2 successful checks this week" in insight.weekly_text(out)
 
-    def test_a_full_run_log_says_how_far_back_it_reaches(self):
+    def test_the_run_log_says_how_far_back_it_reaches(self):
+        """A week of firings every quarter of an hour, a check every hour:
+        the log keeps its last thirty hours, and the one run before them.
+        It kept sixty runs, which reached back fifteen."""
         from datetime import timedelta
-        from autotrader.state import MAX_RUN_HISTORY
-        runs = [{"at": (NOW - timedelta(minutes=15 * i)).isoformat(),
-                 "ok": True, "searches_run": 1, "skipped": i % 4 != 0}
-                for i in range(MAX_RUN_HISTORY)]
-        out = insight.weekly([], runs, now=NOW)
-        assert out["checks"] == 15
-        assert out["checks_hours"] == 14.8
+        from autotrader.state import State
+        state = State({"version": 2, "listings": {}, "searches": {}, "runs": []})
+        for i in reversed(range(7 * 96)):
+            state.record_run({"at": (NOW - timedelta(minutes=15 * i)).isoformat(),
+                              "ok": True, "searches_run": int(i % 4 == 0),
+                              "skipped": i % 4 != 0})
+        out = insight.weekly([], state.runs, now=NOW)
+        assert out["checks"] == 31
+        assert out["checks_hours"] == 30.2
         text = insight.weekly_text(out)
         assert "this week" not in text.split("\n")[-1], text
-        assert "15 hours" in text, text
+        assert "31 successful checks in the last 30 hours" in text, text
+
+    def test_a_run_log_cut_at_sixty_says_how_far_back_it_reaches(self):
+        """As a check before this change left it: sixty runs, the earliest
+        long gone. Read as the whole history, its fifteen hours would be the
+        week."""
+        from datetime import timedelta
+        from autotrader.state import State
+        runs = [{"at": (NOW - timedelta(minutes=15 * i)).isoformat(),
+                 "ok": True, "searches_run": 1, "skipped": i % 4 != 0}
+                for i in range(60)]
+        state = State({"version": 2, "listings": {}, "searches": {}, "runs": runs,
+                       "watch_started": ago(30)})
+        state.upgrade()
+        out = insight.weekly([], state.runs, now=NOW)
+        assert out["checks"] == 15
+        assert out["checks_hours"] == 14.8
+        assert "15 hours" in insight.weekly_text(out)
 
 
 class TestCarsYouStoppedWatchingDidNotLeave:

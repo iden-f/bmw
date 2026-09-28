@@ -399,13 +399,15 @@ class TestACountOfThingsThatHappenedIsNeverNegative:
 
 
 class TestCoverageStopsWhereTheRunLogDoes:
-    """The run log keeps the newest sixty runs, stand-downs included.
+    """The run log kept the newest sixty runs, stand-downs included.
 
     A cron at :07 and :37 and an outside timer at :15 and :45 record four runs
-    an hour, so the log reaches back about fifteen hours. Measured over
-    twenty-four, the nine hours it no longer holds counted as unwatched: a
+    an hour, so the log reached back about fifteen hours. Measured over
+    twenty-four, the nine hours it no longer held counted as unwatched: a
     schedule that had a check in every slot read 67%, with a nine-hour gap,
-    and the thin-coverage alarm blamed GitHub for it.
+    and the thin-coverage alarm blamed GitHub for it. Coverage stopped where
+    the log did, which left it measuring fifteen hours of the day. The log
+    now keeps the day.
     """
 
     NOW = "2026-03-10T12:50:00+00:00"
@@ -432,10 +434,87 @@ class TestCoverageStopsWhereTheRunLogDoes:
                              "searches_failed": 0})
         return rows            # newest first, as State.record_run keeps them
 
-    def test_a_full_log_is_measured_from_its_oldest_run(self):
+    def cut_at_sixty(self):
+        """The log as a check before this change left it."""
+        from autotrader.state import State
+        state = State({"version": 2, "listings": {}, "searches": {},
+                       "runs": self.firings()[:60],
+                       "watch_started": self.firings()[-1]["at"]})
+        state.upgrade()
+        return state.runs
+
+    def recorded(self, days=3):
+        """Every firing written down by State.record_run, oldest first."""
+        from autotrader.state import State
+        state = State({"version": 2, "listings": {}, "searches": {}, "runs": []})
+        for run in reversed(self.firings(days)):
+            state.record_run(run)
+        return state
+
+    def test_the_log_keeps_the_day(self):
+        from datetime import timedelta
         from autotrader import insight
-        from autotrader.state import MAX_RUN_HISTORY
-        kept = self.firings()[:MAX_RUN_HISTORY]
+        from autotrader.state import RUN_LOG_HOURS
+        runs = self.recorded().runs
+        # Thirty hours of four firings an hour, both ends, and the one
+        # before them.
+        assert len(runs) == RUN_LOG_HOURS * 4 + 2
+        reach = clock.parse(runs[0]["at"]) - clock.parse(runs[-1]["at"])
+        assert timedelta(hours=RUN_LOG_HOURS) < reach < timedelta(hours=RUN_LOG_HOURS + 1)
+        cov = insight.coverage(runs, 120, now=clock.parse(self.NOW),
+                               since_change=None)
+        assert cov["truncated"] is False and cov["window_hours"] == 24.0
+        assert cov["pct"] == 100.0 and cov["pct_scheduled"] == 100.0, cov
+        assert cov["longest_gap_minutes"] <= 120, cov
+        cost = insight.minutes_spent(runs, now=clock.parse(self.NOW))
+        assert cost["window_hours"] == 24 and cost["firings"] == 96
+
+    def test_a_stand_down_keeps_only_what_it_has_to_say(self):
+        """Twice as many runs kept, in less room than the sixty took."""
+        import json
+        from autotrader.runner import RunReport
+        from autotrader.state import MAX_RUN_HISTORY, State
+
+        def full(run):
+            report = RunReport(trigger=run["trigger"], skipped=run["skipped"],
+                               searches_run=run["searches_run"],
+                               listings_seen=0 if run["skipped"] else 40)
+            return {"at": run["at"], **report.to_dict()}
+
+        state = State({"version": 2, "listings": {}, "searches": {}, "runs": []})
+        for run in reversed(self.firings()):
+            state.record_run(full(run))
+        runs = state.runs
+        before = [full(r) for r in self.firings()[:60]]
+        assert len(runs) > 2 * len(before) and len(runs) < MAX_RUN_HISTORY
+        assert len(json.dumps(runs)) < len(json.dumps(before))
+        stood = [r for r in runs if r.get("skipped")]
+        assert stood and all(set(r) <= {"at", "ok", "skipped", "duration_s",
+                                        "trigger", "validation_ok",
+                                        "earlier_runs_dropped"} for r in stood)
+        # A check is kept whole.
+        assert set(next(r for r in runs if not r.get("skipped"))) >= set(before[0])
+
+    def test_a_long_silence_before_the_last_run_is_still_a_gap(self):
+        """The log is kept back from its newest run, and keeps the run before
+        those hours: after a day and a half with no run, the one run that
+        followed would otherwise be the whole log, and the day before it
+        would read as unknown rather than as a day with no check."""
+        from datetime import timedelta
+        from autotrader import insight
+        state = self.recorded()
+        late = clock.parse(self.NOW) + timedelta(hours=40)
+        state.record_run({"at": late.isoformat(timespec="seconds"),
+                          "trigger": "schedule", "ok": True, "skipped": False,
+                          "searches_run": 2, "searches_failed": 0})
+        cov = insight.coverage(state.runs, 120, now=late, since_change=None)
+        assert cov["truncated"] is False
+        assert cov["longest_gap_minutes"] >= 24 * 60 - 1, cov
+        assert cov["pct"] < 10, cov
+
+    def test_a_log_cut_at_sixty_is_measured_from_its_oldest_run(self):
+        from autotrader import insight
+        kept = self.cut_at_sixty()
         cov = insight.coverage(kept, 120, now=clock.parse(self.NOW),
                                since_change=None)
         assert cov["truncated"] is True
@@ -457,11 +536,24 @@ class TestCoverageStopsWhereTheRunLogDoes:
 
     def test_the_minutes_spent_say_how_far_back_they_reach(self):
         from autotrader import insight
-        from autotrader.state import MAX_RUN_HISTORY
-        kept = self.firings()[:MAX_RUN_HISTORY]
+        kept = self.cut_at_sixty()
         cost = insight.minutes_spent(kept, now=clock.parse(self.NOW))
         assert cost["window_hours"] < 24
-        assert cost["firings"] == MAX_RUN_HISTORY
+        assert cost["firings"] == 60
+
+    def test_a_full_log_is_measured_from_its_oldest_run(self):
+        """However it got there: a watch started far more often than planned
+        fills the log before a day is out."""
+        from datetime import timedelta
+        from autotrader import insight
+        from autotrader.state import MAX_RUN_HISTORY
+        now = clock.parse(self.NOW)
+        kept = [{"at": (now - timedelta(minutes=3 * i)).isoformat(),
+                 "trigger": "schedule", "ok": True, "skipped": i % 40 != 0,
+                 "searches_run": int(i % 40 == 0)}
+                for i in range(MAX_RUN_HISTORY)]
+        cov = insight.coverage(kept, 120, now=now, since_change=None)
+        assert cov["truncated"] is True and cov["window_hours"] < 24
 
 
 def test_the_card_says_how_far_apart_on_the_odometer_a_peer_can_be():
