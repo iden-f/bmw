@@ -238,9 +238,11 @@ class TestTheOtherEditors:
             ctx.close()
 
     @pytest.mark.parametrize("link,words", [
-        ("http://www.autotrader.ca/cars/honda/civic/", "the bot takes only https:// links"),
+        ("http://www.autotrader.ca/cars/honda/civic/", "takes only addresses that start with https://"),
         ("https://fakeautotrader.ca/cars/honda/civic/", "That is a link to fakeautotrader.ca"),
-        ("https://www.autotrader.ca.example.invalid/cars/", "not autotrader.ca"),
+        ("https://www.autotrader.ca.example.invalid/cars/", "not www.autotrader.ca"),
+        # The home page and one car's page are not searches: the bot refuses both.
+        ("https://www.autotrader.ca", "the autotrader.ca home page"),
     ])
     def test_a_link_the_bot_would_refuse_is_not_offered(self, browser, site, payload,
                                                         link, words):
@@ -254,15 +256,15 @@ class TestTheOtherEditors:
             ctx.close()
 
     def test_a_link_is_sent_as_the_browser_reads_it(self, browser, site, payload):
-        """With the slash the bot's own check looks for."""
+        """In the form the bot's own check reads: the name in lower case."""
         ctx, page, _, _ = _open(browser, site, payload, "#/searches")
         try:
             _record_the_asks(page)
-            page.fill("#paste", "https://www.autotrader.ca")
+            page.fill("#paste", "https://WWW.AUTOTRADER.CA/cars/honda/civic/")
             page.wait_for_timeout(100)
             assert _asks(page, "Add this search") == 1
             assert page.evaluate("window.__asked").pop() == [
-                {"action": "add-search", "url": "https://www.autotrader.ca/"}]
+                {"action": "add-search", "url": "https://www.autotrader.ca/cars/honda/civic/"}]
         finally:
             ctx.close()
 

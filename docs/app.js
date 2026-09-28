@@ -433,7 +433,8 @@ function comparableSays(cmp, l) {
         tone: '',
         badge: `at the median of ${num(cmp.sample)}`,
         sentence: `At the median ${money(cmp.median)} of ${plural(cmp.sample, 'comparable')} `
-          + `— ${esc(cmp.cohort || 'cars like it')}, each within a third of this car's odometer.`,
+          + `— ${esc(cmp.cohort || 'cars like it')}, `
+          + `each with about two-thirds to one and a half times this car's kilometres.`,
       };
     }
     return {
