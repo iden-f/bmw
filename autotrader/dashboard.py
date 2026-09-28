@@ -78,6 +78,9 @@ def _area_of(filters: dict[str, Any]) -> dict[str, Any] | None:
     elif near:
         out["reference"] = near
         out["text"] = f"near {near}"
+        # Whether a distance could be measured from it: control refuses one
+        # for a place it cannot find, so the page offers the box only here.
+        out["resolved"] = geo.locate_reference(near) is not None
     elif radius:
         # A distance with no place to measure from is not applied at all.
         out["radius_km"] = radius

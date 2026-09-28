@@ -315,8 +315,28 @@ function photoUrl(src) {
       return URL.createObjectURL(new Blob([plain], { type }));
     })());
     vault.photos.get(src).catch(() => vault.photos.delete(src));
+    if (vault.photos.size > PHOTOS_KEPT && !photoTrim) photoTrim = setTimeout(trimPhotos, 1000);
   }
   return vault.photos.get(src);
+}
+
+/* Each decrypted photo is a copy of it held in memory until its blob: URL is
+   revoked, so a tab left open for days would hold every photo it ever drew.
+   Past PHOTOS_KEPT, the oldest that no image on the page names are let go;
+   one drawn again is decrypted again. Run after the drawing that asked for
+   them, so an image not yet attached is never among them. */
+const PHOTOS_KEPT = 200;
+let photoTrim = 0;
+function trimPhotos() {
+  photoTrim = 0;
+  const shown = new Set([...document.querySelectorAll('img[data-src]')]
+    .map(img => img.dataset.src));
+  for (const [src, url] of vault.photos) {
+    if (vault.photos.size <= PHOTOS_KEPT) break;
+    if (shown.has(src)) continue;
+    vault.photos.delete(src);
+    url.then(u => URL.revokeObjectURL(u), () => {});
+  }
 }
 
 /* Decrypting every photo on the page up front is wasted work on a phone, so
@@ -505,6 +525,16 @@ const live = () => (app.data?.listings || []).filter(l => l.status === 'active')
 const DAY = 86400000;
 const arrivedRecently = l => Date.parse(l.first_seen) > Date.now() - DAY;
 const visible = () => live().filter(l => !l.filtered);
+/* A car you stopped watching, which is not a car that left the market: its
+   search was taken away, or Marketplace switched off for it, and it may well
+   still be for sale. Read as the bot reads it (state.retired_by_owner), by
+   the reasons it records; an older row has only its quiet reason. */
+const WATCH_ENDED = ['its search was removed, so it is no longer watched',
+                     'Marketplace is switched off for this search'];
+const unwatched = l => l.status === 'gone' && (l.gone_reason
+  ? WATCH_ENDED.includes(l.gone_reason)
+  : l.quiet_reason === 'the search that was watching this was removed');
+const leftTheMarket = l => l.status === 'gone' && !unwatched(l);
 /* A car by its id. Indexed once per data file: one drawing of the list asks
    after every car's marks several times over, and a search each time made a
    list of 500 slow to type into. */
@@ -1076,14 +1106,17 @@ function go(view, opts = {}) {
 /* ----------------------------------------------------------------- feed */
 /* The last run that read the site: d.last_check, or, when a payload lacks
    it, the newest run that actually loaded a search. d.last_run is the last
-   resort because a run that read nothing reports empty figures. */
+   resort because a run that read nothing reports empty figures. As
+   State.last_check reads them: searches_run counts only the searches that
+   were read and searches_failed only those that were not, so any read at
+   all is a check, and a run without those counters is one if it went well. */
 function lastCheck(d) {
   if (d.last_check) return d.last_check;
   for (const run of (d.runs || [])) {
     if (run.skipped) continue;
     const ran = Number(run.searches_run) || 0;
     const failed = Number(run.searches_failed) || 0;
-    if (ran ? failed < ran : run.ok) return run;
+    if (ran > 0 || (!failed && run.ok)) return run;
   }
   return d.last_run || {};
 }
@@ -1285,7 +1318,10 @@ function eventRow(e) {
   }
   // A delivery note only when the delivery was not the ordinary one, so the
   // unusual rows stand out. The Feed's heading says what silence means.
-  if (e.filtered) sub.push(`<span>hidden — ${esc(e.filter_reason || 'a rule of yours')}</span>`);
+  // Whether a car is hidden is published only as it is now, on each of its
+  // events, and a rule set since does not reach back: so "now", never a
+  // claim that the car was hidden when this happened.
+  if (e.filtered) sub.push(`<span>hidden now — ${esc(e.filter_reason || 'a rule of yours')}</span>`);
   else if (e.delivery?.state === 'queued') sub.push('<span>queued, not sent yet</span>');
   else if (e.delivery?.state === 'quiet') sub.push(`<span>${esc(e.delivery.text)}</span>`);
   // A fault, as the sheet says, so in the fault's colour, never the green of
@@ -1328,7 +1364,8 @@ function listingPool() {
     && priceMove(l)?.delta < 0);
   else if (chip === 'new') rows = rows.filter(l => l.status === 'active' && !l.filtered && arrivedRecently(l));
   else if (chip === 'unpriced') rows = rows.filter(l => l.status === 'active' && l.unpriced && !l.filtered);
-  else if (chip === 'gone') rows = rows.filter(l => l.status === 'gone');
+  else if (chip === 'gone') rows = rows.filter(leftTheMarket);
+  else if (chip === 'unwatched') rows = rows.filter(unwatched);
   else if (chip === 'hidden') rows = rows.filter(l => l.status === 'active' && l.filtered);
   else if (chip === 'private') rows = rows.filter(l => l.status === 'active'
     && !l.filtered && l.seller_type === 'private');
@@ -1460,7 +1497,8 @@ function renderListingResults() {
     new: live().filter(l => mine(l) && kept(l) && !l.filtered && arrivedRecently(l)).length,
     unpriced: live().filter(l => mine(l) && kept(l) && l.unpriced && !l.filtered).length,
     hidden: live().filter(l => mine(l) && kept(l) && l.filtered).length,
-    gone: (app.data.listings || []).filter(l => mine(l) && kept(l) && l.status === 'gone').length,
+    gone: (app.data.listings || []).filter(l => mine(l) && kept(l) && leftTheMarket(l)).length,
+    unwatched: (app.data.listings || []).filter(l => mine(l) && kept(l) && unwatched(l)).length,
   };
   const chips = el('div', 'chips');
   chips.setAttribute('role', 'group');
@@ -1565,7 +1603,8 @@ function renderListingResults() {
 const CHIPS = [['all', 'Live'], ['new', 'New'], ['drops', 'Price drops'],
                ['private', 'Private sellers'], ['mine', 'Shortlisted'],
                ['unpriced', 'Call for price'], ['hidden', 'Hidden by a rule'],
-               ['gone', 'Gone'], ['dropped', 'Not interested']];
+               ['gone', 'Gone'], ['unwatched', 'No longer watched'],
+               ['dropped', 'Not interested']];
 const chipLabel = id => (CHIPS.find(c => c[0] === id) || [, id])[1];
 
 /* Zero results, and specifically why, offering back every control that is
@@ -1616,16 +1655,25 @@ function noResults() {
   };
 
   // Nothing is narrowed, but "Live" is itself a filter: an empty Live list
-  // can mean no cars, every car hidden, or every car gone, and each needs a
-  // different next step.
+  // can mean no cars, every car hidden, marked not interested, gone or no
+  // longer watched, and each needs a different next step. Each heading is
+  // true of every car it speaks for, so it names each kind that is there.
   if (!narrowing.length) {
     const all = app.data.listings || [];
     // Counted as the chip each offer opens: a car marked not interested
     // shows under its own chip and no other.
     const kept = l => !marks.of(l.id).dismissed;
     const hidden = all.filter(l => l.status === 'active' && l.filtered && kept(l));
-    const gone = all.filter(l => l.status === 'gone' && kept(l));
+    const gone = all.filter(l => leftTheMarket(l) && kept(l));
+    const ended = all.filter(l => unwatched(l) && kept(l));
     const dropped = all.filter(l => !kept(l));
+    // Live cars marked not interested: with the hidden ones, every live car.
+    const droppedLive = dropped.filter(l => l.status === 'active').length;
+    const offerDropped = () => offer({
+      what: 'your marks',
+      label: `Show the ${dropped.length} not interested`,
+      clear: () => { app.chip = 'dropped'; },
+    });
     if (!all.length) {
       s.innerHTML = `<h2>No cars yet</h2>
         <p>The searches have not turned up a car. The Searches tab says how many
@@ -1633,9 +1681,16 @@ function noResults() {
       return s;
     }
     if (hidden.length) {
-      s.innerHTML = `<h2>Every car found is hidden by one of your rules</h2>
+      s.innerHTML = droppedLive
+        ? `<h2>Every live car is hidden by a rule or marked not interested</h2>
         <p>The searches are working — they are holding
-           ${hidden.length} car${hidden.length === 1 ? '' : 's'}, and your
+           ${plural(hidden.length + droppedLive, 'live car')}. Your rules hide
+           ${num(hidden.length)} of them, and you marked the rest not interested.
+           Nothing is lost: each hidden one says which rule turned it away, and
+           loosening that rule brings it straight back.</p>`
+        : `<h2>Every live car is hidden by one of your rules</h2>
+        <p>The searches are working — they are holding
+           ${plural(hidden.length, 'live car')}, and your
            rules hide all of them. Nothing is lost: each one says which rule
            turned it away, and loosening that rule brings them straight back.</p>`;
       offer({
@@ -1643,28 +1698,48 @@ function noResults() {
         label: `Show the ${hidden.length} hidden`,
         clear: () => { app.chip = 'hidden'; },
       });
+      if (droppedLive) offerDropped();
       return s;
     }
-    if (gone.length) {
-      s.innerHTML = `<h2>Every car it was watching has left the market</h2>
+    if (droppedLive) {
+      s.innerHTML = `<h2>Every live car is one you marked not interested</h2>
+        <p>They are kept under their own chip, out of the lists you scroll.</p>`;
+      offerDropped();
+      return s;
+    }
+    if (gone.length || ended.length) {
+      s.innerHTML = !ended.length
+        ? `<h2>Every car it was watching has left the market</h2>
         <p>${gone.length} listing${gone.length === 1 ? ' has' : 's have'} come
            down and nothing new has arrived yet. They are kept with their last
-           price rather than deleted.</p>`;
-      offer({
-        what: 'the live list',
-        label: `Show the ${gone.length} gone`,
-        clear: () => { app.chip = 'gone'; },
-      });
+           price rather than deleted.</p>`
+        : `<h2>${gone.length ? 'No car is live right now'
+                             : 'Every car it holds is one it no longer watches'}</h2>
+        <p>${gone.length ? `${gone.length} listing${gone.length === 1 ? ' has' : 's have'}
+           come down. ` : ''}${plural(ended.length, 'car')} left the watch, not the
+           market, when a search was taken away or Marketplace switched off for
+           one. ${ended.length === 1 ? 'It' : 'They'} may still be for sale;
+           nothing checks ${ended.length === 1 ? 'it' : 'them'} now.</p>`;
+      if (gone.length) {
+        offer({
+          what: 'the live list',
+          label: `Show the ${gone.length} gone`,
+          clear: () => { app.chip = 'gone'; },
+        });
+      }
+      if (ended.length) {
+        offer({
+          what: 'the live list',
+          label: `Show the ${ended.length} no longer watched`,
+          clear: () => { app.chip = 'unwatched'; },
+        });
+      }
       return s;
     }
     if (dropped.length) {
       s.innerHTML = `<h2>Every car left is one you marked not interested</h2>
         <p>They are kept under their own chip, out of the lists you scroll.</p>`;
-      offer({
-        what: 'your marks',
-        label: `Show the ${dropped.length} not interested`,
-        clear: () => { app.chip = 'dropped'; },
-      });
+      offerDropped();
       return s;
     }
     s.innerHTML = `<h2>No cars yet</h2>
@@ -1690,9 +1765,10 @@ function noResults() {
           ? 'The Status tab says what the Marketplace collector read, and where each car went.'
           : live().some(l => inView(l) && siteOf(l) === 'marketplace')
             ? 'Every car on your list right now is from Marketplace.'
-            : 'Nor is a Marketplace car: every car found is hidden by a rule, gone, or marked not interested.'}</p>`;
+            : 'Nor is a Marketplace car: every car found is hidden by a rule, gone, no longer watched, or marked not interested.'}</p>`;
     } else if (app.chip !== 'all') {
-      s.innerHTML = `<h2>No car is ${esc(chipLabel(app.chip).toLowerCase())}</h2>
+      s.innerHTML = `<h2>${app.chip === 'unwatched' ? 'Every car here is still watched'
+          : `No car is ${esc(chipLabel(app.chip).toLowerCase())}`}</h2>
         <p>Every other car the searches hold is still on the Live chip.</p>`;
     } else {
       const why = search?.health?.shut_out;
@@ -1781,13 +1857,15 @@ function shot(l, cls) {
   // offline and drops the picture once the car is delisted.
   const src = l.thumb || (l.images || [])[0];
   // Say why there is no photo: the seller published none, it is not copied
-  // yet, the car is hidden (hidden cars get no copy), or it failed to load.
+  // yet, the car is hidden (hidden cars get no copy), it has left (its copy
+  // goes when it does), or it failed to load.
   const fallback = (failedToLoad) => {
     const has = (l.images || []).length;
     // A copy that exists but will not load is this device's problem (often
     // being offline), not a copy that is missing.
     const why = (failedToLoad && l.thumb) ? 'photo not loaded'
               : l.filtered ? 'not kept for hidden cars'
+              : has && l.status === 'gone' ? 'photo not kept after it left'
               : has ? 'photo not copied yet'
               : 'no photo';
     box.innerHTML = `<div class="shot__fallback">${CAR_GLYPH}
@@ -1846,8 +1924,11 @@ function card(l) {
   if (!l.filtered) b.appendChild(shot(l));
 
   const body = el('div', 'card__body');
+  // A car you stopped watching has not left the market, and says which.
+  const flagWord = kind === 'removed' && unwatched(l) ? 'No longer watched'
+    : kind ? KIND[kind].label : '';
   let flag = '';
-  if (kind) flag = `<span class="flag flag--${KIND[kind].flag}">${KIND[kind].label}</span>`;
+  if (kind) flag = `<span class="flag flag--${KIND[kind].flag}">${flagWord}</span>`;
 
   // An unpriced car is headed by its name, with "Call for price" on the line
   // under it, so the largest text on the card says what the car is.
@@ -1909,7 +1990,7 @@ function card(l) {
   // much, not only what it is. The car and its price come first, so a voice
   // can find it by name.
   const heard = [carName(l), l.unpriced ? 'call for price' : money(l.price)];
-  if (kind) heard.push(KIND[kind].label.toLowerCase());
+  if (kind) heard.push(flagWord.toLowerCase());
   if (move && !l.unpriced) {
     heard.push(`was ${money(move.was)}`,
       `${move.delta < 0 ? 'down' : 'up'} ${money(Math.abs(move.delta))}`);
@@ -2615,15 +2696,27 @@ function rulesEditor(s) {
   const bounds = app.data.bounds?.rules || {};
   const id = s.id.replace(/[^a-z0-9]/gi, '');
   const field = r => box.querySelector(`#${r.box}-${id}`);
-  const inherited = RULE_BOXES.filter(r => f[r.rule] == null && blank(r.rule) !== null);
+  // A distance needs a place to be measured from, and the bot refuses one
+  // for a search without a place it can find (control.py), so the box is
+  // offered only once it has one. s.area is the search's near as the bot
+  // reads it: its own, or the one set for every search.
+  const placed = Boolean(s.area?.reference) && s.area.resolved === true;
+  const boxes = RULE_BOXES.filter(r => placed || r.rule !== 'max_distance_km');
+  const inherited = boxes.filter(r => f[r.rule] == null && blank(r.rule) !== null);
   box.innerHTML = `
-    <div class="bar">${RULE_BOXES.map(r => `
+    <div class="bar">${boxes.map(r => `
       <label class="labelled"><span>${r.label}</span>
         <span class="field"><input type="number" inputmode="numeric" id="${r.box}-${id}"
           ${wholeNumber(bounds[r.rule])}
           placeholder="${esc(blank(r.rule) === null ? r.hint : r.says(blank(r.rule)))}"
           value="${esc(f[r.rule] ?? '')}"></span></label>`).join('')}
     </div>
+    ${placed ? '' : `<p class="note">No <b>Within km</b> box: ${s.area?.reference
+      ? `the bot cannot find ${esc(s.area.reference)}, so it has nowhere to measure a distance from`
+      : 'this search has no place to measure a distance from'}, and the bot refuses a
+      distance without one. Set <code class="mono">near</code> first, to a postcode or a
+      city and province: <code class="mono">python -m autotrader set near "…" --search
+      ${esc(s.id)}</code>, as <i>Running it locally</i> in the README says.</p>`}
     ${inherited.length ? `<p class="note">Left blank, a box takes the rule set for every
       search: ${esc(andList(inherited.map(r => `${r.label.toLowerCase()} ${r.says(blank(r.rule))}`)))}.</p>` : ''}
     <p class="why" id="pv-${id}"></p>`;
@@ -2638,24 +2731,24 @@ function rulesEditor(s) {
       const n = field(r).value.trim();
       return n === '' ? null : Number(n);
     };
-    const saved = Object.fromEntries(RULE_BOXES.map(r => [r.rule, f[r.rule] ?? null]));
+    const saved = Object.fromEntries(boxes.map(r => [r.rule, f[r.rule] ?? null]));
     // A value the bot would refuse offers nothing, unless it is the one
     // already saved and so not sent. Nor does a box a browser reads as empty
     // because what is in it is not a number ("45e", "45,000"): taken as
     // empty, it would clear the saved rule.
-    const wrong = RULE_BOXES.find(r => field(r).validity.badInput
+    const wrong = boxes.find(r => field(r).validity.badInput
       || (!field(r).validity.valid && v(r) !== saved[r.rule]));
     pv.classList.toggle('err', Boolean(wrong));
     if (wrong) {
       pv.innerHTML = needsWhole(wrong.label, bounds[wrong.rule], wrong.says);
       return;
     }
-    const rule = Object.fromEntries(RULE_BOXES.map(r => [r.rule, v(r)]));
+    const rule = Object.fromEntries(boxes.map(r => [r.rule, v(r)]));
     // Each rule as it would stand once saved: a blank box falls back.
     const at = k => rule[k] ?? blank(k);
     const pool = (app.data.listings || []).filter(l => l.status === 'active' && l.search_id === s.id);
     // A car hidden by a rule this editor does not show stays hidden. The
-    // preview re-runs only its four boxes; `filter_rule` is the bot's own
+    // preview re-runs only its boxes; `filter_rule` is the bot's own
     // verdict, named by config key. A car with no recorded rule counts as
     // held too, the safe direction.
     const elsewhere = l => l.filtered && !(l.filter_rule in rule);
@@ -2665,7 +2758,7 @@ function rulesEditor(s) {
       if (at('max_price') !== null && l.price !== null && l.price > at('max_price')) return false;
       if (at('min_year') !== null && l.year && l.year < at('min_year')) return false;
       if (at('max_year') !== null && l.year && l.year > at('max_year')) return false;
-      if (at('max_distance_km') !== null && l.distance_km !== null &&
+      if (placed && at('max_distance_km') !== null && l.distance_km !== null &&
           l.distance_km !== undefined && l.distance_km > at('max_distance_km')) return false;
       return true;
     });
@@ -2896,14 +2989,24 @@ function marketplaceSection(m) {
   const timing = collectorTiming(m);
   const session = timing.says;
   // The latest thing that went wrong: a pass that failed before it could
-  // send, or a search that did not read. Only within the last day.
+  // send, a search that did not read, or one read only in part. Only within
+  // the last day.
   const recent = at => at && Date.now() - Date.parse(at) < 864e5;
+  // Read only in part: one of its queries failed, so it counts as read (no
+  // failure in a row) and keeps the error, stamped no earlier than the read.
+  // A later whole read clears it, so it always speaks of the last read.
+  const partly = x => Boolean(x.last_error) && !x.consecutive_failures
+    && !(Date.parse(x.last_error_at) < Date.parse(x.last_ok));
   const problems = [
     last.last_failure && recent(last.last_failure.at)
       ? { at: last.last_failure.at, text: last.last_failure.error } : null,
     ...(m.searches || []).filter(x => x.consecutive_failures && x.last_error)
       .map(x => ({ at: x.last_error_at || last.received, text: `${x.name}: ${x.last_error}` })),
-  ].filter(Boolean);
+    ...(m.searches || []).filter(x => partly(x) && recent(x.last_error_at))
+      .map(x => ({ at: x.last_error_at, text: `${x.name}: read only in part (${x.last_error})` })),
+  ].filter(Boolean)
+    // Newest first, so the tile names the latest.
+    .sort((a, b) => (Date.parse(b.at) || 0) - (Date.parse(a.at) || 0));
   stats.innerHTML = `
     <div class="stat" data-tone="${quietHours > 2 ? 'bad' : 'good'}">
       <dt>Collector last heard</dt><dd>${when(last.received)}</dd>
@@ -2948,7 +3051,10 @@ function marketplaceSection(m) {
         return `<tr><td>${esc(x.name)}${aside
             ? `<br><span class="note" style="margin:0">set aside: ${aside}</span>` : ''}${also}</td>
           <td data-label="Last read">${x.last_error && x.consecutive_failures
-            ? `<span class="err">${esc(x.last_error)}</span>` : when(x.last_ok)}</td>
+            ? `<span class="err">${esc(x.last_error)}</span>`
+            : partly(x) ? `${when(x.last_ok)}<br><span class="warnt">read only in part: ${
+                esc(x.last_error)}</span>`
+            : when(x.last_ok)}</td>
           ${cell(x.breakdown ? b.read : x.last_count, 'Read')}${cell(b.other_models, 'Other models')}
           ${cell(b.hidden, 'Hidden by a rule')}${cell(b.kept, 'On your list')}</tr>`;
       }).join('') + `</tbody>`);
@@ -3023,6 +3129,19 @@ function renderStatus() {
        last check passed — it is what share of the checks it was meant to make it made.</p>`;
   host.appendChild(head);
 
+  // The site answering the newest check that went ahead with a page meant
+  // to stop robots, as the run records it. Said first and plainly: every
+  // figure below it is about checks the site let through.
+  const newest = (d.runs || []).find(r => !r.skipped);
+  if (newest?.blocked) {
+    const p = el('p', 'why measure');
+    p.style.marginBottom = 'var(--s5)';
+    p.innerHTML = `<b>autotrader.ca turned the last check away</b> ${when(newest.at)}. It
+      sent a page meant to stop robots instead of the results. Nothing is lost: the next
+      check tries again, at the usual pace rather than at once.`;
+    host.appendChild(p);
+  }
+
   // The colour goes with the number: no number, no colour.
   const covPct = coveragePct(cov);
   const covKept = whoKeptTime(cov);
@@ -3032,7 +3151,7 @@ function renderStatus() {
   stats.innerHTML = `
     <div class="stat${covKept && covKept.level !== 'all' ? ' stat--wide' : ''}"
          data-tone="${covKept && covKept.level === 'none' ? 'warn' : covTone}">
-      <dt>Coverage, ${hours(cov.window_hours || 24)}</dt>
+      <dt>Coverage, ${hours(cov.window_hours ?? 24)}</dt>
       <dd class="num">${covPct === null ? '—' : `${covPct}%`}</dd>
       <dd class="stat__note">${cov.too_short && cov.new_install
         // Under a minute old, "in its first 0 minutes" is not a sentence.
@@ -3044,8 +3163,11 @@ function renderStatus() {
           + `changed to one check every ${every(cov.expected_interval_minutes)}. `
           + `${cov.successful ?? 0} check${cov.successful === 1 ? '' : 's'} in that time.`
         : `${cov.slots_covered ?? cov.successful ?? 0} of ${cov.expected ?? 0} ${slotWord(cov)}`
-          + `${cov.partial ? ` in the ${hours(cov.window_hours)} since the schedule changed` : ''}`
-          + `${cov.new_install ? ' since it started' : ''}`
+          // The run log keeps its newest runs only; before the oldest of
+          // them nothing is known, so the window stops there, and says so.
+          + `${cov.truncated ? ` in the ${hours(cov.window_hours)} the run log reaches back`
+            : cov.partial ? ` in the ${hours(cov.window_hours)} since the schedule changed`
+            : cov.new_install ? ' since it started' : ''}`
           // `> 0`, not truthy: a count of events is never negative, even if
           // a malformed payload says so.
           + `${cov.complained > 0 ? ` · ${cov.complained} of ${cov.successful} checks complained` : ''}`
@@ -3275,7 +3397,12 @@ function renderStatus() {
       + `would ever have known about it. That is what the coverage figure is `
       + `for.`);
   }
-  if (cov.partial) {
+  if (cov.truncated) {
+    limits.push(`The run log reaches back only ${hours(cov.window_hours)}: the bot `
+      + `keeps its newest runs, and every firing is one, including those that `
+      + `stood down. Coverage is measured over those hours rather than a full `
+      + `day, because before them nothing is known either way.`);
+  } else if (cov.partial) {
     limits.push(`Coverage is measured over ${hours(cov.window_hours)} rather `
       + `than a full day, because that is how long the current schedule has `
       + `been running. It is not yet a statement about a day.`);
@@ -3574,7 +3701,13 @@ function sheetBody(l) {
   } else {
     const box = el('div', 'shotbox');
     box.style.cssText = 'width:100%;aspect-ratio:4/3;border-radius:var(--r-sm);margin-bottom:var(--s4)';
-    box.innerHTML = `<div class="shot__fallback">${CAR_GLYPH}<b>${esc(carName(l))}</b><span>${l.filtered ? 'photos not kept for hidden cars' : 'no photo published'}</span></div>`;
+    // The bot drops its copies of a car's photos once the car leaves, so a
+    // car that had photos says so rather than that it never had any.
+    const why = l.filtered ? 'photos not kept for hidden cars'
+      : !published ? 'no photo published'
+      : l.status === 'gone' ? 'photos not kept after it left'
+      : 'photos not copied yet';
+    box.innerHTML = `<div class="shot__fallback">${CAR_GLYPH}<b>${esc(carName(l))}</b><span>${why}</span></div>`;
     frag.appendChild(box);
   }
 
@@ -3586,7 +3719,8 @@ function sheetBody(l) {
   const price = el('div');
   price.style.marginBottom = 'var(--s4)';
   price.innerHTML =
-    (gone ? `<p style="margin:0 0 var(--s2)"><span class="flag flag--gone">${KIND.removed.group}${
+    (gone ? `<p style="margin:0 0 var(--s2)"><span class="flag flag--gone">${
+      unwatched(l) ? 'No longer watched' : KIND.removed.group}${
       seen ? ` · last seen ${esc(seen)}` : ''}</span></p>` : '') +
     `<div style="display:flex;align-items:baseline;gap:var(--s3);flex-wrap:wrap">
       <span class="num" style="font-size:var(--t-display);font-weight:560;letter-spacing:-.02em${
@@ -3601,7 +3735,10 @@ function sheetBody(l) {
   // Why you are seeing this, or why you did not hear about it.
   const why = el('p', 'why');
   if (l.filtered) {
-    why.innerHTML = `<b>You were not told about this.</b> It is hidden by a rule on
+    // A car told about before a rule hid it was told about all the same.
+    why.innerHTML = (l.notified_at
+      ? `<b>You were told about this</b> at ${stamp(l.notified_at)}. It is hidden now by a rule on`
+      : '<b>You were not told about this.</b> It is hidden by a rule on') + `
       ${esc(l.search_name || 'this search')}: ${esc(l.filter_reason || 'a rule of yours')}.
       It is kept and tracked so a change to it is never silently lost.`;
   } else if (l.notified_at) {

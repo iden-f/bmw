@@ -260,8 +260,8 @@ the bot stays the only writer of the watch's data.
    on AutoTrader. A car Facebook marks sold is gone at once, one unseen for
    10 days is gone quietly, and AutoTrader's absence rules never touch them.
    A search whose query for one of its models failed is read only in part:
-   what it read is taken in, its error is kept, and no car is taken for
-   gone on its word.
+   what it read is taken in, its error is kept and shown on the Status tab,
+   and no car is taken for gone on its word.
 5. **Health.** Every batch says whether it read, and whether Facebook still
    lets the collector in. A collector not heard from for two hours, or heard
    but not reading for nine (the overnight pause alone is six), raises the
@@ -322,7 +322,10 @@ manifest and icons. No build step, no framework.
   yours excludes it, and it is still kept, counted and explained.
   **Discarded** means it was never one of the search's results and is not
   kept. **Gone** means it left the site; the bot never calls a car sold,
-  because it cannot know. **Back** means gone and then listed again.
+  because it cannot know. A car you stopped watching, by removing its
+  search or switching Marketplace off for it, is not called gone: it may
+  still be for sale, and has its own chip. **Back** means gone and then
+  listed again.
 
 ## Messages it can send
 

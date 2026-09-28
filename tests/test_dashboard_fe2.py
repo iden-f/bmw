@@ -20,6 +20,8 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
+from autotrader.dashboard import _area_of
+
 from .test_dashboard_layout import _browser_path, browser, payload, site  # noqa: F401 - fixtures
 from .test_dashboard_layout import TestTheCollectorOnThePage as _Collector
 from .test_private_site import private_site  # noqa: F401 - fixture
@@ -198,7 +200,10 @@ class TestTheRulesEditor:
     ])
     def test_a_value_the_bot_would_refuse_is_not_offered(self, browser, site, payload,
                                                          box, typed, words):
-        ctx, page, _, _ = _open(browser, site, payload, "#/searches")
+        # A place to measure from, or there is no Within km box at all.
+        d = copy.deepcopy(payload)
+        d["searches"][0]["area"] = _area_of({"near": "Toronto, ON"})
+        ctx, page, _, _ = _open(browser, site, d, "#/searches")
         try:
             _type_into(page, f'input[id^="{box}-"]', typed)
             assert _asks(page, "Apply this to") == 0

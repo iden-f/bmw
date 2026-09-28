@@ -144,7 +144,10 @@ class TestEveryRejectionNamesItsRule:
         shown = set(re.findall(r"\brule: '(\w+)'", boxes.group(1)))
         assert len(shown) == 4, shown
         assert shown <= set(self.RULES), shown - set(self.RULES)
-        assert "const rule = Object.fromEntries(RULE_BOXES.map(" in source
+        # From the boxes offered: the distance box is left out of a search
+        # with no place to measure from, as the bot refuses the rule there.
+        assert "const boxes = RULE_BOXES.filter(" in source
+        assert "const rule = Object.fromEntries(boxes.map(" in source
         # And the page must hold out the ones it does not show, rather than
         # counting them as passing.
         assert "l.filtered && !(l.filter_rule in rule)" in source
