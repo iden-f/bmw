@@ -80,11 +80,15 @@ function ranked(rows, sort) {
 const NS = `atw:${location.pathname.replace(/[^/]*$/, '')}:`;
 const store = {
   persist: true,
+  // The stored text itself, or null.
+  raw(k) {
+    try { return sessionStorage.getItem(NS + k) ?? localStorage.getItem(NS + k); }
+    catch { return null; }
+  },
   get(k, d) {
-    try {
-      const v = sessionStorage.getItem(NS + k) ?? localStorage.getItem(NS + k);
-      return v === null ? d : JSON.parse(v);
-    } catch { return d; }
+    const v = store.raw(k);
+    if (v === null) return d;
+    try { return JSON.parse(v); } catch { return d; }
   },
   set(k, v) {
     try {
@@ -141,9 +145,16 @@ const app = {
   lastSeen: store.get('lastSeen', null),
   seenIds: new Set(store.get('seenIds', [])),
   freshIds: new Set(),
+  // Clears freshIds once the list has been drawn with them; see
+  // renderListingResults().
+  freshTimer: 0,
+  // How many cards the grid draws, and the filters that count is for.
+  limit: 0,
+  limitFor: '',
   draft: null,
-  // Set when the view is out of date under an open sheet: new data landed,
-  // or a mark was set. Closing the sheet redraws it.
+  // Set when the view is out of date under an open sheet, or under an edit
+  // (see busy()): new data landed, or a mark was set. Closing the sheet
+  // redraws it, and so does the clock once the edit is done.
   renderPending: false,
 };
 
@@ -431,8 +442,10 @@ function comparableSays(cmp, l) {
 }
 
 /* A label and the sentence under it, without the stutter: the label is
-   dropped when the sentence already starts with it. */
-function sentence(text, label = '') {
+   dropped when the sentence already starts with it. Not called sentence():
+   that name is the capitaliser further down, and in a script the later of
+   two declarations silently replaces the earlier everywhere. */
+function labelled(text, label = '') {
   const body = String(text || '').trim();
   if (!body) return label;
   if (!label) return body;
@@ -476,7 +489,20 @@ const live = () => (app.data?.listings || []).filter(l => l.status === 'active')
 const DAY = 86400000;
 const arrivedRecently = l => Date.parse(l.first_seen) > Date.now() - DAY;
 const visible = () => live().filter(l => !l.filtered);
-const byId = id => (app.data?.listings || []).find(l => String(l.id) === String(id));
+/* A car by its id. Indexed once per data file: one drawing of the list asks
+   after every car's marks several times over, and a search each time made a
+   list of 500 slow to type into. */
+let carIndex = { data: null, cars: new Map() };
+const byId = id => {
+  if (carIndex.data !== app.data) {
+    const cars = new Map();
+    for (const l of (app.data?.listings || [])) {
+      if (!cars.has(String(l.id))) cars.set(String(l.id), l);
+    }
+    carIndex = { data: app.data, cars };
+  }
+  return carIndex.cars.get(String(id));
+};
 
 function lastEventOf(l) {
   const h = l.price_history || [];
@@ -527,6 +553,11 @@ function whoKeptTime(cov) {
 
 const hasOutsideTimer = cov => Object.keys(cov?.by_trigger || {})
   .some(k => k.startsWith('repository_dispatch'));
+
+/* Whether checks started this way count as the schedule's: GitHub's own, or
+   an outside timer, named ("repository_dispatch:laptop") or not. The same
+   rule as insight._is_a_schedule, which did the counting. */
+const isSchedule = k => ['schedule', 'repository_dispatch'].includes(String(k).split(':')[0]);
 
 /* What started the checks, in the words of the thing that started them. */
 const TRIGGER_WORDS = {
@@ -804,11 +835,20 @@ function renderClock() {
   // collector sending batches, checks also come off-schedule; say why.
   last.title = (c.iso ? stamp(c.iso) : '') + (mt
     ? ' - the last time AutoTrader was read. Each Marketplace batch also wakes '
-      + 'the bot, which reads AutoTrader too once 90 minutes have passed.'
+      + 'the bot, which reads AutoTrader too' + (standDown(app.data)
+        ? ` once it has been ${plural(standDown(app.data), 'minute')}.` : '.')
     : '');
   document.getElementById('clock-every').textContent = c.every;
   document.getElementById('clock-next').textContent = c.next;
   document.getElementById('clock-fill').style.width = `${Math.round(c.fill * 100)}%`;
+}
+
+/* How soon after a check a firing stands down rather than check again, in
+   minutes: health.min_interval_minutes, read with the runner's own default
+   of a third of the interval. */
+function standDown(d) {
+  const due = Number(d?.coverage?.expected_interval_minutes) || 0;
+  return Number(d?.config?.health?.min_interval_minutes ?? due / 3) || 0;
 }
 
 /* The countdown has to re-read what it counts from, or a tab left open would
@@ -827,6 +867,23 @@ let lastFetchAt = 0;
 let askedAt = 0;
 const ASK_WATCH = 20 * 60000;
 
+/* Whether the open view is in the middle of an edit: a box in it has the
+   keyboard, or holds something typed and not yet sent. A redraw would throw
+   that away, and on a phone close the keyboard mid-word. The filter box on
+   Listings counts only while it has the keyboard: what it holds is applied
+   as it is typed. */
+function busy() {
+  const view = document.querySelector(`[data-view="${app.view}"]`);
+  if (!view) return false;
+  const a = document.activeElement;
+  if (a && view.contains(a) && /^(input|textarea|select)$/i.test(a.tagName)) return true;
+  // A select with no option marked as drawn opens on its first.
+  const changed = f => f.tagName === 'SELECT'
+    ? f.options.length > 0 && !([...f.options].find(o => o.defaultSelected) || f.options[0]).selected
+    : f.id !== 'q' && f.value !== f.defaultValue;
+  return [...view.querySelectorAll('input, textarea, select')].some(changed);
+}
+
 async function refreshData() {
   if (document.hidden) return;
   if (Date.now() - lastFetchAt < 60000) return;
@@ -843,9 +900,10 @@ async function refreshData() {
     marks.settle();
     if (askedAt && Date.parse(fresh.changes?.[0]?.at) >= askedAt) askedAt = 0;
     // The tabs, the pill and the strip sit outside the sheet and take the
-    // new data now; the view under an open sheet waits until it closes.
+    // new data now; the view under an open sheet waits until it closes, and
+    // a view in the middle of an edit waits until the edit is done.
     renderTabs();
-    if (sheetUp) {
+    if (sheetUp || busy()) {
       renderTrust();
       renderClock();
       app.renderPending = true;
@@ -873,6 +931,13 @@ function startClock() {
     // judged again with the strip: a tab left open must not stay green
     // while no check lands.
     renderTrust();
+    // Data that waited for an edit to finish is drawn once it has. The
+    // keyboard goes back to the same thing in the new drawing.
+    if (app.renderPending && !sheetUp && !busy()) {
+      const was = document.activeElement;
+      render();
+      if (was && !was.isConnected) refocus(was);
+    }
     // Only worth asking once the countdown is close to running out, once
     // the collector's next batch is due, or just after a change was sent:
     // each one republishes the page.
@@ -960,7 +1025,10 @@ function renderTabs() {
     if (app.view === v.id) b.setAttribute('aria-current', 'page');
     let n = '';
     if (v.id === 'feed' && unread) n = `<span class="tab__n num" data-unread="1">${unread}</span>`;
-    else if (v.id === 'listings' && app.data) n = `<span class="tab__n num">${visible().length}</span>`;
+    // What the Live chip counts: a car marked not interested is out of it.
+    else if (v.id === 'listings' && app.data) {
+      n = `<span class="tab__n num">${visible().filter(l => !marks.of(l.id).dismissed).length}</span>`;
+    }
     else if (v.id === 'searches' && app.data) n = `<span class="tab__n num">${(app.data.searches || []).length}</span>`;
     else n = '<span class="tab__n num"></span>';
     b.innerHTML = `<span>${v.label}</span>${n}`;
@@ -1093,9 +1161,11 @@ function renderFeed() {
                                   ['sent', 'Sent to your phone', sentCount]]) {
       const c = el('button', 'chip');
       c.type = 'button';
+      c.dataset.chip = id;
       c.setAttribute('aria-pressed', app.feedOnly === id ? 'true' : 'false');
       c.innerHTML = `${label}<span class="n num">${num(n)}</span>`;
-      c.addEventListener('click', () => { app.feedOnly = id; renderFeed(); });
+      // The drawing replaces the chip pressed, so the keyboard goes to its twin.
+      c.addEventListener('click', () => { app.feedOnly = id; renderFeed(); refocus(c); });
       chips.appendChild(c);
     }
     host.appendChild(chips);
@@ -1116,6 +1186,9 @@ function renderFeed() {
       app.lastSeen = new Date().toISOString();
       store.set('lastSeen', app.lastSeen);
       renderTabs(); renderFeed();
+      // The button has gone with what it marked; the keyboard stays in the
+      // view rather than falling back to the top of the page.
+      document.getElementById('main').focus({ preventScroll: true });
     });
     b.appendChild(btn);
     host.appendChild(b);
@@ -1222,7 +1295,10 @@ function listingPool() {
 
   const chip = app.chip;
   if (chip === 'all') rows = rows.filter(l => l.status === 'active' && (app.showHidden || !l.filtered));
-  else if (chip === 'drops') rows = rows.filter(l => l.status === 'active' && priceMove(l)?.delta < 0);
+  // As under New, Call for price and Private sellers, a car your rules hide
+  // is left out: it has its own chip.
+  else if (chip === 'drops') rows = rows.filter(l => l.status === 'active' && !l.filtered
+    && priceMove(l)?.delta < 0);
   else if (chip === 'new') rows = rows.filter(l => l.status === 'active' && !l.filtered && arrivedRecently(l));
   else if (chip === 'unpriced') rows = rows.filter(l => l.status === 'active' && l.unpriced && !l.filtered);
   else if (chip === 'gone') rows = rows.filter(l => l.status === 'gone');
@@ -1284,11 +1360,13 @@ function renderListings() {
   host.appendChild(bar);
   // Before any early return below: a filter that empties the list must not
   // leave the controls that could undo it dead.
+  // Typing redraws only the results under the bar. The box itself stays, so
+  // the caret stays where it was and a keyboard composing a word (Android's,
+  // or one for Chinese or Japanese) is never handed a new box mid-word.
+  // Nothing in the bar counts by the text.
   bar.querySelector('#q').addEventListener('input', e => {
     app.q = e.target.value;
-    const keep = document.activeElement === e.target;
-    renderListings();
-    if (keep) { const i = document.getElementById('q'); i.focus(); i.setSelectionRange(i.value.length, i.value.length); }
+    renderListingResults();
   });
   // A select re-renders the bar it sits in, so it hands focus back to its
   // new self: arrowing through the options from the keyboard keeps working.
@@ -1300,6 +1378,27 @@ function renderListings() {
   onPick('sort', v => { app.sort = v; });
   onPick('search-pick', v => { app.search = v; });
   onPick('site-pick', v => { app.site = v; });
+
+  const results = el('div');
+  results.id = 'listing-results';
+  host.appendChild(results);
+  renderListingResults();
+}
+
+/* How many cards are drawn at first, and how many more each press of "Show
+   more" adds. A grid of every car at once is slow to draw on a phone. */
+const LISTING_PAGE = 300;
+
+// Where the chip row was scrolled to, so a redraw leaves the chip you
+// tapped where you tapped it rather than scrolling it out of sight.
+let chipScroll = 0;
+
+/* Everything under the bar: the Marketplace line, the chips, the note on
+   the cars this page does not carry, and the grid. */
+function renderListingResults() {
+  const host = document.getElementById('listing-results');
+  if (!host) return;
+  host.innerHTML = '';
 
   const mp = app.data.marketplace;
   if (mp?.last_batch && app.site !== 'autotrader') {
@@ -1330,7 +1429,7 @@ function renderListings() {
     mine: (app.data.listings || []).filter(l => mine(l) && kept(l)
       && marks.of(l.id).shortlisted).length,
     dropped: (app.data.listings || []).filter(l => mine(l) && marks.of(l.id).dismissed).length,
-    drops: live().filter(l => mine(l) && kept(l) && priceMove(l)?.delta < 0).length,
+    drops: live().filter(l => mine(l) && kept(l) && !l.filtered && priceMove(l)?.delta < 0).length,
     new: live().filter(l => mine(l) && kept(l) && !l.filtered && arrivedRecently(l)).length,
     unpriced: live().filter(l => mine(l) && kept(l) && l.unpriced && !l.filtered).length,
     hidden: live().filter(l => mine(l) && kept(l) && l.filtered).length,
@@ -1345,31 +1444,45 @@ function renderListings() {
     if (id !== 'all' && !counts[id] && app.chip !== id) continue;
     const c = el('button', 'chip');
     c.type = 'button';
+    c.dataset.chip = id;
     c.setAttribute('aria-pressed', app.chip === id ? 'true' : 'false');
     c.innerHTML = `${label}<span class="n num">${counts[id] ?? 0}</span>`;
-    c.addEventListener('click', () => { app.chip = id; renderListings(); });
+    // The drawing replaces the chip pressed, so the keyboard goes to its twin.
+    c.addEventListener('click', () => { app.chip = id; renderListings(); refocus(c); });
     chips.appendChild(c);
   }
   if (app.chip === 'all' && counts.hidden) {
     const btn = el('button', 'chip');
     btn.type = 'button';
+    btn.dataset.chip = 'hidden-toggle';
     btn.setAttribute('aria-pressed', String(app.showHidden));
     // No count: this is a switch, and its effect is the Live count changing.
     btn.textContent = app.showHidden ? 'Hidden cars included' : 'Include hidden';
-    btn.addEventListener('click', () => { app.showHidden = !app.showHidden; renderListings(); });
+    btn.addEventListener('click', () => {
+      app.showHidden = !app.showHidden;
+      renderListings();
+      refocus(btn);
+    });
     chips.appendChild(btn);
   }
   host.appendChild(chips);
+  chips.scrollLeft = chipScroll;
+  chips.addEventListener('scroll', () => { chipScroll = chips.scrollLeft; }, { passive: true });
 
-  // The page carries at most dashboard.max_listings cars, and the ones left
-  // out are the oldest hidden ones. Say so rather than show short counts.
+  // The page carries at most dashboard.max_listings cars. The ones left out
+  // are the oldest of those that have gone or that your rules hide, unless
+  // there are more cars to buy than the page can carry. Say so rather than
+  // show short counts.
   const short = app.data.health?.left_out || 0;
   if (short && app.search === 'all') {
+    const liveLeftOut = (app.data.health?.counts?.active ?? 0) - visible().length;
     host.appendChild(el('p', 'note',
       `${num(short)} more ${short === 1 ? 'car is' : 'cars are'} stored than this `
-      + `page carries, so the counts above stop there. They are the oldest cars `
-      + `your rules hide. Raise <code class="mono">dashboard.max_listings</code> `
-      + `to bring them back.`));
+      + `page carries, so the counts above stop there. `
+      + (liveLeftOut > 0
+        ? `${num(liveLeftOut)} of them ${liveLeftOut === 1 ? 'is a car' : 'are cars'} you could buy. `
+        : 'They are the oldest of the cars that have gone or that your rules hide. ')
+      + `Raise <code class="mono">dashboard.max_listings</code> to bring them back.`));
   }
 
   const pool = listingPool();
@@ -1379,19 +1492,44 @@ function renderListings() {
     return;
   }
 
+  // "Show more" holds for as long as the list is filtered and sorted the
+  // same way; a change to any of that starts again from the top.
+  const shape = JSON.stringify([app.q, app.chip, app.sort, app.search, app.site, app.showHidden]);
+  if (app.limitFor !== shape) { app.limitFor = shape; app.limit = LISTING_PAGE; }
+  const limit = app.limit;
+
   const grid = el('div', 'grid');
   let drawn = 0;
-  for (const l of pool.has.slice(0, 300)) { grid.appendChild(card(l)); drawn++; }
-  if (pool.absent.length && drawn < 300) {
+  for (const l of pool.has.slice(0, limit)) { grid.appendChild(card(l)); drawn++; }
+  if (pool.absent.length && drawn < limit) {
     // Label the tail by what is missing ("no asking price"), not "unsortable".
     const split = el('p', 'grid__split');
     split.textContent = `${plural(pool.absent.length, 'car')} with ${pool.sort.absent}`;
     grid.appendChild(split);
-    for (const l of pool.absent.slice(0, 300 - drawn)) { grid.appendChild(card(l)); drawn++; }
+    for (const l of pool.absent.slice(0, limit - drawn)) { grid.appendChild(card(l)); drawn++; }
   }
   host.appendChild(grid);
   if (total > drawn) {
-    host.appendChild(el('p', 'note', `Showing the first ${num(drawn)} of ${num(total)}.`));
+    const more = el('div', 'bar');
+    more.style.marginTop = 'var(--s4)';
+    more.appendChild(el('p', 'note', `Showing the first ${num(drawn)} of ${num(total)}.`));
+    const b = el('button', 'btn', `Show ${num(Math.min(LISTING_PAGE, total - drawn))} more`);
+    b.type = 'button';
+    b.addEventListener('click', () => {
+      app.limit = limit + LISTING_PAGE;
+      renderListingResults();
+      // On to the first car that was not there before.
+      document.querySelectorAll('#listing-results .grid > .card')[drawn]?.focus();
+    });
+    more.appendChild(b);
+    host.appendChild(more);
+  }
+
+  // A new car rises into place once, when it first arrives, and not again
+  // each time the list is filtered. Not cleared at once: opening the tab
+  // draws it twice.
+  if (app.freshIds.size && !app.freshTimer) {
+    app.freshTimer = setTimeout(() => app.freshIds.clear(), 500);
   }
 }
 
@@ -1441,7 +1579,12 @@ function noResults() {
   const offer = choice => {
     const b = el('button', 'btn', choice.label);
     b.type = 'button';
-    b.addEventListener('click', () => { choice.clear(); renderListings(); });
+    b.addEventListener('click', () => {
+      choice.clear();
+      renderListings();
+      // The button goes with the empty state; the keyboard stays in the view.
+      document.getElementById('main').focus({ preventScroll: true });
+    });
     s.appendChild(b);
   };
 
@@ -1551,19 +1694,31 @@ const SHORTCUTS = [
   ['?', 'This list'],
 ];
 
+// What had the keyboard before the list was shown; it gets it back.
+let shortcutsFrom = null;
+
 function showShortcuts() {
   let box = document.getElementById('shortcuts');
-  if (box) { box.remove(); return; }         // pressed twice: put it away
+  if (box) { hideShortcuts(); return; }       // pressed twice: put it away
+  shortcutsFrom = document.activeElement;
   box = el('div', 'shortcuts');
   box.id = 'shortcuts';
   box.innerHTML = '<dl>' + SHORTCUTS.map(([key, what]) =>
     `<dt><kbd>${esc(key)}</kbd></dt><dd>${esc(what)}</dd>`).join('') + '</dl>';
   const close = el('button', 'btn', 'Close');
   close.type = 'button';
-  close.addEventListener('click', () => box.remove());
+  close.addEventListener('click', hideShortcuts);
   box.appendChild(close);
   document.body.appendChild(box);
   close.focus();
+}
+
+function hideShortcuts() {
+  document.getElementById('shortcuts')?.remove();
+  const was = shortcutsFrom;
+  shortcutsFrom = null;
+  if (was && was.isConnected && was !== document.body) was.focus();
+  else document.getElementById('main').focus({ preventScroll: true });
 }
 
 // h2, not h3: these sit directly under the view's h1, and a skipped heading
@@ -1572,6 +1727,21 @@ function emptyState(title, body) {
   const s = el('div', 'state');
   s.innerHTML = `<h2>${esc(title)}</h2><p>${esc(body)}</p>`;
   return s;
+}
+
+/* The data did not load: said on whichever tab is open, with a way to try
+   again that works in an installed app, which has no reload button. */
+function renderLoadError() {
+  const host = document.querySelector(`[data-view="${app.view}"]`);
+  if (!host) return;
+  host.innerHTML = '';
+  const s = emptyState('Could not load the data',
+    `The page could not read its data: ${app.loadError}. On a fresh install nothing has been published yet — run a check and it will appear.`);
+  const b = el('button', 'btn', 'Try again');
+  b.type = 'button';
+  b.addEventListener('click', () => location.reload());
+  s.appendChild(b);
+  host.appendChild(s);
 }
 
 // Reset per render: how many photos are worth blocking on. Six covers the
@@ -1849,7 +2019,10 @@ function renderMarket() {
   const head = el('div', 'view__head measure');
   // Listings counts what you can see; the market is the whole market. The
   // heading spells out the difference between the two numbers.
-  const hiddenHere = (app.data.listings || [])
+  // Counted by the bot before the page's cap, as m.live is: the cap drops
+  // hidden cars first, so counting the ones this page carries would come
+  // out short and overstate the cars you could buy.
+  const hiddenHere = app.data.health?.counts?.filtered ?? (app.data.listings || [])
     .filter(l => l.status === 'active' && l.filtered).length;
   head.innerHTML = `<h1 id="market-h">The market</h1>
     <p>What the cars say together, rather than what one says. The tiles count
@@ -2080,8 +2253,12 @@ function csvOfListings() {
                 'province', 'seller', 'status', 'filtered', 'filter_reason',
                 'first_seen', 'last_seen', 'url'];
   const cell = v => {
-    const text = v === null || v === undefined ? '' : String(v);
-    return /[",\n]/.test(text) ? '"' + text.replace(/"/g, '""') + '"' : text;
+    let text = v === null || v === undefined ? '' : String(v);
+    // Text a spreadsheet would run as a formula is written as text. Trims,
+    // sellers and places come from whoever listed the car, and a formula can
+    // reach out of the file once it is opened. Numbers are left as they are.
+    if (typeof v === 'string' && /^[=+\-@\t\r]/.test(text)) text = "'" + text;
+    return /[",\r\n]/.test(text) ? '"' + text.replace(/"/g, '""') + '"' : text;
   };
   return [cols.join(',')].concat(
     (app.data.listings || []).map(l => cols.map(c => cell(l[c])).join(','))
@@ -2177,10 +2354,26 @@ function aliasesEditor(s) {
       its spaces, or with a short trim run on after a number, it already counts.</p>`;
   const ask = el('div', 'bar');
   box.appendChild(ask);
+  // Held to what the bot takes (control._ALIAS and MAX_ALIASES), so the
+  // page never offers a list the next check would refuse whole.
+  const rule = app.data.bounds?.aliases || {};
+  let fits = () => true;
+  try {
+    const re = rule.pattern ? new RegExp(rule.pattern) : null;
+    if (re) fits = x => re.test(x);
+  } catch { /* a pattern this browser cannot read checks nothing */ }
   const update = () => {
     const list = box.querySelector('input').value.split(',').map(x => x.trim()).filter(Boolean);
     ask.innerHTML = '';
     if (JSON.stringify(list) === JSON.stringify(saved)) return;
+    const bad = list.find(x => !fits(x));
+    if (bad || (rule.most && list.length > rule.most)) {
+      ask.appendChild(el('p', 'why err', bad
+        ? `\u201c${esc(bad)}\u201d is not a model name the bot takes: letters, digits, spaces `
+          + 'and - . + / only, up to 40 characters.'
+        : `At most ${num(rule.most)} other spellings, for one search.`));
+      return;
+    }
     ask.appendChild(askButton(list.length ? 'Save these spellings' : 'Clear the spellings',
       `Other spellings for ${s.name}`,
       [{ action: 'set-rule', search: s.id, rule: 'aliases', value: list.length ? list : null }]));
@@ -2204,6 +2397,10 @@ function marketplaceSwitch(s) {
   return box;
 }
 
+/* A Marketplace place, as control._PLACE_SLUG takes it once lowercased: the
+   word in Marketplace's own web addresses. */
+const PLACE_WORD = '[A-Za-z0-9][A-Za-z0-9\\-]{1,40}';
+
 /* The Marketplace settings the watch keeps. The collector's own pace is set
    on the Mac and shown on the Status tab. */
 const MP_SETTINGS = [
@@ -2224,6 +2421,7 @@ const MP_SETTINGS = [
 ];
 function marketplaceSettings() {
   const conf = app.data.config?.marketplace || {};
+  const bounds = app.data.bounds?.marketplace || {};
   const sec = el('section', 'section');
   sec.innerHTML = `<div class="section__head"><h2>Facebook Marketplace</h2></div>
     <div class="bar">${MP_SETTINGS.map(([k, label, type, hint]) => type === 'bool' ? `
@@ -2233,7 +2431,9 @@ function marketplaceSettings() {
           <option value="true"${conf[k] ? ' selected' : ''}>Exact</option>
         </select></label>` : `
       <label class="labelled"><span>${label}</span>
-        <span class="field"><input type="${type}" id="mp-${k}" ${type === 'number' ? 'inputmode="numeric"' : ''}
+        <span class="field"><input type="${type}" id="mp-${k}"
+          ${type === 'number' ? `inputmode="numeric" ${wholeNumber(bounds[k])}` : ''}
+          ${k === 'place' ? `pattern="${PLACE_WORD}" spellcheck="false"` : ''}
           placeholder="${esc(hint)}" value="${esc(conf[k] ?? '')}"></span></label>`).join('')}
     </div>
     <dl class="kv">${MP_SETTINGS.map(([, label, , , why]) =>
@@ -2243,6 +2443,23 @@ function marketplaceSettings() {
   const ask = el('div', 'bar');
   sec.appendChild(ask);
   const update = () => {
+    ask.innerHTML = '';
+    // As on the rules: a value the bot would refuse offers nothing unless it
+    // is the one saved, and a box whose text is not a number is not taken
+    // for an empty one.
+    const wrong = MP_SETTINGS.find(([k]) => {
+      const box = sec.querySelector('#mp-' + k);
+      return box.validity.badInput
+        || (!box.validity.valid && box.value.trim() !== String(conf[k] ?? ''));
+    });
+    if (wrong) {
+      const [k, label, type] = wrong;
+      ask.appendChild(el('p', 'why err', type === 'number'
+        ? needsWhole(label, bounds[k])
+        : `<b>${esc(label)}</b> needs the word from Marketplace's own address: letters, `
+          + 'digits and hyphens. Nothing is sent until it has one.'));
+      return;
+    }
     const changes = [];
     for (const [k, , type] of MP_SETTINGS) {
       const raw = sec.querySelector('#mp-' + k).value.trim();
@@ -2252,7 +2469,6 @@ function marketplaceSettings() {
       if (now === value || (value === null && (now ?? '') === '')) continue;
       changes.push({ action: 'set-marketplace', setting: k, value });
     }
-    ask.innerHTML = '';
     if (!changes.length) return;
     ask.appendChild(askButton('Save Marketplace settings', 'Change the Marketplace settings', changes));
     ask.appendChild(el('span', 'note', CHANGE_NOTE));
@@ -2300,34 +2516,80 @@ function searchWords(s) {
   return bits.join(' · ');
 }
 
+/* The rule boxes on each search: the rule each one sets, what it says when
+   it is blank, and how its value is written. */
+const RULE_BOXES = [
+  { box: 'mx', rule: 'max_price', label: 'Max asking', hint: 'no ceiling', says: money },
+  { box: 'y0', rule: 'min_year', label: 'From year', hint: 'any', says: String },
+  { box: 'y1', rule: 'max_year', label: 'To year', hint: 'any', says: String },
+  { box: 'km', rule: 'max_distance_km', label: 'Within km', hint: 'anywhere', says: n => `${num(n)} km` },
+];
+
+/* A number box's attributes: whole numbers only, between the bounds the bot
+   holds a change to when the data carries them (control.RULE_BOUNDS and
+   MARKETPLACE_SETTINGS, published as `bounds`). */
+function wholeNumber(range) {
+  return 'step="1"' + (Array.isArray(range)
+    ? ` min="${esc(range[0])}" max="${esc(range[1])}"` : '');
+}
+
+/* What a number box needs, said in place of the change it cannot offer. */
+function needsWhole(label, range, says = num) {
+  return `<b>${esc(label)}</b> needs a whole number`
+    + (Array.isArray(range) ? ` from ${esc(says(range[0]))} to ${esc(says(range[1]))}` : '')
+    + '. Nothing is sent until it has one.';
+}
+
 function rulesEditor(s) {
   const box = el('div');
   box.style.marginTop = 'var(--s4)';
   const f = { ...(s.rules?.filters || {}) };
+  // A box left blank takes the rule set for every search, as the bot reads
+  // them (Config.rules_for) - unless this search sets that rule to none.
+  // The published settings carry those shared rules.
+  const shared = app.data.config?.filters || {};
+  const blank = k => (f[k] === null ? null : shared[k] ?? null);
+  const bounds = app.data.bounds?.rules || {};
   const id = s.id.replace(/[^a-z0-9]/gi, '');
-  const box_ = [
-    ['mx', 'Max asking', f.max_price, 'no ceiling'],
-    ['y0', 'From year', f.min_year, 'any'],
-    ['y1', 'To year', f.max_year, 'any'],
-    ['km', 'Within km', f.max_distance_km, 'anywhere'],
-  ];
+  const field = r => box.querySelector(`#${r.box}-${id}`);
+  const inherited = RULE_BOXES.filter(r => f[r.rule] == null && blank(r.rule) !== null);
   box.innerHTML = `
-    <div class="bar">${box_.map(([k, label, value, hint]) => `
-      <label class="labelled"><span>${label}</span>
-        <span class="field"><input type="number" inputmode="numeric" id="${k}-${id}"
-          placeholder="${hint}" value="${value ?? ''}"></span></label>`).join('')}
+    <div class="bar">${RULE_BOXES.map(r => `
+      <label class="labelled"><span>${r.label}</span>
+        <span class="field"><input type="number" inputmode="numeric" id="${r.box}-${id}"
+          ${wholeNumber(bounds[r.rule])}
+          placeholder="${esc(blank(r.rule) === null ? r.hint : r.says(blank(r.rule)))}"
+          value="${esc(f[r.rule] ?? '')}"></span></label>`).join('')}
     </div>
+    ${inherited.length ? `<p class="note">Left blank, a box takes the rule set for every
+      search: ${esc(andList(inherited.map(r => `${r.label.toLowerCase()} ${r.says(blank(r.rule))}`)))}.</p>` : ''}
     <p class="why" id="pv-${id}"></p>`;
   const ask = el('div', 'bar');
   ask.style.marginTop = 'var(--s3)';
   box.appendChild(ask);
 
   const preview = () => {
-    const v = k => {
-      const n = box.querySelector('#' + k + '-' + id).value.trim();
+    const pv = box.querySelector('#pv-' + id);
+    ask.innerHTML = '';
+    const v = r => {
+      const n = field(r).value.trim();
       return n === '' ? null : Number(n);
     };
-    const rule = { max_price: v('mx'), min_year: v('y0'), max_year: v('y1'), max_distance_km: v('km') };
+    const saved = Object.fromEntries(RULE_BOXES.map(r => [r.rule, f[r.rule] ?? null]));
+    // A value the bot would refuse offers nothing, unless it is the one
+    // already saved and so not sent. Nor does a box a browser reads as empty
+    // because what is in it is not a number ("45e", "45,000"): taken as
+    // empty, it would clear the saved rule.
+    const wrong = RULE_BOXES.find(r => field(r).validity.badInput
+      || (!field(r).validity.valid && v(r) !== saved[r.rule]));
+    pv.classList.toggle('err', Boolean(wrong));
+    if (wrong) {
+      pv.innerHTML = needsWhole(wrong.label, bounds[wrong.rule], wrong.says);
+      return;
+    }
+    const rule = Object.fromEntries(RULE_BOXES.map(r => [r.rule, v(r)]));
+    // Each rule as it would stand once saved: a blank box falls back.
+    const at = k => rule[k] ?? blank(k);
     const pool = (app.data.listings || []).filter(l => l.status === 'active' && l.search_id === s.id);
     // A car hidden by a rule this editor does not show stays hidden. The
     // preview re-runs only its four boxes; `filter_rule` is the bot's own
@@ -2337,17 +2599,15 @@ function rulesEditor(s) {
     const held = pool.filter(elsewhere);
     const kept = pool.filter(l => {
       if (elsewhere(l)) return false;
-      if (rule.max_price !== null && l.price !== null && l.price > rule.max_price) return false;
-      if (rule.min_year !== null && l.year && l.year < rule.min_year) return false;
-      if (rule.max_year !== null && l.year && l.year > rule.max_year) return false;
-      if (rule.max_distance_km !== null && l.distance_km !== null &&
-          l.distance_km !== undefined && l.distance_km > rule.max_distance_km) return false;
+      if (at('max_price') !== null && l.price !== null && l.price > at('max_price')) return false;
+      if (at('min_year') !== null && l.year && l.year < at('min_year')) return false;
+      if (at('max_year') !== null && l.year && l.year > at('max_year')) return false;
+      if (at('max_distance_km') !== null && l.distance_km !== null &&
+          l.distance_km !== undefined && l.distance_km > at('max_distance_km')) return false;
       return true;
     });
-    const changed = JSON.stringify(rule) !== JSON.stringify({
-      max_price: f.max_price ?? null, min_year: f.min_year ?? null,
-      max_year: f.max_year ?? null, max_distance_km: f.max_distance_km ?? null });
-    box.querySelector('#pv-' + id).innerHTML = pool.length
+    const changed = JSON.stringify(rule) !== JSON.stringify(saved);
+    pv.innerHTML = pool.length
       ? `<b>${num(kept.length)}</b> of the ${num(pool.length)} cars this search currently holds would pass`
         + (changed ? ' under the rule above.' : ' under the rule as saved.')
         + (held.length ? ` ${plural(held.length, 'car')} the bot currently hides `
@@ -2355,10 +2615,9 @@ function rulesEditor(s) {
             + 'can only re-run the four rules above.' : '')
       : 'This search is not holding any cars to test the rule against.';
 
-    ask.innerHTML = '';
     if (!changed) return;
     const instructions = Object.entries(rule)
-      .filter(([k, v]) => v !== (f[k] ?? null))
+      .filter(([k, v]) => v !== saved[k])
       .map(([k, v]) => ({ action: 'set-rule', search: s.id, rule: k, value: v }));
     if (!instructions.length) return;
     ask.appendChild(askButton(
@@ -2397,9 +2656,19 @@ function pasteALink() {
         start with <span class="mono">https://</span>.</p>`;
       return;
     }
-    if (!/autotrader\.ca$/i.test(url.hostname.replace(/^www\./, ''))) {
+    // The bot takes only https://autotrader.ca/ or https://www.autotrader.ca/
+    // (control.AUTOTRADER_LINK), so nothing else is offered: a look-alike
+    // name, another scheme, or a subdomain would only be refused later.
+    if (!/^(www\.)?autotrader\.ca$/i.test(url.hostname)) {
       out.innerHTML = `<p class="why err">That is a link to
         <b>${esc(url.hostname)}</b>, not autotrader.ca.</p>`;
+      return;
+    }
+    if (url.protocol !== 'https:') {
+      out.innerHTML = `<p class="why err">That link starts with
+        <span class="mono">${esc(url.protocol)}//</span>; the bot takes only
+        <span class="mono">https://</span> links. Copy it again from the
+        address bar.</p>`;
       return;
     }
     const q = url.searchParams;
@@ -2416,8 +2685,10 @@ function pasteALink() {
         The bot re-reads the link itself on every check, so anything it did not
         understand here is still applied by the site.</p>`;
     const bar = el('div', 'bar');
+    // The address as the browser reads it, so "https://www.autotrader.ca"
+    // arrives with the slash the bot looks for.
     bar.appendChild(askButton('Add this search', 'Add a search',
-      [{ action: 'add-search', url: raw }]));
+      [{ action: 'add-search', url: url.href }]));
     bar.appendChild(el('span', 'note', CHANGE_NOTE));
     out.appendChild(bar);
   });
@@ -2463,9 +2734,16 @@ function setupPanel(d) {
   }
   const cov = d.coverage || {};
   if (hasOutsideTimer(cov)) {
+    // In the schedule's own numbers, which the owner can change: the strip
+    // at the top of the page already counts in them.
+    const due = Number(cov.expected_interval_minutes) || 0;
+    const floor = standDown(d);
     add('ok', `Checks kept on time by ${esc(triggerName(cov.timekeeper) || 'an outside timer')}`,
-      'A check is due every two hours. Each Marketplace batch also wakes the bot, which '
-      + 'reads AutoTrader too once 90 minutes have passed, so checks land 90 to 120 minutes apart.');
+      (due ? `A check is due every ${every(due)}.` : '')
+      + (mt ? ' Each Marketplace batch also wakes the bot, which reads AutoTrader too'
+          + (!floor ? '.' : ` once it has been ${plural(floor, 'minute')}`
+            + (floor < due ? `, so checks land ${num(floor)} to ${num(due)} minutes apart.` : '.'))
+        : ''));
   } else {
     add('todo', "Only GitHub's schedule starts checks",
       'It runs late or not at all. The Marketplace collector keeps time when it runs; '
@@ -2659,7 +2937,7 @@ function renderStatus() {
         : covKept.level === 'none'
           ? `<b>The schedule filled none of them.</b> Every check came from `
             + `${andList(Object.keys(cov.by_trigger || {})
-                  .filter(k => k !== 'schedule' && k !== 'repository_dispatch')
+                  .filter(k => !isSchedule(k))
                   .map(triggerWord))}.`
             // "Stop doing that" only applies to triggers the bot can name;
             // an unattributed run might have been the schedule.
@@ -2670,7 +2948,7 @@ function renderStatus() {
           : `${num(covKept.mine)} of those ${num(covKept.all)} came from the `
             + `schedule; the rest from `
             + `${andList(Object.keys(cov.by_trigger || {})
-                  .filter(k => k !== 'schedule' && k !== 'repository_dispatch')
+                  .filter(k => !isSchedule(k))
                   .map(triggerWord))}.`
       }</dd>` : ''}</div>
     <div class="stat"><dt>Last good check</dt><dd>${when(run.at)}</dd>
@@ -2839,7 +3117,7 @@ function renderStatus() {
     Object.entries(d.channels || {})
       .filter(([name, c]) => !c.active && c.disabled_reason && !(c.missing || []).length)
       .map(([name, c]) => `<tr><td>${esc(c.label || name)}</td>
-        <td colspan="2" class="note">${esc(sentence(c.disabled_reason, 'Switched off'))}</td></tr>`).join('') +
+        <td colspan="2" class="note">${esc(sentence(labelled(c.disabled_reason, 'Switched off')))}</td></tr>`).join('') +
     `</tbody>`;
   s2.appendChild(table(channelsHtml));
   if (d.notify?.ntfy_url) s2.appendChild(onYourPhone(d.notify));
@@ -2954,7 +3232,14 @@ function askButton(label, title, instructions, prose) {
   a.target = '_blank'; a.rel = 'noopener';
   a.style.cssText = 'display:inline-flex;align-items:center;text-decoration:none';
   a.setAttribute('aria-disabled', 'true');
-  a.addEventListener('click', () => { askedAt = Date.now(); });
+  a.addEventListener('click', () => {
+    askedAt = Date.now();
+    // What was typed beside it has been sent: from here the page may redraw
+    // it with whatever the bot publishes (see busy()).
+    const own = a.closest('section');
+    for (const f of own?.querySelectorAll('input, textarea') || []) f.defaultValue = f.value;
+    for (const o of own?.querySelectorAll('option') || []) o.defaultSelected = o.selected;
+  });
   askUrl(title, instructions, prose).then(url => {
     a.href = url;
     a.removeAttribute('aria-disabled');
@@ -2977,7 +3262,15 @@ const MARK_KEYS = ['shortlisted', 'muted', 'dismissed', 'note'];
 const MARK_GRACE = 30 * 60000;
 const markSays = (m, k) => k === 'note' ? String(m[k] || '') : Boolean(m[k]);
 const marks = {
-  all() { return store.get('marks', {}); },
+  // Read afresh only when the stored text changes: one drawing of the list
+  // asks after every car's marks several times over.
+  seen: undefined,
+  held: {},
+  all() {
+    const raw = store.raw('marks');
+    if (raw !== this.seen) { this.seen = raw; this.held = store.get('marks', {}); }
+    return this.held;
+  },
   of(id) {
     const local = { ...(this.all()[String(id)] || {}) };
     delete local.at;
@@ -3082,9 +3375,14 @@ function closeSheet() {
 }
 
 /* Focus back on the control the sheet was opened from, or on its twin - the
-   same car, drawn the same way - when a re-render has replaced it. */
+   same car, drawn the same way, or the same chip - when a re-render has
+   replaced it. */
 function refocus(was) {
   if (was && was.isConnected) { was.focus(); return; }
+  const chip = was?.dataset?.chip;
+  const twinChip = chip && document.querySelector(
+    `[data-view="${app.view}"] .chips [data-chip="${CSS.escape(chip)}"]`);
+  if (twinChip) { twinChip.focus(); return; }
   const id = was?.dataset?.id;
   const drawn = was?.classList?.contains('card') ? '.card'
     : was?.classList?.contains('ev') ? '.ev' : '';
@@ -3195,9 +3493,10 @@ function sheetBody(l) {
     // not the car.
     [`Asking ${PER_KM}`, l.per_1000km ? money(l.per_1000km)
       : l.per_1000km_why ? `not shown — ${l.per_1000km_why}` : null],
+    // Plain text, like every value in this list: they are escaped once, below.
     ['Distance', (l.distance_km ?? null) === null ? null
-      : l.distance_km < 1 ? `in ${esc(l.distance_from || 'your area')}`
-      : `${km(l.distance_km)} km from ${esc(l.distance_from || 'home')}`],
+      : l.distance_km < 1 ? `in ${l.distance_from || 'your area'}`
+      : `${km(l.distance_km)} km from ${l.distance_from || 'home'}`],
     [gone ? 'Was on the market' : 'On the market',
       l.days_listed === undefined ? null : daysListed(l.days_listed)], ['Colour', l.color], ['Body', l.body],
     ['Transmission', l.transmission], ['Drivetrain', l.drivetrain], ['Fuel', l.fuel],
@@ -3208,7 +3507,9 @@ function sheetBody(l) {
   spec.appendChild(kv);
   const extras = carExtras(l);
   if (extras.length) {
-    spec.appendChild(el('p', 'note', 'Dealer copy: ' + extras.join(' · ')));
+    // The seller's own words, so each piece is escaped: a title is whatever
+    // a dealer, or anyone on Marketplace, chose to type.
+    spec.appendChild(el('p', 'note', 'Dealer copy: ' + extras.map(esc).join(' · ')));
   }
   host_append(spec, frag);
 
@@ -3220,7 +3521,7 @@ function sheetBody(l) {
     const ul = el('ul', 'life');
     for (const e of events) {
       const li = el('li');
-      let what = KIND[e.kind]?.rule || e.kind;
+      let what = KIND[e.kind]?.rule || esc(e.kind);
       if (e.kind === 'price_drop' || e.kind === 'price_rise') {
         what = `${money(e.old_price)} → ${money(e.new_price)} <span class="num ${e.kind === 'price_drop' ? 'drop' : 'rise'}">${signed(e.delta)}</span>`;
       }
@@ -3255,6 +3556,8 @@ function sheetBody(l) {
     b.setAttribute('aria-pressed', String(active));
     b.addEventListener('click', () => {
       marks.set(l.id, { [key]: !active });
+      // The Listings count sits outside the sheet, and takes the mark now.
+      renderTabs();
       // Instant here, permanent there: the tap lands now, and the change
       // file makes it survive a new device.
       openAsk(
@@ -3389,7 +3692,12 @@ function skeleton() {
 }
 
 function render() {
-  if (!app.data) return;
+  if (!app.data) {
+    // A load that failed says so on whichever tab is open, not only on the
+    // first one.
+    if (app.loadError) renderLoadError();
+    return;
+  }
   app.renderPending = false;
   eagerSlots = 6;
   // The masthead names every site being watched.
@@ -3442,8 +3750,12 @@ function showLock() {
     msg.textContent = '';
     try {
       await unlockWith(pass.value, document.getElementById('lock-keep').checked);
-    } catch {
-      msg.textContent = 'That passphrase does not open this dashboard.';
+    } catch (err) {
+      // A wrong key fails the check value, or AES-GCM refuses it. Anything
+      // else is not the passphrase's fault, and is said as it is.
+      const wrongKey = err?.message === 'wrong key' || err?.name === 'OperationError';
+      msg.textContent = wrongKey ? 'That passphrase does not open this dashboard.'
+        : `Could not unlock: ${err?.message || err}`;
       go.disabled = false;
       go.textContent = 'Unlock';
       pass.select();
@@ -3462,9 +3774,27 @@ async function boot() {
   if (vault.lock) {
     const lockNow = document.getElementById('lock-now');
     lockNow.addEventListener('click', lockAgain);
+    // A browser decrypts only on a secure page: over plain http:// there is
+    // no WebCrypto at all, and every passphrase would read as wrong.
+    if (!(window.isSecureContext && window.crypto?.subtle)) { insecureLock(); return; }
     if (!(await savedKey())) { showLock(); return; }
   }
   start();
+}
+
+/* The lock, on a page that cannot unlock: say why, and where it can. */
+function insecureLock() {
+  showLock();
+  const msg = document.getElementById('lock-msg');
+  const where = `https://${location.host}${location.pathname}`;
+  msg.textContent = 'This page can only be unlocked over a secure connection. Open it at ';
+  const a = el('a');
+  a.href = where;
+  a.textContent = where;
+  msg.appendChild(a);
+  msg.appendChild(document.createTextNode('.'));
+  document.getElementById('lock-pass').disabled = true;
+  document.getElementById('lock-go').disabled = true;
 }
 
 async function start() {
@@ -3485,11 +3815,11 @@ async function start() {
       const pill = document.getElementById('trust');
       pill.dataset.state = 'bad';
       document.getElementById('trust-text').textContent = 'No data';
-      document.querySelector('[data-view="feed"]').innerHTML = '';
-      const s = emptyState('Could not load the data',
-        `The page could not read its data: ${err.message}. On a fresh install nothing has been published yet — run a check and it will appear.`);
-      document.querySelector('[data-view="feed"]').appendChild(s);
       renderTabs();
+      renderLoadError();
+      // An installed app has no reload button of its own: a connection that
+      // comes back tries again by itself.
+      window.addEventListener('online', () => location.reload(), { once: true });
       return;
     }
   }
@@ -3553,9 +3883,12 @@ async function start() {
     // Escape gets you out of whatever you are in, innermost first.
     if (e.key === 'Escape') {
       if (sheetOpen) { closeSheet(); return; }
+      if (document.getElementById('shortcuts')) { hideShortcuts(); return; }
       if (typing && document.activeElement.id === 'q' && app.q) {
+        // Emptied in place, so the keyboard stays in the box.
+        document.activeElement.value = '';
         app.q = '';
-        renderListings();
+        renderListingResults();
         return;
       }
     }

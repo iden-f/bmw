@@ -633,6 +633,9 @@ select:hover,.btn:hover{ background:var(--surface-2); }
     /* Full-bleed so a chip scrolled to the edge is not clipped by the gutter,
        with the gutter restored as padding inside. */
     margin-inline:calc(var(--s4) * -1); padding-inline:var(--s4);
+    /* The snap points sit inside that padding too, or the row would start
+       scrolled by it, with the first chip and its focus ring on the edge. */
+    scroll-padding-inline:var(--s4);
     /* Room for the focus ring, which is outside the chip's own box. */
     padding-block:3px;
     /* The row is cut off, so say so: the last few pixels fade out. */

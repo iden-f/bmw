@@ -12,7 +12,7 @@
  * On a private site everything cached here is ciphertext. Nothing decrypted
  * is ever written to a cache.
  */
-const BUILD = '83cf69b8172b';
+const BUILD = 'a753ec17de53';
 const SHELL = `atw-shell-${BUILD}`;
 const DATA = `atw-data-${BUILD}`;
 const PHOTOS = 'atw-photos';
