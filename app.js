@@ -1,0 +1,4256 @@
+/* AutoTrader Watch - the dashboard.
+ *
+ * No framework and no build step: the bot publishes this page without node,
+ * and every dependency is one more thing that can be down on a phone.
+ *
+ * Everything here reads docs/data.json, which the bot rewrites after every
+ * check. Anything the bot can compute once is computed there (see
+ * autotrader/insight.py), because only the bot has the whole history.
+ */
+'use strict';
+
+const VIEWS = [
+  { id: 'feed', label: 'Feed' },
+  { id: 'listings', label: 'Listings' },
+  { id: 'market', label: 'Market' },
+  { id: 'searches', label: 'Searches' },
+  { id: 'status', label: 'Status' },
+];
+
+const KIND = {
+  new:        { label: 'New',        group: 'New to the market',  flag: 'new',    rule: 'Appeared on the site' },
+  price_drop: { label: 'Price drop', group: 'Price drops',        flag: 'drop',   rule: 'Asking price came down' },
+  price_rise: { label: 'Price rise', group: 'Price rises',        flag: 'rise',   rule: 'Asking price went up' },
+  priced:     { label: 'Now priced', group: 'Now priced',         flag: 'priced', rule: 'Call-for-price car named a figure' },
+  removed:    { label: 'Gone',       group: 'Gone from the site', flag: 'gone',   rule: 'No longer on the site' },
+  relisted:   { label: 'Back',       group: 'Back on the market', flag: 'back',   rule: 'Listed again after going' },
+  qualified:  { label: 'In range',   group: 'Back inside your rules', flag: 'back',
+                rule: 'A rule of yours stopped hiding it' },
+  photos:     { label: 'Photos',     group: 'Can be looked at now', flag: 'new',
+                rule: 'First photos on a listing that had none' },
+  seller:     { label: 'Seller',     group: 'Changed hands', flag: 'back',
+                rule: 'Moved between a private seller and a dealer' },
+};
+// "qualified" ranks ahead of "new": a car crossing back into your rules is
+// announced once, while a new listing will still be there tomorrow.
+const KIND_ORDER = ['price_drop', 'qualified', 'new', 'priced', 'price_rise',
+                    'relisted', 'seller', 'photos', 'removed'];
+
+/* No sort ranks a missing value as the worst value: a "call for price" car is
+   not the most expensive one. Rows with nothing to rank are set apart and
+   labelled instead (see ranked()). */
+const SORTS = [
+  { id: 'newest',   label: 'Newest first',       absent: 'no first-seen date',
+    get: l => { const t = Date.parse(l.first_seen); return Number.isFinite(t) ? -t : null; } },
+  { id: 'price',    label: 'Asking, low first',  absent: 'no asking price',
+    get: l => l.price ?? null },
+  { id: 'priced',   label: 'Asking, high first', absent: 'no asking price',
+    get: l => l.price == null ? null : -l.price },
+  // No "price per 1,000 km" sort: it ranks by odometer with a dollar sign on
+  // it. A "best value" sort would rank by comparables.pct, which only makes
+  // sense once most cars carry one.
+  { id: 'year',     label: 'Newest year',        absent: 'no model year',
+    get: l => l.year ? -l.year : null },
+  { id: 'km',       label: 'Lowest odometer',    absent: 'no odometer reading',
+    get: l => l.mileage_km ?? null },
+  { id: 'distance', label: 'Closest',            absent: 'no distance from you',
+    get: l => l.distance_km ?? null },
+  { id: 'days',     label: 'Longest listed',     absent: 'no first-seen date',
+    get: l => l.days_listed == null ? null : -l.days_listed },
+];
+
+/* Split, then sort. A row whose value the sort cannot read sits outside the
+   ranking, not at its bottom. That tail is ordered newest-first, which makes
+   no claim about the metric that could not be read. */
+function ranked(rows, sort) {
+  const has = [], absent = [];
+  for (const l of rows) (sort.get(l) == null ? absent : has).push(l);
+  has.sort((a, b) => {
+    const x = sort.get(a), y = sort.get(b);
+    return x === y ? 0 : (x < y ? -1 : 1);
+  });
+  absent.sort((a, b) => (Date.parse(b.first_seen) || 0) - (Date.parse(a.first_seen) || 0));
+  return { has, absent };
+}
+
+/* Everything this page keeps in the browser. Keys are namespaced by the
+   site's path: every project site of a GitHub account shares one origin.
+   Until the owner chooses to keep this device unlocked, nothing outlives
+   the tab - it goes to sessionStorage. */
+const NS = `atw:${location.pathname.replace(/[^/]*$/, '')}:`;
+const store = {
+  persist: true,
+  // The stored text itself, or null.
+  raw(k) {
+    try { return sessionStorage.getItem(NS + k) ?? localStorage.getItem(NS + k); }
+    catch { return null; }
+  },
+  get(k, d) {
+    const v = store.raw(k);
+    if (v === null) return d;
+    try { return JSON.parse(v); } catch { return d; }
+  },
+  set(k, v) {
+    try {
+      const s = JSON.stringify(v);
+      if (!store.persist) { sessionStorage.setItem(NS + k, s); return; }
+      localStorage.setItem(NS + k, s);
+      // get() reads the tab's copy first, so a copy left there from an
+      // earlier, unkept unlock would hide this write from then on.
+      sessionStorage.removeItem(NS + k);
+    } catch { /* storage blocked */ }
+  },
+  /* Once the owner chooses to keep this device unlocked, what the tab kept
+     for itself until then moves onto the device with it. */
+  keep() {
+    try {
+      for (const k of Object.keys(sessionStorage)) {
+        if (!k.startsWith(NS)) continue;
+        localStorage.setItem(k, sessionStorage.getItem(k));
+        sessionStorage.removeItem(k);
+      }
+    } catch { /* storage blocked */ }
+  },
+  forget() {
+    for (const area of [localStorage, sessionStorage]) {
+      try {
+        for (const k of Object.keys(area)) if (k.startsWith(NS)) area.removeItem(k);
+      } catch { /* storage blocked */ }
+    }
+  },
+};
+// Unprefixed keys from before the namespace: only this page ever wrote them.
+try {
+  for (const k of ['seenIds', 'marks', 'lastSeen', 'lastTrust', 'welcomed', 'vaultKey']) {
+    localStorage.removeItem(k);
+  }
+} catch { /* storage blocked */ }
+
+const app = {
+  data: null,
+  view: 'feed',
+  offline: false,
+  loadError: null,
+  q: '',
+  sort: 'newest',
+  chip: 'all',
+  search: 'all',
+  // Which site's cars: 'all', 'autotrader' or 'marketplace'. Only offered
+  // once a Marketplace collector is in use.
+  site: 'all',
+  showHidden: false,
+  // Feed slice: everything that happened, or only what reached a phone. Not
+  // persisted, like every filter here, so each visit starts unfiltered.
+  feedOnly: 'all',
+  lastSeen: store.get('lastSeen', null),
+  seenIds: new Set(store.get('seenIds', [])),
+  freshIds: new Set(),
+  // Clears freshIds once the list has been drawn with them; see
+  // renderListingResults().
+  freshTimer: 0,
+  // How many cards the grid draws, and the filters that count is for.
+  limit: 0,
+  limitFor: '',
+  draft: null,
+  // Set when the view is out of date under an open sheet, or under an edit
+  // (see busy()): new data landed, or a mark was set. Closing the sheet
+  // redraws it, and so does the clock once the edit is done.
+  renderPending: false,
+};
+
+/* ------------------------------------------------------------------ vault
+   The published site carries only ciphertext: data.enc, and photos under
+   hashed names. lock.json says how to turn a passphrase into the key
+   (PBKDF2-SHA256), and holds a check value that proves a key right. The
+   format is autotrader/vault.py's, read here with WebCrypto. A site without
+   lock.json is a local, unencrypted build and reads data.json as it is. */
+const vault = { lock: null, enc: null, name: null, photos: new Map() };
+const te = new TextEncoder();
+const fromB64 = s => Uint8Array.from(atob(s), c => c.charCodeAt(0));
+const toB64 = bytes => btoa(String.fromCharCode(...new Uint8Array(bytes)));
+const hex = buf => [...new Uint8Array(buf)]
+  .map(b => b.toString(16).padStart(2, '0')).join('');
+const VAULT_KEY = 'vaultKey';
+
+const hmacKey = raw => crypto.subtle.importKey(
+  'raw', raw, { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']);
+
+async function deriveMaster(passphrase, lock) {
+  const base = await crypto.subtle.importKey(
+    'raw', te.encode(passphrase), 'PBKDF2', false, ['deriveBits']);
+  return new Uint8Array(await crypto.subtle.deriveBits(
+    { name: 'PBKDF2', hash: 'SHA-256', salt: fromB64(lock.kdf.salt),
+      iterations: lock.kdf.iterations }, base, 256));
+}
+
+async function unsealBytes(key, buf, name) {
+  const b = new Uint8Array(buf);
+  if (b.length < 33 || b[0] !== 0x41 || b[1] !== 0x54 || b[2] !== 0x57 || b[3] !== 1) {
+    throw new Error('not a vault file');
+  }
+  let body = new Uint8Array(await crypto.subtle.decrypt(
+    { name: 'AES-GCM', iv: b.slice(5, 17), additionalData: te.encode(name) },
+    key, b.slice(17)));
+  // Padded to a size bucket: a length prefix, the data, then zeros.
+  if (b[4] & 2) {
+    const used = new DataView(body.buffer).getUint32(0);
+    if (used > body.length - 4) throw new Error('damaged padding');
+    body = body.slice(4, 4 + used);
+  }
+  if (!(b[4] & 1)) return body.buffer;
+  const stream = new Blob([body]).stream().pipeThrough(new DecompressionStream('gzip'));
+  return new Response(stream).arrayBuffer();
+}
+
+async function sealBytes(key, bytes, name) {
+  const nonce = crypto.getRandomValues(new Uint8Array(12));
+  const ct = new Uint8Array(await crypto.subtle.encrypt(
+    { name: 'AES-GCM', iv: nonce, additionalData: te.encode(name) }, key, bytes));
+  const out = new Uint8Array(17 + ct.length);
+  out.set([0x41, 0x54, 0x57, 1, 0]);
+  out.set(nonce, 5);
+  out.set(ct, 17);
+  return out;
+}
+
+/* Opens the vault with a master key, or throws. Nothing is kept unless the
+   check value decrypts, so a wrong passphrase leaves no trace. */
+async function openVault(master) {
+  const m = await hmacKey(master);
+  const encRaw = await crypto.subtle.sign('HMAC', m, te.encode('autotrader-vault/enc'));
+  const nameRaw = await crypto.subtle.sign('HMAC', m, te.encode('autotrader-vault/name'));
+  const enc = await crypto.subtle.importKey(
+    'raw', encRaw, 'AES-GCM', false, ['encrypt', 'decrypt']);
+  const check = await unsealBytes(enc, fromB64(vault.lock.check), 'check');
+  if (new TextDecoder().decode(check) !== 'autotrader-vault-check') throw new Error('wrong key');
+  vault.enc = enc;
+  vault.name = await hmacKey(nameRaw);
+}
+
+async function fetchLock() {
+  try {
+    const res = await fetch('lock.json', { cache: 'no-cache' });
+    if (res.ok) return await res.json();
+    if (res.status === 404) return null;
+  } catch { /* offline: fall back to the worker's copy */ }
+  try {
+    const hit = await caches.match('lock.json');
+    if (hit) return await hit.json();
+  } catch { /* no cache API */ }
+  return null;
+}
+
+/* The key saved on this device, if it still opens this vault. A new
+   passphrase means a new salt, and the saved key simply stops working. */
+async function savedKey() {
+  store.persist = false;
+  const saved = store.get(VAULT_KEY, null);
+  if (!saved) return false;
+  if (saved.salt !== vault.lock.kdf.salt) {
+    // The old passphrase's key goes; your marks on this device stay.
+    try { localStorage.removeItem(NS + VAULT_KEY); } catch { /* storage blocked */ }
+    return false;
+  }
+  try { await openVault(fromB64(saved.key)); store.persist = true; return true; }
+  catch { store.forget(); return false; }
+}
+
+async function unlockWith(passphrase, keep) {
+  const master = await deriveMaster(passphrase, vault.lock);
+  await openVault(master);
+  store.persist = keep;
+  if (keep) {
+    store.keep();
+    store.set(VAULT_KEY, { salt: vault.lock.kdf.salt, key: toB64(master) });
+  }
+}
+
+/* Lock forgets everything this page stored, and tells its other open tabs
+   to lock too. */
+function lockAgain() {
+  store.forget();
+  try {
+    localStorage.setItem(NS + 'locked', String(Date.now()));
+    localStorage.removeItem(NS + 'locked');
+  } catch { /* storage blocked */ }
+  location.reload();
+}
+window.addEventListener('storage', e => {
+  if (vault.enc && e.key === NS + 'locked' && e.newValue) location.reload();
+});
+
+/* data.json, or its encrypted twin. Returns the parsed payload and whether
+   the service worker answered from its cache. */
+async function fetchData(init) {
+  const file = vault.lock ? 'data.enc' : 'data.json';
+  let res;
+  try { res = await fetch(file, init); }
+  catch (err) {
+    const hit = await caches.match(file).catch(() => null);
+    if (!hit) throw err;
+    res = hit;
+    res.fromCache = true;
+  }
+  if (!res.ok) throw new Error(`${file} responded ${res.status}`);
+  const cached = res.fromCache || res.headers.get('X-From-Cache') === '1';
+  if (!vault.lock) return { data: await res.json(), cached };
+  const plain = await unsealBytes(vault.enc, await res.arrayBuffer(), 'data.json');
+  return { data: JSON.parse(new TextDecoder().decode(plain)), cached };
+}
+
+/* A photo's address. Ours are stored as thumbs/<hmac of the name>.bin and
+   decrypted into a blob: URL; anything else is used as it is. */
+function photoUrl(src) {
+  if (!vault.lock || !String(src).startsWith('thumbs/')) return Promise.resolve(src);
+  if (!vault.photos.has(src)) {
+    vault.photos.set(src, (async () => {
+      const file = src.slice('thumbs/'.length);
+      const sig = await crypto.subtle.sign('HMAC', vault.name, te.encode(`photo/${file}`));
+      const stored = `thumbs/${hex(sig).slice(0, 32)}.bin`;
+      const res = await fetch(stored);
+      if (!res.ok) throw new Error(`${res.status}`);
+      const plain = await unsealBytes(vault.enc, await res.arrayBuffer(), stored);
+      const type = /\.webp$/i.test(file) ? 'image/webp'
+                 : /\.png$/i.test(file) ? 'image/png' : 'image/jpeg';
+      return URL.createObjectURL(new Blob([plain], { type }));
+    })());
+    vault.photos.get(src).catch(() => vault.photos.delete(src));
+    if (vault.photos.size > PHOTOS_KEPT && !photoTrim) photoTrim = setTimeout(trimPhotos, 1000);
+  }
+  return vault.photos.get(src);
+}
+
+/* Each decrypted photo is a copy of it held in memory until its blob: URL is
+   revoked, so a tab left open for days would hold every photo it ever drew.
+   Past PHOTOS_KEPT, the oldest that no image on the page names are let go;
+   one drawn again is decrypted again. Run after the drawing that asked for
+   them, so an image not yet attached is never among them. */
+const PHOTOS_KEPT = 200;
+let photoTrim = 0;
+function trimPhotos() {
+  photoTrim = 0;
+  const shown = new Set([...document.querySelectorAll('img[data-src]')]
+    .map(img => img.dataset.src));
+  for (const [src, url] of vault.photos) {
+    if (vault.photos.size <= PHOTOS_KEPT) break;
+    if (shown.has(src)) continue;
+    vault.photos.delete(src);
+    url.then(u => URL.revokeObjectURL(u), () => {});
+  }
+}
+
+/* Decrypting every photo on the page up front is wasted work on a phone, so
+   an encrypted photo is only fetched once it is near the screen. */
+const nearScreen = 'IntersectionObserver' in window
+  ? new IntersectionObserver(entries => {
+    for (const e of entries) {
+      if (!e.isIntersecting) continue;
+      nearScreen.unobserve(e.target);
+      loadPhoto(e.target);
+    }
+  }, { rootMargin: '600px 0px' })
+  : null;
+
+function loadPhoto(img) {
+  photoUrl(img.dataset.src).then(
+    url => { img.src = url; },
+    () => img.dispatchEvent(new Event('error')));
+}
+
+function setPhoto(img, src, eager) {
+  if (!vault.lock) { img.src = src; return; }
+  img.dataset.src = src;
+  if (eager || !nearScreen) loadPhoto(img);
+  else nearScreen.observe(img);
+}
+
+/* ----------------------------------------------------------------- format */
+const money = n => (n === null || n === undefined || n === '') ? '—'
+  : '$' + Math.round(n).toLocaleString('en-CA');
+const signed = n => (n > 0 ? '+' : '−') + '$' + Math.abs(Math.round(n)).toLocaleString('en-CA');
+const daysListed = d => d === 0 ? 'listed today'
+  : d === 1 ? 'listed yesterday' : `${d} days listed`;
+const km = n => (n === null || n === undefined) ? null : num(n);
+/* Every number a person reads, grouped the same way. The locale is explicit
+   because a bare toLocaleString() follows the browser's, not the page's. */
+const num = n => (n === null || n === undefined || n === '') ? '—'
+  : Math.round(n).toLocaleString('en-CA');
+/* The one pluraliser, so every count is grouped the same way. */
+const plural = (n, word) => `${num(n)} ${word}${n === 1 ? '' : 's'}`;
+
+function when(iso) {
+  const t = Date.parse(iso);
+  if (!t) return '';
+  const mins = (Date.now() - t) / 60000;
+  if (mins < 1) return 'just now';
+  if (mins < 60) return `${Math.round(mins)}m ago`;
+  if (mins < 48 * 60) return `${Math.round(mins / 60)}h ago`;
+  return new Date(t).toLocaleDateString('en-CA', { month: 'short', day: 'numeric' });
+}
+function stamp(iso) {
+  const t = Date.parse(iso);
+  return t ? new Date(t).toLocaleString('en-CA',
+    { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', hour12: false }) : '—';
+}
+// A time of day on the same 24-hour clock as stamp().
+const clockTime = t => new Date(t).toLocaleTimeString('en-CA',
+  { hour: '2-digit', minute: '2-digit', hour12: false });
+/* A placeholder that is a car, rather than a grey rectangle or the title
+   printed a second time under the title. */
+const CAR_GLYPH = `<svg width="34" height="22" viewBox="0 0 34 22" fill="none" aria-hidden="true">
+  <path d="M3 15h28M6 15l2.4-7A3 3 0 0111.3 6h11.4a3 3 0 012.9 2l2.4 7" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
+  <circle cx="10" cy="17.5" r="2.4" stroke="currentColor" stroke-width="1.6"/>
+  <circle cx="24" cy="17.5" r="2.4" stroke="currentColor" stroke-width="1.6"/></svg>`;
+
+const esc = s => String(s ?? '').replace(/[&<>"']/g, c =>
+  ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+
+/* A schedule interval given in minutes, as people say it: "2 hours", not
+   "120 minutes". Used wherever the schedule is described. */
+function every(minutes) {
+  const m = Number(minutes) || 0;
+  if (m < 60) return `${m} minutes`;
+  if (m % 60) return `${Math.round(m / 6) / 10} hours`;
+  const h = m / 60;
+  return h === 1 ? 'hour' : `${h} hours`;
+}
+
+/* A duration in hours, in one shape everywhere it is printed. */
+function hours(n) {
+  const h = Number(n) || 0;
+  if (h < 1) {
+    const m = Math.round(h * 60);
+    return m < 1 ? 'under a minute' : `${m} minute${m === 1 ? '' : 's'}`;
+  }
+  const rounded = h < 10 ? Math.round(h * 10) / 10 : Math.round(h);
+  return `${rounded} hour${rounded === 1 ? '' : 's'}`;
+}
+
+/* The name of one coverage slot, from the schedule's real interval. */
+function slotWord(cov, one_only) {
+  const mins = (cov && cov.expected_interval_minutes) || 30;
+  const one = mins === 30 ? 'half-hour'
+    : mins === 60 ? 'hour'
+    : mins % 60 === 0 ? `${mins / 60}-hour slot`
+    : `${mins}-minute slot`;
+  return one_only === false ? one : one + 's';
+}
+
+/* One name for the ratio, and one gate on the comparison, shared by the card
+   and the sheet. The bot publishes a percentage only when the cohort is big
+   enough, so a figure is always worth printing, and silence on a card means
+   no cohort; the sheet says why. */
+const PER_KM = 'per 1,000 km';
+
+function comparableSays(cmp, l) {
+  if (!cmp) return null;
+  if (cmp.pct !== undefined) {
+    const under = cmp.pct < 0, n = Math.round(Math.abs(cmp.pct));
+    // Within half a percent is at the median: "0% under" is no deal, and
+    // must not wear the good-deal green.
+    if (n === 0) {
+      return {
+        tone: '',
+        badge: `at the median of ${num(cmp.sample)}`,
+        sentence: `At the median ${money(cmp.median)} of ${plural(cmp.sample, 'comparable')} `
+          + `— ${esc(cmp.cohort || 'cars like it')}, `
+          + `each with about two-thirds to one and a half times this car's kilometres.`,
+      };
+    }
+    return {
+      tone: under ? 'drop' : '',
+      badge: `${n}% ${under ? 'under' : 'over'} the median of ${num(cmp.sample)}`,
+      sentence: `${n}% ${under ? 'under' : 'over'} the median ${money(cmp.median)} `
+        + `of ${plural(cmp.sample, 'comparable')} — ${esc(cmp.cohort || 'cars like it')}, `
+        + `each with about two-thirds to one and a half times this car's kilometres.`,
+    };
+  }
+  // The bot's reason is written to follow a label, in lower case; on its own
+  // under the price it is a sentence, and starts like one.
+  if (cmp.rank !== undefined) {
+    return {
+      tone: '',
+      badge: `${ordinal(cmp.rank)} cheapest of ${num(cmp.of)}`,
+      sentence: esc(sentence(cmp.why_not)),
+    };
+  }
+  return { tone: '', badge: null, sentence: cmp.why_not ? esc(sentence(cmp.why_not)) : null };
+}
+
+/* A label and the sentence under it, without the stutter: the label is
+   dropped when the sentence already starts with it. Not called sentence():
+   that name is the capitaliser further down, and in a script the later of
+   two declarations silently replaces the earlier everywhere. */
+function labelled(text, label = '') {
+  const body = String(text || '').trim();
+  if (!body) return label;
+  if (!label) return body;
+  return body.toLowerCase().startsWith(label.toLowerCase())
+    ? body : `${label}: ${body}`;
+}
+
+/* One full stop, added only when the sentence does not already end in one. */
+const stop = t => {
+  const body = String(t || '').trim();
+  return !body ? '' : /[.!?\u2026]$/.test(body) ? body : body + '.';
+};
+
+const ordinal = n => (n % 100 >= 10 && n % 100 <= 20) ? `${n}th`
+  : `${n}${ ({ 1: 'st', 2: 'nd', 3: 'rd' })[n % 10] || 'th' }`;
+
+/* The bot's name for a car, as published (listing.name_of owns the rule).
+   The fallback is only for a row the bot never named; it does not try to
+   re-derive the rule. */
+function carName(l) {
+  const named = String(l.title || '').trim();
+  if (named) return named;
+  const built = [l.year, l.make, l.model].filter(Boolean).join(' ').trim();
+  return built || 'Listing';
+}
+/* Titles arrive pipe-delimited ("Model 4dr Sdn|CERTIFIED|ONE OWNER"): the
+   first segment is the car, the rest is the dealer's pitch. */
+function carExtras(l) {
+  return String(l.title || '').split('|').slice(1)
+    .map(s => s.trim()).filter(s => s && s.length < 40);
+}
+
+/* ----------------------------------------------------------------- helpers */
+const el = (tag, cls, html) => {
+  const n = document.createElement(tag);
+  if (cls) n.className = cls;
+  if (html !== undefined) n.innerHTML = html;
+  return n;
+};
+const live = () => (app.data?.listings || []).filter(l => l.status === 'active');
+const DAY = 86400000;
+const arrivedRecently = l => Date.parse(l.first_seen) > Date.now() - DAY;
+const visible = () => live().filter(l => !l.filtered);
+/* A car you stopped watching, which is not a car that left the market: its
+   search was taken away, or Marketplace switched off for it, and it may well
+   still be for sale. Read as the bot reads it (state.retired_by_owner), by
+   the reasons it records; an older row has only its quiet reason. */
+const WATCH_ENDED = ['its search was removed, so it is no longer watched',
+                     'Marketplace is switched off for this search'];
+const unwatched = l => l.status === 'gone' && (l.gone_reason
+  ? WATCH_ENDED.includes(l.gone_reason)
+  : l.quiet_reason === 'the search that was watching this was removed');
+const leftTheMarket = l => l.status === 'gone' && !unwatched(l);
+/* A car by its id. Indexed once per data file: one drawing of the list asks
+   after every car's marks several times over, and a search each time made a
+   list of 500 slow to type into. */
+let carIndex = { data: null, cars: new Map() };
+const byId = id => {
+  if (carIndex.data !== app.data) {
+    const cars = new Map();
+    for (const l of (app.data?.listings || [])) {
+      if (!cars.has(String(l.id))) cars.set(String(l.id), l);
+    }
+    carIndex = { data: app.data, cars };
+  }
+  return carIndex.cars.get(String(id));
+};
+
+function lastEventOf(l) {
+  const h = l.price_history || [];
+  if (l.status === 'gone') return 'removed';
+  if (h.length >= 2) {
+    const a = h[h.length - 2]?.price, b = h[h.length - 1]?.price;
+    if (a && b && b !== a) return b < a ? 'price_drop' : 'price_rise';
+  }
+  if (app.data && Date.parse(l.first_seen) > Date.now() - 36e5 * 24) return 'new';
+  return null;
+}
+function priceMove(l) {
+  const h = (l.price_history || []).filter(p => p.price);
+  if (h.length < 2) return null;
+  const was = h[h.length - 2].price, now = h[h.length - 1].price;
+  return now === was ? null : { was, now, delta: now - was };
+}
+
+/* ----------------------------------------------------------------- trust */
+
+/* The coverage percentage, or null while the window is too short to support
+   one. Every place that shows or reasons about the percentage asks this, so
+   the header and the Status tile always agree. */
+function coveragePct(cov) {
+  if (!cov || cov.too_short) return null;
+  return (cov.pct === undefined || cov.pct === null) ? null : cov.pct;
+}
+
+/* Was that coverage the schedule's doing, or somebody's? Checks started by a
+   push or by hand say nothing about whether the schedule works.
+
+   Returns null when the payload has no trigger record to answer from. */
+function whoKeptTime(cov) {
+  if (!cov || cov.slots_scheduled === undefined || cov.too_short) return null;
+  const all = cov.slots_covered ?? 0;
+  const mine = cov.slots_scheduled ?? 0;
+  if (!all) return null;
+  // "None of it scheduled" and "no record of what started these" differ: a
+  // missing field must not be reported as a measurement.
+  const kinds = Object.keys(cov.by_trigger || {});
+  if (!mine && kinds.length && kinds.every(k => k === 'unattributed')) {
+    return { level: 'unknown', mine, all };
+  }
+  if (!mine) return { level: 'none', mine, all };
+  if (mine < all) return { level: 'some', mine, all };
+  return { level: 'all', mine, all };
+}
+
+const hasOutsideTimer = cov => Object.keys(cov?.by_trigger || {})
+  .some(k => k.startsWith('repository_dispatch'));
+
+/* Whether checks started this way count as the schedule's: GitHub's own, or
+   an outside timer, named ("repository_dispatch:laptop") or not. The same
+   rule as insight._is_a_schedule, which did the counting. */
+const isSchedule = k => ['schedule', 'repository_dispatch'].includes(String(k).split(':')[0]);
+
+/* What started the checks, in the words of the thing that started them. */
+const TRIGGER_WORDS = {
+  schedule: 'the schedule',
+  repository_dispatch: 'an outside timer',
+  workflow_dispatch: 'a dispatch by hand',
+  push: 'a push to the repository',
+  manual: 'a run by hand',
+  unattributed: 'runs recorded before the bot noted what started them',
+};
+/* The same things, short enough to be a tile's value. A value is a noun
+   phrase; the sentence goes underneath it. */
+const TRIGGER_NAMES = {
+  schedule: 'GitHub\u2019s schedule',
+  repository_dispatch: 'An outside timer',
+  workflow_dispatch: 'Hand dispatches',
+  push: 'Your pushes',
+  manual: 'Runs by hand',
+  unattributed: 'Not recorded',
+};
+function triggerName(key) {
+  const k = String(key || '');
+  if (k.startsWith('repository_dispatch:')) return k.slice('repository_dispatch:'.length);
+  return TRIGGER_NAMES[k] || k;
+}
+/* A repository_dispatch may name its caller ("repository_dispatch:laptop").
+   The name is the useful half: it says which timer to look at when it stops. */
+function triggerWord(key) {
+  const k = String(key || '');
+  if (k.startsWith('repository_dispatch:')) {
+    return `${k.slice('repository_dispatch:'.length)} (an outside timer)`;
+  }
+  return TRIGGER_WORDS[k] || k;
+}
+
+function trustState() {
+  const d = app.data;
+  if (!d) return { state: 'ok', text: 'Loading…' };
+  // The last run that read the site. A firing that stood down because a
+  // check had just happened is recorded too, but it read nothing.
+  const run = lastCheck(d);
+  // The last firing answers a different question: "did the last attempt go
+  // wrong". A run whose every search failed is not a check, so only this
+  // record can carry that failure. A firing that stood down tried nothing,
+  // so it cannot clear a failure before it: the answer comes from the last
+  // one that ran, or that went wrong itself.
+  const firing = (d.runs || []).find(r => !r.skipped || r.ok === false) || d.last_run || run;
+
+  // Offline outranks everything else: an old check with no signal is not a
+  // broken bot, and the two want opposite actions.
+  if (app.offline) {
+    const age = when(run.at || d.generated_at);
+    return {
+      state: 'stale',
+      text: `Offline · ${age}`,
+      alarm: {
+        level: 'warn',
+        text: `You are offline. This is the copy your phone saved, and the `
+            + `last check in it ran ${age}. Nothing here has been re-read `
+            + `since - cars may have sold or changed price.`,
+        detail: `Saved copy published ${stamp(d.generated_at)}.`,
+      },
+    };
+  }
+  const cov = d.coverage || {};
+  // Age of the last check, not of the file: the file can be rewritten
+  // without a check, and the question is about the site.
+  const ageMin = (Date.now() - Date.parse(run.at || d.generated_at)) / 60000;
+  const expected = cov.expected_interval_minutes || 30;
+  const failing = firing.ok === false || (firing.errors || []).length > 0;
+  // The same threshold the bot alarms on (health.silent_after_hours), so the
+  // page and the alert share one definition of "too long ago".
+  const quietAfterMin = (cov.silent_after_hours || 0) * 60 || expected * 3;
+  const stale = ageMin > quietAfterMin;
+  // Coverage this poor means cars can arrive and go between checks, which is
+  // worth an amber light even when the most recent check was a minute ago.
+  const pct = coveragePct(cov);
+  const thin = pct !== null && pct < 50;
+
+  // Nothing has ever run: a fresh install, not a fault. No alarm either;
+  // every view's empty state already explains the first run.
+  if (!run.at) {
+    return { state: 'stale', text: 'Not checked yet' };
+  }
+
+  if (failing) {
+    return {
+      state: 'bad',
+      text: `Last check failed ${when(firing.at)}`,
+      failed: firing.at,
+      alarm: {
+        level: 'bad',
+        text: 'The last check did not finish cleanly, so what you are looking at may be out of date.',
+        // The bot's own words, verbatim, so monospace is right here.
+        mono: true,
+        detail: (firing.errors || [])[0] || (firing.invariants || [])[0] || '',
+      },
+    };
+  }
+  if (stale) {
+    return {
+      state: 'stale',
+      text: `Checked ${when(run.at)}`,
+      alarm: {
+        level: 'warn',
+        text: `No check has landed for ${hours(ageMin / 60)}, against one `
+            + `expected every ${every(expected)}. Cars may have come and gone `
+            + `since.`,
+        // slots_covered, not the run count: the percentage is a share of
+        // slots, and the count beside it has to be too.
+        detail: pct === null ? ''
+          : `Coverage over the last ${hours(cov.window_hours)}: ${pct}% — ${cov.slots_covered ?? cov.successful} of ${cov.expected} ${slotWord(cov)} had a check.`,
+      },
+    };
+  }
+  if (thin) {
+    return {
+      state: 'stale',
+      text: `Checked ${when(run.at)}`,
+      alarm: {
+        level: 'warn',
+        // slots_covered, to agree with the Status card and the strip.
+        text: (cov.new_install
+          ? `This watch started ${hours(cov.window_hours)} ago, and only ${pct}% of that was watched`
+          : `Only ${pct}% of the last ${hours(cov.window_hours)} were watched`)
+          + ` — ${cov.slots_covered ?? cov.successful} of ${cov.expected} ${slotWord(cov)} had a check. A car can be listed and sold between checks at this rate.`,
+        detail: [
+          cov.longest_gap_minutes
+            ? `Longest gap: ${(cov.longest_gap_minutes / 60).toFixed(1)} hours.` : '',
+          // GitHub's scheduler is the usual cause, and the fix is outside it.
+          hasOutsideTimer(cov) ? ''
+            : 'GitHub runs scheduled checks late or not at all; an outside timer keeps them on time (README, Schedule).',
+        ].filter(Boolean).join(' '),
+      },
+    };
+  }
+  return { state: 'ok', text: `Checked ${when(run.at)}` };
+}
+
+/* A newer build is cached and will run on the next load. Say so once. */
+let versionBannerUp = false;
+function newVersionReady() {
+  if (versionBannerUp) return;
+  versionBannerUp = true;
+  const bar = el('div', 'newver');
+  bar.setAttribute('role', 'status');
+  const text = el('span', '', 'A newer version of this page is ready.');
+  const btn = el('button', 'btn', 'Reload');
+  btn.type = 'button';
+  btn.addEventListener('click', () => location.reload());
+  bar.appendChild(text);
+  bar.appendChild(btn);
+  document.body.appendChild(bar);
+}
+
+/* ------------------------------------------------------------------ clock
+
+   The strip under the masthead: when the last check ran, how often checks
+   happen, and how long until the next is due.
+
+   The countdown targets the moment a check is due (last check plus the
+   interval), which GitHub's scheduler does not guarantee. Past that moment
+   it says "due" and counts upwards rather than freezing at zero, so a late
+   schedule is visible as late. */
+
+function countdownWords(ms) {
+  // Under five minutes, show seconds so the countdown visibly moves.
+  const s = Math.max(0, Math.round(ms / 1000));
+  if (s < 300) {
+    const m = Math.floor(s / 60);
+    return `${m}:${String(s % 60).padStart(2, '0')}`;
+  }
+  const mins = Math.round(s / 60);
+  if (mins < 60) return `${mins} min`;
+  const h = Math.floor(mins / 60);
+  const rest = mins % 60;
+  return rest ? `${h}h ${rest}m` : `${h}h`;
+}
+
+function clockState() {
+  const d = app.data;
+  if (!d) return null;
+  const run = lastCheck(d);
+  // Keep the ISO string for when() and stamp(): they parse it themselves,
+  // and a number would parse to NaN and render blank.
+  const iso = run.at || '';
+  const at = Date.parse(iso);
+  const cov = d.coverage || {};
+  const mins = Number(cov.expected_interval_minutes) || 0;
+  if (!at) {
+    return { last: 'Not checked yet', every: mins ? `every ${every(mins)}` : '—',
+             next: 'first one pending', state: 'off', fill: 0 };
+  }
+  const evry = mins ? `every ${every(mins)}` : 'when it is asked to';
+  if (!mins) {
+    return { last: when(iso), every: evry, next: 'no set schedule',
+             state: 'off', fill: 0, at, iso };
+  }
+  const due = at + mins * 60000;
+  const left = due - Date.now();
+  const elapsed = Date.now() - at;
+  return {
+    at,
+    iso,
+    last: when(iso),
+    every: evry,
+    next: left > 0 ? `in ${countdownWords(left)}`
+        : left > -60000 ? 'due now'
+        : `due ${countdownWords(-left)} ago`,
+    state: left > 0 ? 'ok' : 'due',
+    // Past due the rail stays full rather than wrapping round, because a bar
+    // that restarts reads as a check having happened.
+    fill: Math.max(0, Math.min(1, elapsed / (mins * 60000))),
+  };
+}
+
+/* When the Marketplace collector last sent, when it means to send next, and
+   whether it is late. Each computer's own next_at when it sent one;
+   otherwise the far end of its interval.
+
+   With a second Mac on standby, every computer heard in the last two hours
+   counts: a standby checks in each pass while the primary stays in charge,
+   so the newest batch alone would hide a primary Facebook signed out. And
+   once Facebook has signed the primary out, the standby reads in its place
+   while the primary goes on checking in: Marketplace is still read, and
+   only the sign-in waits. */
+function collectorTiming(m) {
+  const last = m?.last_batch;
+  if (!last || !last.received) return null;
+  const dueOf = h => {
+    const planned = Date.parse(h.next_at || '');
+    const s = h.settings || {};
+    return Number.isFinite(planned) ? planned
+      : Date.parse(h.received) + ((s.every_minutes || 25) + (s.jitter_minutes ?? 5)) * 60000;
+  };
+  const heard = [[last.host || '', last], ...Object.entries(m.hosts || {}).filter(([, h]) =>
+    h && h.received && Date.now() - Date.parse(h.received) < 2 * 3.6e6)];
+  const due = Math.max(...heard.map(([, h]) => dueOf(h)).filter(Number.isFinite));
+  // A pass takes a few minutes, and the bot's run after it a few more.
+  const lateFor = at => Date.now() - at > 15 * 60000;
+  const out = heard.find(([, h]) => SESSION_SAYS[h.session]);
+  // Another computer that read on its last pass, and is not late for its
+  // next.
+  const reading = out && heard.find(([, h]) =>
+    h.polled && !SESSION_SAYS[h.session] && !lateFor(dueOf(h)));
+  return {
+    heard: Date.parse(last.received), due,
+    late: lateFor(due),
+    signedOut: Boolean(out),
+    // What Facebook said, and to which computer when it is not the one
+    // that sent last, or when another is reading.
+    says: out ? SESSION_SAYS[out[1].session]
+      + (out[0] && (out[0] !== (last.host || '') || reading) ? ` (${out[0]})` : '') : '',
+    // The computer reading in the meantime, and when it last sent. It
+    // stands in only when it is the standby: a primary that reads while a
+    // held standby checks in signed out is simply reading as usual.
+    covered: reading ? { host: reading[0] || 'the standby', received: reading[1].received,
+                         standingIn: reading[1].role === 'standby' } : null,
+  };
+}
+
+function renderClock() {
+  const c = clockState();
+  const host = document.getElementById('clock');
+  if (!host) return;
+  const mpCell = document.getElementById('clock-mp-cell');
+  const mt = collectorTiming(app.data?.marketplace);
+  if (mpCell) {
+    mpCell.hidden = !mt;
+    if (mt) {
+      const dd = document.getElementById('clock-mp');
+      const last = app.data.marketplace.last_batch;
+      // Signed out, and nothing else reading: Marketplace is not being read.
+      const unread = mt.signedOut && !mt.covered;
+      dd.textContent = unread ? 'signed out' : when(last.received);
+      mpCell.dataset.state = unread || mt.late ? 'late' : 'ok';
+      dd.title = unread ? mt.says
+        : `Last batch from ${last.host || 'the collector'} ${stamp(last.received)}; `
+          + (mt.late ? `the next was due ${when(new Date(mt.due).toISOString())}.`
+                     : `the next is due about ${clockTime(mt.due)}.`)
+          + (!mt.covered ? '' : mt.covered.standingIn
+            ? ` ${mt.says}; until then, ${mt.covered.host} is reading in its place.`
+            : ` ${mt.says}; ${mt.covered.host} is reading as usual.`);
+    }
+  }
+  // The strip is in the markup from the first paint, showing dashes, so it
+  // never shifts the page when data lands. If data.json never loads, the
+  // dashes stay.
+  if (!c) return;
+  host.dataset.state = c.state;
+  const last = document.getElementById('clock-last');
+  last.textContent = c.last;
+  // Under a pill saying a later check failed, this one is the last that did
+  // not: two "Last check" times, one above the other, would disagree.
+  const t = trustState();
+  document.getElementById('clock-last-term').textContent =
+    t.failed && t.failed !== c.iso ? 'Last good check' : 'Last check';
+  // The exact stamp on hover: "3h ago" suits a glance, not a quote. With a
+  // collector sending batches, checks also come off-schedule; say why.
+  last.title = (c.iso ? stamp(c.iso) : '') + (mt
+    ? ' - the last time AutoTrader was read. Each Marketplace batch also wakes '
+      + 'the bot, which reads AutoTrader too' + (standDown(app.data)
+        ? ` once it has been ${plural(standDown(app.data), 'minute')}.` : '.')
+    : '');
+  document.getElementById('clock-every').textContent = c.every;
+  document.getElementById('clock-next').textContent = c.next;
+  document.getElementById('clock-fill').style.width = `${Math.round(c.fill * 100)}%`;
+}
+
+/* How soon after a check a firing stands down rather than check again, in
+   minutes: health.min_interval_minutes, read with the runner's own default
+   of a third of the interval. */
+function standDown(d) {
+  const due = Number(d?.coverage?.expected_interval_minutes) || 0;
+  return Number(d?.config?.health?.min_interval_minutes ?? due / 3) || 0;
+}
+
+/* The countdown has to re-read what it counts from, or a tab left open would
+   raise a false "due" alarm off the copy loaded at boot.
+
+   So the strip pulls a fresh copy in the background: only while the tab is
+   visible, at most once a minute, re-rendering only when `generated_at`
+   moved (a re-render costs the scroll position), and never under an open
+   listing sheet; the new data waits until it closes. The copy is asked for
+   with 'no-cache', which asks the server every time whether the file has
+   changed, and an unchanged one costs a "not modified" rather than the whole
+   file: a tab left open on an overdue check asks once a minute. */
+let clockTimer = null;
+let lastFetchAt = 0;
+
+/* When the copy now on its way was asked for, or 0. A tab brought back
+   after a night holds a copy as old as the night, and judged before the
+   fresh one lands it says no check has landed: read out, and pushing the
+   page down, for the second or so the fetch takes. So while a copy is on
+   its way the age is not judged again, for at most HOLD_VERDICT: a fetch
+   that hangs must not keep a stale green up. */
+let fetching = 0;
+const HOLD_VERDICT = 15000;
+const judging = () => !fetching || Date.now() - fetching > HOLD_VERDICT;
+
+/* When a change was last sent from this page. A committed change is applied
+   and published within minutes, so for a while after one the page looks
+   every minute, rather than only once the next check is close. */
+let askedAt = 0;
+const ASK_WATCH = 20 * 60000;
+
+/* Whether the open view is in the middle of an edit: a box in it has the
+   keyboard, or holds something typed and not yet sent. A redraw would throw
+   that away, and on a phone close the keyboard mid-word. The filter box on
+   Listings counts only while it has the keyboard: what it holds is applied
+   as it is typed. */
+function busy() {
+  const view = document.querySelector(`[data-view="${app.view}"]`);
+  if (!view) return false;
+  const a = document.activeElement;
+  if (a && view.contains(a) && /^(input|textarea|select)$/i.test(a.tagName)) return true;
+  // A select with no option marked as drawn opens on its first.
+  const changed = f => f.tagName === 'SELECT'
+    ? f.options.length > 0 && !([...f.options].find(o => o.defaultSelected) || f.options[0]).selected
+    : f.id !== 'q' && f.value !== f.defaultValue;
+  return [...view.querySelectorAll('input, textarea, select')].some(changed);
+}
+
+async function refreshData() {
+  if (document.hidden) return;
+  if (Date.now() - lastFetchAt < 60000) return;
+  const asked = lastFetchAt = fetching = Date.now();
+  try {
+    const { data: fresh, cached } = await fetchData({ cache: 'no-cache' });
+    // Offline is re-decided on every refresh: the worker marks a cached
+    // answer, and a live one means the network is back.
+    const wasOffline = app.offline;
+    app.offline = cached;
+    if (!fresh || (fresh.generated_at === app.data?.generated_at
+                   && app.offline === wasOffline)) return;
+    app.data = fresh;
+    marks.settle();
+    if (askedAt && Date.parse(fresh.changes?.[0]?.at) >= askedAt) askedAt = 0;
+    // The tabs, the pill and the strip sit outside the sheet and take the
+    // new data now; the view under an open sheet waits until it closes, and
+    // a view in the middle of an edit waits until the edit is done.
+    renderTabs();
+    if (sheetUp || busy()) {
+      renderTrust();
+      renderClock();
+      // On Listings only the bar holds the keyboard: the filter box, or a
+      // select handed it back after a pick. Nothing under the bar is typed
+      // into, so the cars take the new data now, and the bar waits.
+      if (!sheetUp && app.view === 'listings') renderListingResults();
+      app.renderPending = true;
+      return;
+    }
+    render();
+  } catch (err) {
+    // A file this key cannot open, beside a lock with a new salt, is a new
+    // passphrase. Retrying the old key would fail every minute while the
+    // pill came to say no check had landed. The reload asks for the new
+    // one and keeps your marks on this device.
+    if (vault.lock && err?.name === 'OperationError') {
+      const lock = await fetchLock();
+      if (lock?.kdf?.salt && lock.kdf.salt !== vault.lock.kdf.salt) location.reload();
+    }
+    /* otherwise offline, or the file is mid-write - the next tick tries again */
+  } finally {
+    if (fetching === asked) fetching = 0;
+  }
+}
+
+function startClock() {
+  const tick = () => {
+    if (document.hidden) return;
+    renderClock();
+    // Only worth asking once the countdown is close to running out, once
+    // the collector's next batch is due, or just after a change was sent:
+    // each one republishes the page. Asked first, so that a copy on its way
+    // holds the verdict below (see judging()).
+    const c = clockState();
+    const mt = collectorTiming(app.data?.marketplace);
+    if ((c && (c.state === 'due' || c.fill > 0.75)) || (mt && Date.now() > mt.due)
+        || (askedAt && Date.now() - askedAt < ASK_WATCH)) refreshData();
+    if (!judging()) return;
+    // The pill and the alarm judge the age of the last check, so they are
+    // judged again with the strip: a tab left open must not stay green
+    // while no check lands.
+    renderTrust();
+    // Data that waited for an edit to finish is drawn once it has. The
+    // keyboard goes back to the same thing in the new drawing.
+    if (app.renderPending && !sheetUp && !busy()) {
+      const was = document.activeElement;
+      render();
+      if (was && !was.isConnected) refocus(was);
+    }
+  };
+  if (clockTimer) clearInterval(clockTimer);
+  clockTimer = setInterval(tick, 1000);
+  document.addEventListener('visibilitychange', () => {
+    if (document.hidden) return;
+    refreshData();
+    renderClock();
+    if (judging()) renderTrust();
+  });
+  tick();
+}
+
+/* What the pill and the alarm last said. The clock asks every second, and
+   only a change is drawn. */
+let trustSaid = '';
+
+function renderTrust() {
+  const t = trustState();
+  const cov = app.data?.coverage;
+  const pct = coveragePct(cov);
+  const kept = whoKeptTime(cov);
+  const covered =
+    !cov ? ''
+    : pct === null ? '· measuring'
+    // A percentage the schedule did not earn is never shown on its own.
+    : kept && kept.level === 'unknown'
+      ? `· <b class="num">${pct}%</b> covered, source not recorded`
+    : kept && kept.level === 'none'
+      ? `· <b class="num">${pct}%</b> covered, <b>none of it scheduled</b>`
+    : kept && kept.level === 'some'
+      ? `· <b class="num">${pct}%</b> covered, ${num(kept.mine)} of `
+        + `${num(kept.all)} scheduled`
+    : `· <b class="num">${pct}%</b> covered`;
+  const said = JSON.stringify([t, covered]);
+  if (said === trustSaid) return;
+  trustSaid = said;
+
+  store.set('lastTrust', { state: t.state, text: t.text, alarm: t.alarm || null });
+  const wrap = document.getElementById('trust');
+  const alarm = document.getElementById('alarm');
+  // Their words carry an age that moves on. A screen reader hears them when
+  // the verdict changes, not each time the age does.
+  const same = wrap.dataset.state === t.state
+    && (alarm.hidden ? '' : alarm.dataset.level) === (t.alarm ? t.alarm.level : '');
+  wrap.setAttribute('aria-live', same ? 'off' : 'polite');
+  alarm.setAttribute('aria-live', same ? 'off' : 'polite');
+  wrap.dataset.state = t.state;
+  document.getElementById('trust-text').textContent = t.text;
+  document.getElementById('trust-cov').innerHTML = covered;
+
+  if (t.alarm) {
+    alarm.hidden = false;
+    alarm.dataset.level = t.alarm.level;
+    document.getElementById('alarm-text').textContent = t.alarm.text;
+    const detail = document.getElementById('alarm-detail');
+    // Monospace for machine output, prose for prose.
+    detail.innerHTML = !t.alarm.detail ? ''
+      : t.alarm.mono ? `<code>${esc(t.alarm.detail)}</code>`
+      : esc(t.alarm.detail);
+  } else {
+    alarm.hidden = true;
+  }
+}
+
+/* ----------------------------------------------------------------- tabs */
+function renderTabs() {
+  const host = document.getElementById('tabs');
+  const unread = app.data ? feedEvents().filter(e => isUnread(e)).length : 0;
+  // A refresh in the background redraws the tabs too; a keyboard resting on
+  // one stays on it.
+  const held = host.contains(document.activeElement) && document.activeElement.dataset.viewLink;
+  host.innerHTML = '';
+  for (const v of VIEWS) {
+    const b = el('button', 'tab');
+    b.type = 'button';
+    b.dataset.viewLink = v.id;
+    b.setAttribute('role', 'link');
+    if (app.view === v.id) b.setAttribute('aria-current', 'page');
+    let n = '';
+    if (v.id === 'feed' && unread) n = `<span class="tab__n num" data-unread="1">${unread}</span>`;
+    // What the Live chip counts: a car marked not interested is out of it.
+    else if (v.id === 'listings' && app.data) {
+      n = `<span class="tab__n num">${visible().filter(l => !marks.of(l.id).dismissed).length}</span>`;
+    }
+    else if (v.id === 'searches' && app.data) n = `<span class="tab__n num">${(app.data.searches || []).length}</span>`;
+    else n = '<span class="tab__n num"></span>';
+    b.innerHTML = `<span>${v.label}</span>${n}`;
+    b.addEventListener('click', () => go(v.id));
+    host.appendChild(b);
+    if (held === v.id) b.focus({ preventScroll: true });
+  }
+}
+
+function go(view, opts = {}) {
+  app.view = view;
+  if (!opts.silent) location.hash = `#/${view}`;
+  for (const s of document.querySelectorAll('.view')) s.hidden = s.dataset.view !== view;
+  renderTabs();
+  render();
+  if (opts.focus !== false) document.getElementById('main').focus({ preventScroll: true });
+  window.scrollTo({ top: 0, behavior: 'instant' in window ? 'instant' : 'auto' });
+}
+
+/* ----------------------------------------------------------------- feed */
+/* The last run that read the site: d.last_check, or, when a payload lacks
+   it, the newest run that actually loaded a search. d.last_run is the last
+   resort because a run that read nothing reports empty figures. As
+   State.last_check reads them: searches_run counts only the searches that
+   were read and searches_failed only those that were not, so any read at
+   all is a check, and a run without those counters is one if it went well. */
+function lastCheck(d) {
+  if (d.last_check) return d.last_check;
+  for (const run of (d.runs || [])) {
+    if (run.skipped) continue;
+    const ran = Number(run.searches_run) || 0;
+    const failed = Number(run.searches_failed) || 0;
+    if (ran > 0 || (!failed && run.ok)) return run;
+  }
+  return d.last_run || {};
+}
+
+function feedEvents() {
+  // Array-checked, not just truthy: a malformed payload may carry an object
+  // here, and the page must still render.
+  const rows = app.data?.events;
+  return Array.isArray(rows) ? rows : [];
+}
+const isUnread = e => !app.lastSeen || e.at > app.lastSeen;
+
+/* "a, b and c", not "a and b and c". */
+function andList(items) {
+  const parts = items.filter(Boolean);
+  if (parts.length <= 1) return parts[0] || '';
+  return parts.slice(0, -1).join(', ') + ' and ' + parts[parts.length - 1];
+}
+
+/* Shown once, on a browser that has never opened this before, and never
+   again once dismissed. */
+function welcome() {
+  const d = app.data;
+  const box = el('section', 'state measure');
+  box.style.marginBottom = 'var(--s6)';
+  const searches = (d.searches || []).map(s => s.name);
+  const cov = d.coverage || {};
+  box.innerHTML = `
+    <h2>This is watching ${searches.length} search${searches.length === 1 ? '' : 'es'} on autotrader.ca</h2>
+    <p>${esc(andList(searches) || 'nothing yet')} — ${visible().length} cars live
+       right now, re-read about every ${every(cov.expected_interval_minutes || 30)}.</p>
+    <p><b>Alerts</b> go to ${(d.notify?.active || []).join(', ') || 'nowhere yet — no channel is switched on'}.
+       <b>Feed</b> is what changed since you last looked. <b>Status</b> says whether
+       the bot itself is healthy, and the dot beside the title up there says it at a glance.</p>
+    <p>Add a search by pasting its link on the Searches tab.</p>
+    <p class="only-keyboard">On a keyboard: <kbd>1</kbd>–<kbd>5</kbd> for the
+       tabs, <kbd>/</kbd> to find a car, <kbd>?</kbd> for the rest.</p>`;
+  const b = el('button', 'btn btn--primary', 'Got it');
+  b.type = 'button';
+  b.addEventListener('click', () => {
+    store.set('welcomed', true);
+    app.firstVisit = false;
+    renderFeed();
+    document.getElementById('main').focus({ preventScroll: true });
+  });
+  box.appendChild(b);
+  return box;
+}
+
+function renderFeed() {
+  const host = document.querySelector('[data-view="feed"]');
+  host.innerHTML = '';
+  const head = el('div', 'view__head');
+  head.classList.add('measure');
+  head.innerHTML = `<h1 id="feed-h">What changed</h1>
+    <p>Everything that has happened to a car you are watching, newest first — including
+       cars your rules hide, which the run counters never counted. A row you were
+       told about says nothing extra; a row that stayed quiet says why.</p>`;
+  host.appendChild(head);
+  if (app.firstVisit && !store.get('welcomed', false)) {
+    host.appendChild(welcome());
+  }
+
+  if (app.firstVisit && store.get('welcomed', false)) {
+    const p = el('p', 'why measure');
+    p.innerHTML = `<b>First visit.</b> Everything already on the site is recorded as a
+      starting point rather than announced at you. From now on this shows only what
+      has changed since you last looked.`;
+    host.appendChild(p);
+  }
+
+  const everything = feedEvents();
+  // What happened, and what you were told about, are different lists: a car
+  // your rules hide still changes, and the page records it. The two are one
+  // click apart, with both counts on screen.
+  const wasSent = e => e.delivery?.state === 'sent';
+  const sentCount = everything.filter(wasSent).length;
+  const events = app.feedOnly === 'sent' ? everything.filter(wasSent) : everything;
+  if (!everything.length) {
+    // Three different nothings: no check has run; a check found no cars at
+    // all; cars are watched and none has changed yet.
+    const noCarsAtAll = !(app.data.listings || []).length;
+    host.appendChild(emptyState(
+      !app.data.last_run ? 'Nothing has been checked yet'
+        : noCarsAtAll ? 'No cars found yet'
+        : 'Nothing has changed yet',
+      !app.data.last_run
+        ? 'The first check has not run. When it does, everything already on the site is recorded as a starting point — you will hear about what changes after that, not about the back catalogue.'
+        : noCarsAtAll
+        ? 'The searches have not turned up a car yet. That is either a narrow search or a new one — the Searches tab says which, and how many listings each one read last time.'
+        : 'Every car the searches found was already there when the bot started watching. This fills up as prices move and cars come and go.'));
+    return;
+  }
+
+  if (sentCount < everything.length) {
+    const chips = el('div', 'chips');
+    chips.setAttribute('role', 'group');
+    chips.setAttribute('aria-label', 'Which changes to show');
+    for (const [id, label, n] of [['all', 'Everything that changed', everything.length],
+                                  ['sent', 'Sent to your phone', sentCount]]) {
+      const c = el('button', 'chip');
+      c.type = 'button';
+      c.dataset.chip = id;
+      c.setAttribute('aria-pressed', app.feedOnly === id ? 'true' : 'false');
+      c.innerHTML = `${label}<span class="n num">${num(n)}</span>`;
+      // The drawing replaces the chip pressed, so the keyboard goes to its twin.
+      c.addEventListener('click', () => { app.feedOnly = id; renderFeed(); refocus(c); });
+      chips.appendChild(c);
+    }
+    host.appendChild(chips);
+  }
+  if (app.feedOnly === 'sent' && !events.length) {
+    host.appendChild(emptyState('Nothing was sent',
+      'Everything that changed was on a car your rules hide, or was a move too '
+      + 'small to be worth a notification. Switch back to see all of it.'));
+    return;
+  }
+
+  const unread = events.filter(isUnread);
+  if (unread.length) {
+    const b = el('div', 'bar');
+    const btn = el('button', 'btn btn--primary', `Mark ${unread.length} as seen`);
+    btn.type = 'button';
+    btn.addEventListener('click', () => {
+      app.lastSeen = new Date().toISOString();
+      store.set('lastSeen', app.lastSeen);
+      renderTabs(); renderFeed();
+      // The button has gone with what it marked; the keyboard stays in the
+      // view rather than falling back to the top of the page.
+      document.getElementById('main').focus({ preventScroll: true });
+    });
+    b.appendChild(btn);
+    host.appendChild(b);
+  }
+
+  const groups = new Map();
+  for (const e of events) {
+    if (!groups.has(e.kind)) groups.set(e.kind, []);
+    groups.get(e.kind).push(e);
+  }
+  for (const kind of KIND_ORDER) {
+    const rows = groups.get(kind);
+    if (!rows || !rows.length) continue;
+    const sec = el('section', 'section measure');
+    const n = rows.filter(isUnread).length;
+    sec.innerHTML = `<div class="section__head">
+        <h2>${KIND[kind].group}</h2>
+        <span class="count num">${n === rows.length ? `${rows.length} new to you`
+          : n ? `${rows.length} · ${n} new to you` : rows.length}</span>
+      </div>`;
+    const list = el('ul', 'feed');
+    let markerDone = false;
+    // Cars your rules keep come first within the group, then the hidden ones,
+    // so the cap of 60 never cuts a car you can buy for a hidden one.
+    const ordered = [...rows.filter(e => !e.filtered), ...rows.filter(e => e.filtered)];
+    for (const e of ordered.slice(0, 60)) {
+      if (!markerDone && !isUnread(e) && rows.some(isUnread)) {
+        const m = el('li'); m.innerHTML = `<div class="marker">Seen before this</div>`;
+        list.appendChild(m); markerDone = true;
+      }
+      list.appendChild(eventRow(e));
+    }
+    if (ordered.length > 60) {
+      // Not "older": what falls off the end is the hidden cars, whatever
+      // their age.
+      const cut = rows.length - 60;
+      const allHidden = ordered.slice(60).every(e => e.filtered);
+      const more = el('li', 'note',
+        allHidden ? `and ${num(cut)} more your rules hide`
+                  : `and ${num(cut)} more`);
+      more.style.padding = 'var(--s3) var(--s4)';
+      list.appendChild(more);
+    }
+    sec.appendChild(list);
+    host.appendChild(sec);
+  }
+}
+
+function eventRow(e) {
+  const li = el('li');
+  const b = el('button', 'ev' + (isUnread(e) ? ' ev--unread' : ''));
+  b.type = 'button';
+  b.dataset.kind = e.kind;
+
+  let fig = '', sub = [];
+  if (e.kind === 'price_drop' || e.kind === 'price_rise') {
+    const cls = e.kind === 'price_drop' ? 'drop' : 'rise';
+    fig = `<span class="ev__fig num ${cls}">${signed(e.delta)}</span>`;
+    sub.push(`<span class="ev__was num">${money(e.old_price)}</span>`);
+    sub.push(`<span class="num">${money(e.new_price)}</span>`);
+  } else if (e.kind === 'priced') {
+    fig = `<span class="ev__fig num">${money(e.new_price)}</span>`;
+    sub.push('was call for price');
+  } else if (e.price) {
+    fig = `<span class="ev__fig num">${money(e.price)}</span>`;
+  } else if (e.kind === 'new') {
+    // A car with no price is a dealer withholding one; say so.
+    fig = '<span class="ev__fig">Call for price</span>';
+  }
+  // A delivery note only when the delivery was not the ordinary one, so the
+  // unusual rows stand out. The Feed's heading says what silence means.
+  // Whether a car is hidden is published only as it is now, on each of its
+  // events, and a rule set since does not reach back: so "now", never a
+  // claim that the car was hidden when this happened.
+  if (e.filtered) sub.push(`<span>hidden now — ${esc(e.filter_reason || 'a rule of yours')}</span>`);
+  else if (e.delivery?.state === 'queued') sub.push('<span>queued, not sent yet</span>');
+  else if (e.delivery?.state === 'quiet') sub.push(`<span>${esc(e.delivery.text)}</span>`);
+  // A fault, as the sheet says, so in the fault's colour, never the green of
+  // good news.
+  else if (e.delivery?.state === 'none') sub.push('<span class="err">no delivery record</span>');
+
+  if (String(e.listing_id || '').startsWith('fb-')) sub.unshift('<span class="site">Marketplace</span>');
+  const name = carName(e);
+  // Named by its own content, with the kind word in a visually hidden span
+  // rather than an aria-label, so the accessible name matches the visible
+  // text (WCAG 2.5.3, Label in Name).
+  b.innerHTML =
+    `<span class="sr">${KIND[e.kind].label}.</span>
+     <time class="ev__when" datetime="${esc(e.at)}">${when(e.at)}</time>
+     <span class="ev__title">${esc(name)}</span>${fig}
+     <span class="ev__sub">${sub.join('')}</span>`;
+  // A photo, because similar titles are hard to tell apart at a glance. The
+  // box has a fixed size, so nothing moves when the picture arrives. A car
+  // the page no longer carries keeps the box, with the placeholder in it, so
+  // its row lines up with the rest.
+  const car = byId(e.listing_id);
+  b.prepend(shot(car || { filtered: e.filtered }, 'ev__shot'));
+  b.dataset.id = String(e.listing_id);
+  b.addEventListener('click', () => openSheet(e.listing_id, name));
+  li.appendChild(b);
+  return li;
+}
+
+/* ----------------------------------------------------------------- listings */
+function listingPool() {
+  let rows = (app.data?.listings || []);
+  if (app.search !== 'all') rows = rows.filter(l => l.search_id === app.search);
+  if (app.site !== 'all') rows = rows.filter(l => siteOf(l) === app.site);
+
+  const chip = app.chip;
+  if (chip === 'all') rows = rows.filter(l => l.status === 'active' && (app.showHidden || !l.filtered));
+  // As under New, Call for price and Private sellers, a car your rules hide
+  // is left out: it has its own chip.
+  else if (chip === 'drops') rows = rows.filter(l => l.status === 'active' && !l.filtered
+    && priceMove(l)?.delta < 0);
+  else if (chip === 'new') rows = rows.filter(l => l.status === 'active' && !l.filtered && arrivedRecently(l));
+  else if (chip === 'unpriced') rows = rows.filter(l => l.status === 'active' && l.unpriced && !l.filtered);
+  else if (chip === 'gone') rows = rows.filter(leftTheMarket);
+  else if (chip === 'unwatched') rows = rows.filter(unwatched);
+  else if (chip === 'hidden') rows = rows.filter(l => l.status === 'active' && l.filtered);
+  else if (chip === 'private') rows = rows.filter(l => l.status === 'active'
+    && !l.filtered && l.seller_type === 'private');
+  else if (chip === 'mine') rows = rows.filter(l => marks.of(l.id).shortlisted);
+  else if (chip === 'dropped') rows = rows.filter(l => marks.of(l.id).dismissed);
+
+  // A car marked "not interested" is kept under its own chip, just out of
+  // the lists you scroll.
+  if (chip !== 'dropped') rows = rows.filter(l => !marks.of(l.id).dismissed);
+
+  const q = app.q.trim().toLowerCase();
+  if (q) {
+    rows = rows.filter(l => [l.title, l.location, l.color, l.trim, l.seller, l.model]
+      .filter(Boolean).join(' ').toLowerCase().includes(q));
+  }
+  const sort = SORTS.find(s => s.id === app.sort) || SORTS[0];
+  return { sort, ...ranked(rows, sort) };
+}
+
+function renderListings() {
+  const host = document.querySelector('[data-view="listings"]');
+  host.innerHTML = '';
+  const head = el('div', 'view__head');
+  head.innerHTML = `<h1 id="listings-h">Listings</h1>
+    <p>Every car the searches have turned up. Cars your rules hide are kept and
+       explained rather than dropped — the number you can click on beats the number
+       that quietly omits.</p>`;
+  host.appendChild(head);
+
+  const bar = el('div', 'bar');
+  bar.innerHTML = `
+    <label class="field">
+      <span class="sr">Filter listings</span>
+      <svg width="14" height="14" viewBox="0 0 14 14" aria-hidden="true" style="flex:none;color:var(--text-3)">
+        <circle cx="6" cy="6" r="4.5" fill="none" stroke="currentColor" stroke-width="1.4"/>
+        <path d="M9.5 9.5L13 13" stroke="currentColor" stroke-width="1.4"/></svg>
+      <input type="search" id="q" placeholder="Colour, city, trim, seller…" value="${esc(app.q)}">
+    </label>
+    <label class="sr" for="sort">Sort by</label>
+    <select id="sort">${SORTS.map(s =>
+      `<option value="${s.id}"${s.id === app.sort ? ' selected' : ''}>${s.label}</option>`).join('')}</select>
+    <label class="sr" for="search-pick">Search</label>
+    <select id="search-pick">
+      <option value="all">All searches</option>
+      ${(app.data.searches || []).map(s =>
+        `<option value="${esc(s.id)}"${s.id === app.search ? ' selected' : ''}>${esc(s.name)}</option>`).join('')}
+    </select>` + (usesMarketplace() ? (() => {
+      const n = site => live().filter(l => inView(l) && (site === 'all' || siteOf(l) === site)).length;
+      return `
+    <label class="sr" for="site-pick">Site</label>
+    <select id="site-pick">${[['all', 'AutoTrader + Marketplace'], ['autotrader', 'AutoTrader only'],
+        ['marketplace', 'Marketplace only']].map(([id, label]) =>
+        `<option value="${id}"${id === app.site ? ' selected' : ''}>${label} (${num(n(id))})</option>`).join('')}
+    </select>`;
+    })() : '');
+  host.appendChild(bar);
+  // Before any early return below: a filter that empties the list must not
+  // leave the controls that could undo it dead.
+  // Typing redraws only the results under the bar. The box itself stays, so
+  // the caret stays where it was and a keyboard composing a word (Android's,
+  // or one for Chinese or Japanese) is never handed a new box mid-word.
+  // Nothing in the bar counts by the text.
+  bar.querySelector('#q').addEventListener('input', e => {
+    app.q = e.target.value;
+    renderListingResults();
+  });
+  // A select re-renders the bar it sits in, so it hands focus back to its
+  // new self: arrowing through the options from the keyboard keeps working.
+  const onPick = (id, set) => bar.querySelector('#' + id)?.addEventListener('change', e => {
+    set(e.target.value);
+    renderListings();
+    document.getElementById(id)?.focus();
+  });
+  onPick('sort', v => { app.sort = v; });
+  onPick('search-pick', v => { app.search = v; });
+  onPick('site-pick', v => { app.site = v; });
+
+  const results = el('div');
+  results.id = 'listing-results';
+  host.appendChild(results);
+  renderListingResults();
+}
+
+/* How many cards are drawn at first, and how many more each press of "Show
+   more" adds. A grid of every car at once is slow to draw on a phone. */
+const LISTING_PAGE = 300;
+
+// Where the chip row was scrolled to, so a redraw leaves the chip you
+// tapped where you tapped it rather than scrolling it out of sight.
+let chipScroll = 0;
+
+/* Everything under the bar: the Marketplace line, the chips, the note on
+   the cars this page does not carry, and the grid. */
+function renderListingResults() {
+  const host = document.getElementById('listing-results');
+  if (!host) return;
+  host.innerHTML = '';
+
+  const mp = app.data.marketplace;
+  if (mp?.last_batch && app.site !== 'autotrader') {
+    // Counted as the grid is: this search, hidden cars only when included,
+    // and never a car marked not interested.
+    const fromMp = live().filter(l => inView(l) && siteOf(l) === 'marketplace').length;
+    const line = el('p', 'note');
+    line.innerHTML = `${num(fromMp)} of these cars ${fromMp === 1 ? 'is' : 'are'} from `
+      + `Facebook Marketplace. Its collector (${esc(mp.last_batch.host || 'the Mac')}) last `
+      + `sent a batch ${when(mp.last_batch.received)}. `
+      + `<a href="#/status" data-go="status">What it read</a>`;
+    line.querySelector('[data-go]').addEventListener('click', e => { e.preventDefault(); go('status'); });
+    host.appendChild(line);
+  }
+
+  const kept = l => !marks.of(l.id).dismissed;
+  // Counts are within the selected search and site, so each chip matches
+  // its grid - and, as in every grid but "Not interested", a car marked not
+  // interested is not counted.
+  const mine = l => (app.search === 'all' || l.search_id === app.search)
+    && (app.site === 'all' || siteOf(l) === app.site);
+  const counts = {
+    // Whatever the Live chip will actually show, "Include hidden" included.
+    all: live().filter(l => mine(l) && (app.showHidden || !l.filtered)
+                            && kept(l)).length,
+    private: live().filter(l => mine(l) && !l.filtered && kept(l)
+      && l.seller_type === 'private').length,
+    mine: (app.data.listings || []).filter(l => mine(l) && kept(l)
+      && marks.of(l.id).shortlisted).length,
+    dropped: (app.data.listings || []).filter(l => mine(l) && marks.of(l.id).dismissed).length,
+    drops: live().filter(l => mine(l) && kept(l) && !l.filtered && priceMove(l)?.delta < 0).length,
+    new: live().filter(l => mine(l) && kept(l) && !l.filtered && arrivedRecently(l)).length,
+    unpriced: live().filter(l => mine(l) && kept(l) && l.unpriced && !l.filtered).length,
+    hidden: live().filter(l => mine(l) && kept(l) && l.filtered).length,
+    gone: (app.data.listings || []).filter(l => mine(l) && kept(l) && leftTheMarket(l)).length,
+    unwatched: (app.data.listings || []).filter(l => mine(l) && kept(l) && unwatched(l)).length,
+  };
+  const chips = el('div', 'chips');
+  chips.setAttribute('role', 'group');
+  chips.setAttribute('aria-label', 'Filter by state');
+  for (const [id, label] of CHIPS) {
+    // A chip that would show nothing is hidden, unless it is the active one.
+    // "Live" always stays: it is the way back from every other chip.
+    if (id !== 'all' && !counts[id] && app.chip !== id) continue;
+    const c = el('button', 'chip');
+    c.type = 'button';
+    c.dataset.chip = id;
+    c.setAttribute('aria-pressed', app.chip === id ? 'true' : 'false');
+    c.innerHTML = `${label}<span class="n num">${counts[id] ?? 0}</span>`;
+    // The drawing replaces the chip pressed, so the keyboard goes to its twin.
+    c.addEventListener('click', () => { app.chip = id; renderListings(); refocus(c); });
+    chips.appendChild(c);
+  }
+  if (app.chip === 'all' && counts.hidden) {
+    const btn = el('button', 'chip');
+    btn.type = 'button';
+    btn.dataset.chip = 'hidden-toggle';
+    btn.setAttribute('aria-pressed', String(app.showHidden));
+    // No count: this is a switch, and its effect is the Live count changing.
+    btn.textContent = app.showHidden ? 'Hidden cars included' : 'Include hidden';
+    btn.addEventListener('click', () => {
+      app.showHidden = !app.showHidden;
+      renderListings();
+      refocus(btn);
+    });
+    chips.appendChild(btn);
+  }
+  host.appendChild(chips);
+  chips.scrollLeft = chipScroll;
+  chips.addEventListener('scroll', () => { chipScroll = chips.scrollLeft; }, { passive: true });
+
+  // The page carries at most dashboard.max_listings cars. The cap leaves out
+  // cars your rules hide first, however new, then the oldest of those that
+  // have gone, and reaches cars to buy only once those are all out. Say so
+  // rather than show short counts.
+  const short = app.data.health?.left_out || 0;
+  if (short && app.search === 'all') {
+    const liveLeftOut = (app.data.health?.counts?.active ?? 0) - visible().length;
+    host.appendChild(el('p', 'note',
+      `${num(short)} more ${short === 1 ? 'car is' : 'cars are'} stored than this `
+      + `page carries, so the counts above stop there. `
+      + (liveLeftOut > 0
+        ? `${num(liveLeftOut)} of them ${liveLeftOut === 1 ? 'is a car' : 'are cars'} you could buy. `
+        : 'Cars your rules hide are left out first, then the oldest of the cars that have gone. ')
+      + `Raise <code class="mono">dashboard.max_listings</code> to bring them back.`));
+  }
+
+  const pool = listingPool();
+  const total = pool.has.length + pool.absent.length;
+  if (!total) {
+    host.appendChild(noResults());
+    return;
+  }
+
+  // "Show more" holds for as long as the list is filtered and sorted the
+  // same way; a change to any of that starts again from the top.
+  const shape = JSON.stringify([app.q, app.chip, app.sort, app.search, app.site, app.showHidden]);
+  if (app.limitFor !== shape) { app.limitFor = shape; app.limit = LISTING_PAGE; }
+  const limit = app.limit;
+
+  const grid = el('div', 'grid');
+  let drawn = 0;
+  for (const l of pool.has.slice(0, limit)) { grid.appendChild(card(l)); drawn++; }
+  if (pool.absent.length && drawn < limit) {
+    // Label the tail by what is missing ("no asking price"), not "unsortable".
+    const split = el('p', 'grid__split');
+    split.textContent = `${plural(pool.absent.length, 'car')} with ${pool.sort.absent}`;
+    grid.appendChild(split);
+    for (const l of pool.absent.slice(0, limit - drawn)) { grid.appendChild(card(l)); drawn++; }
+  }
+  host.appendChild(grid);
+  if (total > drawn) {
+    const more = el('div', 'bar');
+    more.style.marginTop = 'var(--s4)';
+    more.appendChild(el('p', 'note', `Showing the first ${num(drawn)} of ${num(total)}.`));
+    const b = el('button', 'btn', `Show ${num(Math.min(LISTING_PAGE, total - drawn))} more`);
+    b.type = 'button';
+    b.addEventListener('click', () => {
+      app.limit = limit + LISTING_PAGE;
+      renderListingResults();
+      // On to the first car that was not there before.
+      document.querySelectorAll('#listing-results .grid > .card')[drawn]?.focus();
+    });
+    more.appendChild(b);
+    host.appendChild(more);
+  }
+
+  // A new car rises into place once, when it first arrives, and not again
+  // each time the list is filtered. Not cleared at once: opening the tab
+  // draws it twice.
+  if (app.freshIds.size && !app.freshTimer) {
+    app.freshTimer = setTimeout(() => app.freshIds.clear(), 500);
+  }
+}
+
+/* The states a car can be in, in the order they are offered. The chip row and
+   the empty state both read this one list. */
+const CHIPS = [['all', 'Live'], ['new', 'New'], ['drops', 'Price drops'],
+               ['private', 'Private sellers'], ['mine', 'Shortlisted'],
+               ['unpriced', 'Call for price'], ['hidden', 'Hidden by a rule'],
+               ['gone', 'Gone'], ['unwatched', 'No longer watched'],
+               ['dropped', 'Not interested']];
+const chipLabel = id => (CHIPS.find(c => c[0] === id) || [, id])[1];
+
+/* Zero results, and specifically why, offering back every control that is
+   narrowing the list rather than only the first one found. */
+function noResults() {
+  const s = el('div', 'state');
+  const search = (app.data.searches || []).find(x => x.id === app.search);
+  const narrowing = [];
+  if (app.q) {
+    narrowing.push({
+      what: `the text \u201c${esc(app.q)}\u201d`,
+      label: 'Clear the text filter',
+      clear: () => { app.q = ''; },
+    });
+  }
+  if (app.chip !== 'all') {
+    narrowing.push({
+      what: `\u201c${esc(chipLabel(app.chip))}\u201d`,
+      label: 'Show every live car',
+      clear: () => { app.chip = 'all'; },
+    });
+  }
+  if (app.search !== 'all') {
+    narrowing.push({
+      what: esc(search?.name || 'one search'),
+      label: 'Show all searches',
+      clear: () => { app.search = 'all'; },
+    });
+  }
+  if (app.site !== 'all') {
+    narrowing.push({
+      what: app.site === 'marketplace' ? 'Marketplace only' : 'AutoTrader only',
+      label: 'Show both sites',
+      clear: () => { app.site = 'all'; },
+    });
+  }
+
+  const offer = choice => {
+    const b = el('button', 'btn', choice.label);
+    b.type = 'button';
+    b.addEventListener('click', () => {
+      choice.clear();
+      renderListings();
+      // The button goes with the empty state; the keyboard stays in the view.
+      document.getElementById('main').focus({ preventScroll: true });
+    });
+    s.appendChild(b);
+  };
+
+  // Nothing is narrowed, but "Live" is itself a filter: an empty Live list
+  // can mean no cars, every car hidden, marked not interested, gone or no
+  // longer watched, and each needs a different next step. Each heading is
+  // true of every car it speaks for, so it names each kind that is there.
+  if (!narrowing.length) {
+    const all = app.data.listings || [];
+    // Counted as the chip each offer opens: a car marked not interested
+    // shows under its own chip and no other.
+    const kept = l => !marks.of(l.id).dismissed;
+    const hidden = all.filter(l => l.status === 'active' && l.filtered && kept(l));
+    const gone = all.filter(l => leftTheMarket(l) && kept(l));
+    const ended = all.filter(l => unwatched(l) && kept(l));
+    const dropped = all.filter(l => !kept(l));
+    // Live cars marked not interested: with the hidden ones, every live car.
+    const droppedLive = dropped.filter(l => l.status === 'active').length;
+    const offerDropped = () => offer({
+      what: 'your marks',
+      label: `Show the ${dropped.length} not interested`,
+      clear: () => { app.chip = 'dropped'; },
+    });
+    if (!all.length) {
+      s.innerHTML = `<h2>No cars yet</h2>
+        <p>The searches have not turned up a car. The Searches tab says how many
+           listings each one read last time it ran.</p>`;
+      return s;
+    }
+    if (hidden.length) {
+      s.innerHTML = droppedLive
+        ? `<h2>Every live car is hidden by a rule or marked not interested</h2>
+        <p>The searches are working — they are holding
+           ${plural(hidden.length + droppedLive, 'live car')}. Your rules hide
+           ${num(hidden.length)} of them, and you marked the rest not interested.
+           Nothing is lost: each hidden one says which rule turned it away, and
+           loosening that rule brings it straight back.</p>`
+        : `<h2>Every live car is hidden by one of your rules</h2>
+        <p>The searches are working — they are holding
+           ${plural(hidden.length, 'live car')}, and your
+           rules hide all of them. Nothing is lost: each one says which rule
+           turned it away, and loosening that rule brings them straight back.</p>`;
+      offer({
+        what: 'your rules',
+        label: `Show the ${hidden.length} hidden`,
+        clear: () => { app.chip = 'hidden'; },
+      });
+      if (droppedLive) offerDropped();
+      return s;
+    }
+    if (droppedLive) {
+      s.innerHTML = `<h2>Every live car is one you marked not interested</h2>
+        <p>They are kept under their own chip, out of the lists you scroll.</p>`;
+      offerDropped();
+      return s;
+    }
+    if (gone.length || ended.length) {
+      s.innerHTML = !ended.length
+        ? `<h2>Every car it was watching has left the market</h2>
+        <p>${gone.length} listing${gone.length === 1 ? ' has' : 's have'} come
+           down and nothing new has arrived yet. They are kept with their last
+           price rather than deleted.</p>`
+        : `<h2>${gone.length ? 'No car is live right now'
+                             : 'Every car it holds is one it no longer watches'}</h2>
+        <p>${gone.length ? `${gone.length} listing${gone.length === 1 ? ' has' : 's have'}
+           come down. ` : ''}${plural(ended.length, 'car')} left the watch, not the
+           market, when a search was taken away or Marketplace switched off for
+           one. ${ended.length === 1 ? 'It' : 'They'} may still be for sale;
+           nothing checks ${ended.length === 1 ? 'it' : 'them'} now.</p>`;
+      if (gone.length) {
+        offer({
+          what: 'the live list',
+          label: `Show the ${gone.length} gone`,
+          clear: () => { app.chip = 'gone'; },
+        });
+      }
+      if (ended.length) {
+        offer({
+          what: 'the live list',
+          label: `Show the ${ended.length} no longer watched`,
+          clear: () => { app.chip = 'unwatched'; },
+        });
+      }
+      return s;
+    }
+    if (dropped.length) {
+      s.innerHTML = `<h2>Every car left is one you marked not interested</h2>
+        <p>They are kept under their own chip, out of the lists you scroll.</p>`;
+      offerDropped();
+      return s;
+    }
+    s.innerHTML = `<h2>No cars yet</h2>
+      <p>The searches have not turned up a car. The Searches tab says how many
+         listings each one read last time it ran.</p>`;
+    return s;
+  }
+
+  if (narrowing.length === 1) {
+    const only = narrowing[0];
+    if (app.q) {
+      s.innerHTML = `<h2>Nothing matches ${only.what}</h2>
+        <p>The text filter is applied to the title, city, colour, trim and seller.</p>`;
+    } else if (app.chip === 'hidden') {
+      // Not an emptiness with somewhere to go back to: it is good news.
+      s.innerHTML = `<h2>Nothing is hidden right now</h2>
+        <p>Every car the searches found passed your rules.</p>`;
+      return s;
+    } else if (app.site !== 'all') {
+      s.innerHTML = `<h2>No ${app.site === 'marketplace' ? 'Marketplace' : 'AutoTrader'}
+        car is on your list right now</h2>
+        <p>${app.site === 'marketplace'
+          ? 'The Status tab says what the Marketplace collector read, and where each car went.'
+          : live().some(l => inView(l) && siteOf(l) === 'marketplace')
+            ? 'Every car on your list right now is from Marketplace.'
+            : 'Nor is a Marketplace car: every car found is hidden by a rule, gone, no longer watched, or marked not interested.'}</p>`;
+    } else if (app.chip !== 'all') {
+      s.innerHTML = `<h2>${app.chip === 'unwatched' ? 'Every car here is still watched'
+          : `No car is ${esc(chipLabel(app.chip).toLowerCase())}`}</h2>
+        <p>Every other car the searches hold is still on the Live chip.</p>`;
+    } else {
+      const why = search?.health?.shut_out;
+      s.innerHTML = `<h2>${esc(search?.name || 'This search')} has nothing to show</h2>
+        <p>${why ? `It read the site fine and every car was turned away: ${esc(why)}.`
+                 : 'It has not kept any cars yet.'}</p>`;
+    }
+    offer(only);
+    return s;
+  }
+
+  // More than one: name them all and offer every way out.
+  s.innerHTML = `<h2>Nothing is all of these at once</h2>
+    <p>No car is ${andList(narrowing.map(n => n.what))}. Each of these is
+       narrowing the list on its own.</p>`;
+  for (const choice of narrowing) offer(choice);
+  return s;
+}
+
+/* The shortcut list, shown by "?" and mentioned in the welcome box. Kept
+   short enough never to need scrolling. */
+const SHORTCUTS = [
+  ['1 – 5', 'Feed, Listings, Market, Searches, Status'],
+  ['/', 'Find a car by colour, city, trim or seller'],
+  ['Esc', 'Close a car, or clear what you typed'],
+  ['?', 'This list'],
+];
+
+// What had the keyboard before the list was shown; it gets it back.
+let shortcutsFrom = null;
+
+function showShortcuts() {
+  let box = document.getElementById('shortcuts');
+  if (box) { hideShortcuts(); return; }       // pressed twice: put it away
+  shortcutsFrom = document.activeElement;
+  box = el('div', 'shortcuts');
+  box.id = 'shortcuts';
+  box.innerHTML = '<dl>' + SHORTCUTS.map(([key, what]) =>
+    `<dt><kbd>${esc(key)}</kbd></dt><dd>${esc(what)}</dd>`).join('') + '</dl>';
+  const close = el('button', 'btn', 'Close');
+  close.type = 'button';
+  close.addEventListener('click', hideShortcuts);
+  box.appendChild(close);
+  document.body.appendChild(box);
+  close.focus();
+}
+
+function hideShortcuts() {
+  document.getElementById('shortcuts')?.remove();
+  const was = shortcutsFrom;
+  shortcutsFrom = null;
+  if (was && was.isConnected && was !== document.body) was.focus();
+  else document.getElementById('main').focus({ preventScroll: true });
+}
+
+// h2, not h3: these sit directly under the view's h1, and a skipped heading
+// level breaks the outline for screen readers.
+function emptyState(title, body) {
+  const s = el('div', 'state');
+  s.innerHTML = `<h2>${esc(title)}</h2><p>${esc(body)}</p>`;
+  return s;
+}
+
+/* The data did not load: said on whichever tab is open, with a way to try
+   again that works in an installed app, which has no reload button. */
+function renderLoadError() {
+  const host = document.querySelector(`[data-view="${app.view}"]`);
+  if (!host) return;
+  host.innerHTML = '';
+  const s = emptyState('Could not load the data',
+    `The page could not read its data: ${app.loadError}. On a fresh install nothing has been published yet — run a check and it will appear.`);
+  const b = el('button', 'btn', 'Try again');
+  b.type = 'button';
+  b.addEventListener('click', () => location.reload());
+  s.appendChild(b);
+  host.appendChild(s);
+}
+
+// Reset per render: how many photos are worth blocking on. Six covers the
+// first screen at every width this is designed for.
+let eagerSlots = 0;
+
+function shot(l, cls) {
+  const box = el('div', cls || 'card__shot');
+  // Our copy first. The seller's CDN is only a fallback: it is unreachable
+  // offline and drops the picture once the car is delisted.
+  const src = l.thumb || (l.images || [])[0];
+  // Say why there is no photo: the seller published none, it is not copied
+  // yet, the car is hidden (hidden cars get no copy), it has left (its copy
+  // goes when it does), or it failed to load.
+  const fallback = (failedToLoad) => {
+    const has = (l.images || []).length;
+    // A copy that exists but will not load is this device's problem (often
+    // being offline), not a copy that is missing.
+    const why = (failedToLoad && l.thumb) ? 'photo not loaded'
+              : l.filtered ? 'not kept for hidden cars'
+              : has && l.status === 'gone' ? 'photo not kept after it left'
+              : has ? 'photo not copied yet'
+              : 'no photo';
+    box.innerHTML = `<div class="shot__fallback">${CAR_GLYPH}
+        <span>${why}</span>
+      </div>`;
+  };
+  if (!src) { fallback(); return box; }
+  const img = new Image();
+  // The first screenful loads eagerly so it is not a grey box on arrival;
+  // everything below stays lazy.
+  const eager = eagerSlots > 0;
+  if (eager) eagerSlots -= 1;
+  img.loading = eager ? 'eager' : 'lazy';
+  img.fetchPriority = eager ? 'high' : 'low';
+  img.decoding = 'async';
+  img.width = 400; img.height = 300;
+  img.alt = '';
+  img.addEventListener('error', () => fallback(true), { once: true });
+  setPhoto(img, src, eager);
+  box.appendChild(img);
+  return box;
+}
+
+const sellerWord = kind => kind === 'private' ? 'private seller'
+                        : kind === 'dealer' ? 'dealer' : '';
+
+/* Whether a live car belongs in the Listings grid as it is filtered now,
+   leaving the site aside: the picker and the Marketplace line count by it. */
+const inView = l => (app.search === 'all' || l.search_id === app.search)
+  && (app.showHidden || !l.filtered) && !marks.of(l.id).dismissed;
+
+/* Which site a car is from, and whether this watch uses more than one. */
+const siteOf = l => l.site || 'autotrader';
+const usesMarketplace = () => Boolean(app.data?.marketplace?.last_batch)
+  || (app.data?.listings || []).some(l => siteOf(l) === 'marketplace');
+
+/* Where a car is listed, as its link names it. */
+function siteName(l) {
+  return l.site === 'marketplace' ? 'Facebook Marketplace' : 'autotrader.ca';
+}
+
+function card(l) {
+  const b = el('button', 'card');
+  b.type = 'button';
+  // So focus can find this car again once a re-render has replaced the card.
+  b.dataset.id = String(l.id);
+  if (l.status === 'gone') b.classList.add('card--gone');
+  if (l.filtered) b.classList.add('card--hidden');
+  if (siteOf(l) === 'marketplace') b.classList.add('card--mp');
+  if (app.freshIds.has(String(l.id))) b.classList.add('is-fresh');
+
+  const move = priceMove(l);
+  const kind = lastEventOf(l);
+  const cmp = app.data.comparables?.[String(l.id)];
+
+  if (!l.filtered) b.appendChild(shot(l));
+
+  const body = el('div', 'card__body');
+  // A car you stopped watching has not left the market, and says which.
+  const flagWord = kind === 'removed' && unwatched(l) ? 'No longer watched'
+    : kind ? KIND[kind].label : '';
+  let flag = '';
+  if (kind) flag = `<span class="flag flag--${KIND[kind].flag}">${flagWord}</span>`;
+
+  // An unpriced car is headed by its name, with "Call for price" on the line
+  // under it, so the largest text on the card says what the car is.
+  const headline = l.unpriced
+    ? `<b>${esc(carName(l))}</b>`
+    : `<b class="num">${money(l.price)}</b>` +
+      (move && move.delta < 0
+        ? `<span class="card__was num">${money(move.was)}</span><span class="card__delta num drop">${signed(move.delta)}</span>`
+        : move && move.delta > 0
+        ? `<span class="card__was num">${money(move.was)}</span><span class="card__delta num rise">${signed(move.delta)}</span>`
+        : '');
+  const subline = l.unpriced ? 'Call for price' : esc(carName(l));
+
+  const facts = [];
+  if (l.mileage_km) facts.push(`<span class="num">${km(l.mileage_km)}<u> km</u></span>`);
+  // money(), so every dollar figure is formatted the same way.
+  if (l.per_1000km) facts.push(`<span class="num">${money(l.per_1000km)}<u> ${PER_KM}</u></span>`);
+  // "0 km away" reads as a missing value, not as "this one is in your city".
+  if (l.distance_km !== undefined && l.distance_km !== null) {
+    facts.push(l.distance_km < 1
+      ? '<span>right here</span>'
+      : `<span class="num">${km(l.distance_km)}<u> km away</u></span>`);
+  }
+  if (l.location) facts.push(`<span>${esc(l.location)}</span>`);
+
+  const foot = [];
+  const says = comparableSays(cmp, l);
+  if (says?.badge) foot.push(`<span class="${says.tone}">${says.badge}</span>`);
+  if (l.days_listed !== undefined) foot.push(`<span class="num">${daysListed(l.days_listed)}</span>`);
+  if (l.photo_count) foot.push(`<span class="num">${l.photo_count} photo${
+    l.photo_count === 1 ? '' : 's'}</span>`);
+  // Dealer or private goes on this line, not among the facts, which would
+  // overflow the card's width.
+  if (l.seller_type) foot.push(`<span>${esc(sellerWord(l.seller_type))}</span>`);
+  if (l.site === 'marketplace') foot.unshift('<span class="site">Marketplace</span>');
+  if (l.sale_pending) foot.push('<span>sale pending</span>');
+  const yourMarks = marks.of(l.id);
+  // Muting is said in words: a greyed card does not say alerts are off.
+  if (yourMarks.muted) foot.push('<span>muted — no alerts</span>');
+  if (yourMarks.dismissed) foot.push('<span>not interested</span>');
+
+  // Your marks and note show on the card itself, not only in the sheet.
+  const mine = yourMarks;
+  if (mine.shortlisted) b.classList.add('card--mine');
+  if (mine.dismissed) b.classList.add('card--dropped');
+  if (mine.muted) b.classList.add('card--muted');
+
+  body.innerHTML =
+    `${flag}
+     <div class="card__price">${headline}</div>
+     <div class="card__title">${subline}</div>
+     <div class="facts">${facts.join('')}</div>` +
+    (l.filtered ? `<p class="rule">Hidden: ${esc(l.filter_reason || 'a rule of yours')}</p>` : '') +
+    (mine.note ? `<p class="yours">${esc(mine.note)}</p>` : '') +
+    (foot.length ? `<div class="card__foot">${foot.join('')}</div>` : '');
+  b.appendChild(body);
+  // The name replaces everything the card shows, so it says all of it: a
+  // screen reader must hear that a car has gone, or came down and by how
+  // much, not only what it is. The car and its price come first, so a voice
+  // can find it by name.
+  const heard = [carName(l), l.unpriced ? 'call for price' : money(l.price)];
+  if (kind) heard.push(flagWord.toLowerCase());
+  if (move && !l.unpriced) {
+    heard.push(`was ${money(move.was)}`,
+      `${move.delta < 0 ? 'down' : 'up'} ${money(Math.abs(move.delta))}`);
+  }
+  if (l.mileage_km) heard.push(`${km(l.mileage_km)} kilometres`);
+  if (l.per_1000km) heard.push(`${money(l.per_1000km)} ${PER_KM}`);
+  if (l.distance_km !== undefined && l.distance_km !== null) {
+    heard.push(l.distance_km < 1 ? 'right here' : `${km(l.distance_km)} km away`);
+  }
+  if (l.location) heard.push(l.location);
+  if (says?.badge) heard.push(says.badge);
+  if (l.days_listed !== undefined) heard.push(daysListed(l.days_listed));
+  if (l.site === 'marketplace') heard.push('on Facebook Marketplace');
+  if (l.seller_type) heard.push(sellerWord(l.seller_type));
+  if (l.sale_pending) heard.push('sale pending');
+  if (l.filtered) heard.push(`hidden: ${l.filter_reason || 'a rule'}`);
+  if (mine.shortlisted) heard.push('on your shortlist');
+  if (mine.muted) heard.push('muted, no alerts');
+  if (mine.dismissed) heard.push('not interested');
+  b.setAttribute('aria-label', heard.filter(Boolean).join(', ')
+    + (mine.note ? `. Your note: ${mine.note}` : ''));
+  b.addEventListener('click', () => openSheet(l.id));
+  return b;
+}
+
+/* ----------------------------------------------------------------- market */
+// Text as a sentence: a capital first letter and a closing full stop.
+function sentence(text) {
+  const t = String(text || '').trim();
+  if (!t) return '';
+  return t.charAt(0).toUpperCase() + t.slice(1) + (/[.!?]$/.test(t) ? '' : '.');
+}
+
+/* A few prices, written out, where a median would say too little. */
+function priceList(prices) {
+  const all = (prices || []).map(money);
+  if (!all.length) return '—';
+  if (all.length === 1) return all[0];
+  return all.slice(0, -1).join(', ') + ' and ' + all[all.length - 1];
+}
+
+/* Getting the alerts onto a phone in as few steps as possible.
+ *
+ * The QR code is the topic's address, drawn at publish time by
+ * autotrader/qr.py, so nobody has to type a long topic name. The copy does
+ * not promise the ntfy app will open: that is the phone's decision, and the
+ * address works either way.
+ */
+function onYourPhone(notify) {
+  const box = el('div', 'phone');
+  const url = notify.ntfy_url || '';
+  const topic = notify.ntfy_topic || '';
+  box.innerHTML =
+    (notify.ntfy_qr ? `<div class="phone__qr">${notify.ntfy_qr}</div>` : '') +
+    `<div class="phone__how">
+       <h3 class="phone__h">Get these on your phone</h3>
+       <ol class="phone__steps">
+         <li>Install <b>ntfy</b> - it is free and needs no account:
+           <a href="https://apps.apple.com/app/ntfy/id1625396347" rel="noopener">iOS</a> ·
+           <a href="https://play.google.com/store/apps/details?id=io.heckel.ntfy" rel="noopener">Android</a> ·
+           <a href="https://f-droid.org/packages/io.heckel.ntfy/" rel="noopener">F-Droid</a></li>
+         <li>Point the phone's camera at the code${notify.ntfy_qr ? '' : ' below'}, or
+           <a href="${esc(url)}" rel="noopener">open this link on it</a>.</li>
+         <li>Subscribe. Every alert this page describes arrives there from then on.</li>
+       </ol>
+       <p class="phone__topic">Or type the topic in by hand:
+         <code class="mono">${esc(topic)}</code>
+         <button type="button" class="btn btn--small" data-copy="${esc(topic)}">Copy</button></p>
+       <p class="note phone__warn">Anyone who knows this topic can read these alerts. It is
+         long and random, and it appears only here, behind your passphrase - keep it
+         to yourself.</p>
+     </div>`;
+  const copy = box.querySelector('[data-copy]');
+  if (copy) {
+    copy.addEventListener('click', async () => {
+      const said = copy.textContent;
+      try {
+        await navigator.clipboard.writeText(copy.dataset.copy);
+        copy.textContent = 'Copied';
+      } catch {
+        // No clipboard access: select the text instead, which always works,
+        // rather than silently doing nothing.
+        const range = document.createRange();
+        range.selectNodeContents(box.querySelector('code'));
+        const sel = getSelection();
+        sel.removeAllRanges();
+        sel.addRange(range);
+        copy.textContent = 'Selected';
+      }
+      setTimeout(() => { copy.textContent = said; }, 1600);
+    });
+  }
+  return box;
+}
+
+/* Every table on this page, inside its own horizontal scroller, so a wide
+   table can never spill invisibly past a narrow column. */
+function table(html) {
+  const wrap = el('div', 'tblwrap');
+  const t = el('table', 'tbl');
+  t.innerHTML = html;
+  wrap.appendChild(t);
+  return wrap;
+}
+
+/* The trim buckets are the handful of words that move a price, plus "base"
+   for everything else. "base" is labelled "Other", not "no trim": most of
+   those cars name a trim, just not one this groups on. */
+const TRIM_NAMES = { cs: 'CS', lci: 'LCI', competition: 'Competition',
+                    touring: 'Touring', carbon: 'Carbon' };
+
+/* How old the watch is, in words: "started today" rather than "0 days old". */
+function age(days) {
+  const n = Number(days) || 0;
+  if (n < 1) return 'the watch started today';
+  if (n === 1) return 'the watch is a day old';
+  return `the watch is ${plural(n, 'day')} old`;
+}
+
+function trimLabel(name) {
+  if (name === 'base' || !name) return 'Other';
+  // Known trims keep their own spelling ("CS", not "Cs").
+  return TRIM_NAMES[name] || name.charAt(0).toUpperCase() + name.slice(1);
+}
+
+function renderMarket() {
+  const host = document.querySelector('[data-view="market"]');
+  host.innerHTML = '';
+  const m = app.data.market || {};
+
+  // With no cars, one empty state rather than a skeleton of zero tiles.
+  const carsHere = (app.data.listings || []).length;
+  if (!carsHere) {
+    const head = el('div', 'view__head measure');
+    head.innerHTML = '<h1 id="market-h">The market</h1>';
+    host.appendChild(head);
+    host.appendChild(emptyState(
+      app.data.last_check ? 'No cars to compare yet' : 'Nothing measured yet',
+      app.data.last_check
+        ? 'The searches have not turned up a car, so there is no market to '
+          + 'describe. This page fills in on its own: medians once six '
+          + 'comparable cars are being watched, and how fast things sell '
+          + 'once the bot has seen some of them leave.'
+        : 'This page is about what a hundred cars say together - what the '
+          + 'median asks, how long they sit, how often a price actually '
+          + 'moves. None of that can be said from a standing start, so it '
+          + 'stays empty until the first check has run and then fills in as '
+          + 'the watch gets older.'));
+    return;
+  }
+
+  const head = el('div', 'view__head measure');
+  // Listings counts what you can see; the market is the whole market. The
+  // heading spells out the difference between the two numbers.
+  // Counted by the bot before the page's cap, as m.live is: the cap drops
+  // hidden cars first, so counting the ones this page carries would come
+  // out short and overstate the cars you could buy.
+  const hiddenHere = app.data.health?.counts?.filtered ?? (app.data.listings || [])
+    .filter(l => l.status === 'active' && l.filtered).length;
+  const buyable = (m.live ?? 0) - hiddenHere;
+  // The models count only a car with an asking price: there is nothing of a
+  // "call for price" car to take a median of. The heading counts the same.
+  const priced = Object.values(m.by_model || {}).reduce((n, row) => n + (row.n || 0), 0);
+  head.innerHTML = `<h1 id="market-h">The market</h1>
+    <p>What the cars say together, rather than what one says. The tiles count
+       all ${m.live ?? 0} listings the searches returned${hiddenHere
+         ? `, the ${hiddenHere} your rules hide included` : ''};
+       the per-model figures below count only the ${priced < buyable
+         ? `${priced} of the ${buyable} you could actually buy that carry an asking price`
+         : `${buyable} you could actually buy`}, because a median of the cars a rule
+       rejects is a market you are not shopping in. Everything carries how many
+       cars it is drawn from.</p>`;
+  host.appendChild(head);
+
+  // The window first, because it decides how much of the rest to believe.
+  if (m.window) {
+    const w = el('p', 'why measure');
+    w.innerHTML = m.window.thin
+      ? `<b>Read this as a snapshot.</b> ${esc(m.window.note)}`
+      : `<b>${m.window.cars_with_two_prices}</b> cars have been priced more than
+         once over ${m.window.watching_days} days of watching.`;
+    host.appendChild(w);
+  }
+
+  const v = m.velocity || {}, d = m.discounting || {};
+  const st = m.still_listed_days || {}, lt = m.listed_days || {};
+  const days = n => `${n}<small style="display:inline"> day${n === 1 ? '' : 's'}</small>`;
+  // Some of these are bounded by how long the bot has been watching rather
+  // than by the market, and are labelled so.
+  const sinceWatch = v.window_is_the_watch;
+  const stats = el('dl', 'stats');
+  stats.innerHTML = `
+    <div class="stat"><dt>${sinceWatch ? 'Arrived since watching began' : 'Arrived this week'}</dt>
+      <dd class="num">${v.arrived_7d ?? '—'}</dd>
+      ${sinceWatch ? `<dd class="stat__note">${age(st.watching_days)}, so that is
+        all of them rather than this week's</dd>` : ''}</div>
+    <div class="stat"><dt>${sinceWatch ? 'Left since watching began' : 'Left this week'}</dt>
+      <dd class="num">${v.left_7d ?? '—'}</dd></div>
+    <div class="stat"><dt>Still listed, median</dt>
+      <dd class="num">${st.median == null ? '—'
+        : (st.censored && !st.median) ? '—'
+        : (st.censored ? '<small style="display:inline">at least </small>' : '') + days(st.median)}</dd>
+      <dd class="stat__note">${
+        st.median == null ? 'nothing to measure yet'
+        : (st.censored && !st.median)
+          ? 'every car here arrived after the watch on it started, so none of '
+            + 'them has a measurable age yet'
+        : st.censored ? 'nothing has been watched longer than this'
+        : `longest ${days(st.longest ?? 0)}`}</dd></div>
+    <div class="stat"><dt>Cars discounted</dt><dd class="num">${d.cars ?? 0}</dd>
+      <dd class="stat__note">${d.total ? money(d.total) + ' off in total' : 'none yet'}</dd></div>
+    <div class="stat"><dt>Listed before coming down</dt>
+      <dd class="num">${lt.median == null ? '—' : days(lt.median)}</dd>
+      <dd class="stat__note">from ${lt.n ?? 0} that came down${lt.biased_short
+        ? ' — only short-lived ones can finish inside a watch this young' : ''}</dd></div>
+    <div class="stat"><dt>Listed right now</dt><dd class="num">${m.live ?? 0}</dd>
+      <dd class="stat__note">${hiddenHere
+        ? `${(m.live ?? 0) - hiddenHere} live · ${hiddenHere} hidden · `
+        : ''}${m.gone ?? 0} gone and kept</dd></div>`;
+  host.appendChild(stats);
+  if (lt.note) {
+    host.appendChild(el('p', 'note measure',
+      '“Listed before coming down” is ' + lt.note + '.'));
+  }
+
+  // One section per model: prices and trims only mean something within a
+  // model, never averaged across different ones.
+  for (const row of Object.values(m.by_model || {})) {
+    const sec = el('section', 'section measure');
+    const count = row.n
+      ? `${row.n} to buy${row.hidden ? ` · ${row.hidden} hidden` : ''}`
+      : `none to buy · ${row.hidden} hidden`;
+    sec.innerHTML = `<div class="section__head">
+        <h2>${esc(row.label)}</h2><span class="count num">${count}</span></div>`;
+
+    if (!row.n) {
+      sec.appendChild(el('p', 'note', `Every ${esc(row.label)} the searches found is `
+        + `outside your rules. The Listings tab says which rule, car by car.`));
+      host.appendChild(sec);
+      continue;
+    }
+    sec.appendChild(el('p', 'note', row.thin
+      ? `${priceList(row.prices)} — ${row.n} car${row.n === 1 ? '' : 's'}, which is `
+        + `too few for a median. The asking prices themselves are above.`
+      : `Median ${money(row.median)}, ${money(row.low)} to ${money(row.high)}, `
+        + `from ${row.n} cars.`));
+
+    const years = Object.entries(row.by_year || {});
+    const fat = years.filter(([, y]) => !y.thin);
+    // Years with enough cars get a bar, scaled against the whole model so a
+    // single year does not fill the width; years with too few get their
+    // prices listed. Each block has its own subhead so the two cannot read
+    // as one table.
+    const thin = years.filter(([, y]) => y.thin);
+    if (fat.length) {
+      sec.appendChild(subhead('By year', 'the line is the full range, the '
+        + 'block the middle half, the tick the median'));
+      sec.appendChild(rangeChart(fat, modelRange(row)));
+    }
+    if (thin.length) {
+      sec.appendChild(subhead(
+        fat.length ? 'The other years' : 'By year',
+        `fewer than ${MIN_FOR_A_YEAR_MEDIAN} cars each, so the asking prices `
+        + `themselves rather than a median`));
+      sec.appendChild(table(`<thead><tr><th>Year</th><th class="r">Cars</th>
+          <th class="r">Asking</th></tr></thead><tbody>` +
+        thin.map(([year, y]) =>
+          `<tr><td>${esc(year)}</td><td class="r num">${y.n}</td>
+            <td class="r num">${priceList(y.prices)}</td></tr>`).join('') + '</tbody>'));
+    }
+
+    const trims = Object.entries(row.by_trim || {}).filter(([, t]) => t.n > 1);
+    if (trims.length > 1) {
+      const trimTable = table(`<thead><tr><th>Trim</th><th class="r">Cars</th>
+          <th class="r">Asking</th></tr></thead><tbody>` +
+        trims.map(([name, r]) =>
+          `<tr><td>${esc(trimLabel(name))}</td><td class="r num">${r.n}</td>
+            <td class="r num">${r.thin ? priceList(r.prices) : money(r.median)}</td>
+            </tr>`).join('') + '</tbody>');
+      sec.appendChild(subhead('By trim',
+        `a median where there are ${MIN_FOR_A_YEAR_MEDIAN} or more of one, `
+        + `the prices themselves below that`));
+      sec.appendChild(trimTable);
+      sec.appendChild(el('p', 'note',
+        '"Other" is every trim that is not one of the words that move a '
+        + 'price.'));
+    }
+    host.appendChild(sec);
+  }
+
+  // Whether the deal score means anything, said either way.
+  const check = app.data.score_check;
+  if (check) {
+    const sec = el('section', 'section measure');
+    sec.innerHTML = `<div class="section__head"><h2>Is the deal score worth anything?</h2></div>
+      <p class="note" style="margin-top:0">${esc(sentence(check.verdict))}</p>`;
+    if (check.cheap_rate !== undefined) {
+      sec.appendChild(table(`<thead><tr><th>Called</th><th class="r">Cars</th>
+          <th class="r">Later cut the price</th></tr></thead><tbody>
+        <tr><td>cheap for its kind</td><td class="r num">${check.called_cheap}</td>
+          <td class="r num">${check.cheap_rate}%</td></tr>
+        <tr><td>dear for its kind</td><td class="r num">${check.called_dear}</td>
+          <td class="r num">${check.dear_rate}%</td></tr></tbody>`));
+    }
+    host.appendChild(sec);
+  }
+
+  const out = el('section', 'section measure');
+  out.innerHTML = `<div class="section__head"><h2>Take it with you</h2></div>`;
+  const bar = el('div', 'bar');
+  for (const [label, make] of [['Listings as CSV', csvOfListings],
+                               ['Everything as JSON', () => JSON.stringify(app.data, null, 1)]]) {
+    const b = el('button', 'btn', label);
+    b.type = 'button';
+    b.addEventListener('click', () => download(label.includes('CSV') ? 'listings.csv' : 'autotrader.json', make()));
+    bar.appendChild(b);
+  }
+  out.appendChild(bar);
+  host.appendChild(out);
+}
+
+/* The asking prices of every car of this model, however few. The chart's
+   axis comes from here rather than from the rows it draws. */
+function modelRange(row) {
+  const prices = (row.prices || []).filter(p => typeof p === 'number');
+  const ends = [row.low, row.high, ...prices].filter(p => typeof p === 'number');
+  const years = Object.values(row.by_year || {});
+  for (const y of years) {
+    for (const p of [y.low, y.high, ...(y.prices || [])])
+      if (typeof p === 'number') ends.push(p);
+  }
+  return ends.length ? { min: Math.min(...ends), max: Math.max(...ends) } : null;
+}
+
+/* Below this many cars of a year, the prices are listed rather than reduced
+   to a median. Mirrors MIN_FOR_A_MEDIAN in autotrader/insight.py, which
+   decides it; this copy only feeds the page's wording. */
+const MIN_FOR_A_YEAR_MEDIAN = 5;
+
+/* A label over a block, so two blocks stacked cannot read as one. */
+function subhead(title, note) {
+  const h = el('div', 'subhead');
+  h.innerHTML = `<h3>${esc(title)}</h3>${note ? `<span>${esc(note)}</span>` : ''}`;
+  return h;
+}
+
+/* One row per year: the range as a bar, the median as a tick. A box plot
+   without the jargon, and it degrades to a table on a phone. */
+function rangeChart(years, axis) {
+  const all = years.flatMap(([, r]) => [r.low, r.high]);
+  const min = Math.min(axis?.min ?? Infinity, ...all);
+  const max = Math.max(axis?.max ?? -Infinity, ...all);
+  const span = (max - min) || 1;
+  // One grid for every year, so every track starts and ends in the same
+  // place and a price sits at the same point on each. A grid per row ended
+  // each track where that row's "$X n=Y" began. Each row is a subgrid of it,
+  // and so still one picture to a screen reader; without subgrid, the
+  // figures' column is a fixed width instead.
+  const wrap = el('div');
+  wrap.style.cssText = 'display:grid;grid-template-columns:48px minmax(0,1fr) max-content;'
+    + 'column-gap:var(--s3)';
+  for (const [year, r] of years) {
+    const row = el('div');
+    row.style.cssText = 'grid-column:1/-1;display:grid;'
+      + 'grid-template-columns:48px minmax(0,1fr) 14ch;grid-template-columns:subgrid;'
+      + 'column-gap:var(--s3);align-items:center;padding:var(--s1) 0';
+    const at = v => ((v - min) / span) * 100;
+    // Full range as a hairline, middle half as the solid bar, median as the
+    // tick, so one outlier cannot squash every other year into a smudge.
+    const q1 = r.q1 ?? r.low, q3 = r.q3 ?? r.high;
+    row.innerHTML = `
+      <span class="num" style="font-size:var(--t-small)">${esc(year)}</span>
+      <span style="position:relative;height:16px;display:block">
+        <span style="position:absolute;left:${at(r.low)}%;width:${Math.max(at(r.high) - at(r.low), 0.4)}%;top:7px;height:1px;background:var(--line-strong)"></span>
+        <span style="position:absolute;left:${at(q1)}%;width:${Math.max(at(q3) - at(q1), 0.8)}%;top:5px;height:5px;border-radius:2px;background:var(--surface-3)"></span>
+        <span style="position:absolute;left:${at(r.median)}%;top:1px;width:2px;height:14px;background:var(--text)"></span>
+      </span>
+      <span class="num" style="font-size:var(--t-small)">${money(r.median)}
+        <u style="text-decoration:none;color:var(--text-3);font-size:var(--t-micro)"> n=${r.n}</u></span>`;
+    row.setAttribute('role', 'img');
+    row.setAttribute('aria-label',
+      `${year}: ${r.n} cars, ${money(r.low)} to ${money(r.high)}, ` +
+      `middle half ${money(q1)} to ${money(q3)}, median ${money(r.median)}`);
+    wrap.appendChild(row);
+  }
+  // The axis ends, so the bars can be read against something: under the
+  // track itself, where the lowest and highest prices are drawn. Spaced below
+  // as well as above so whatever follows does not read as another row.
+  const ends = el('div', 'facts');
+  ends.style.cssText = ('grid-column:2;justify-content:space-between;'
+    + 'margin:var(--s2) 0 var(--s5)');
+  ends.innerHTML = `<span class="num">${money(min)}</span>`
+    + `<span class="num">${money(max)}</span>`;
+  wrap.appendChild(ends);
+  return wrap;
+}
+
+function csvOfListings() {
+  const cols = ['id', 'year', 'make', 'model', 'trim', 'price', 'mileage_km',
+                'per_1000km', 'distance_km', 'days_listed', 'location',
+                'province', 'seller', 'status', 'filtered', 'filter_reason',
+                'first_seen', 'last_seen', 'url'];
+  const cell = v => {
+    let text = v === null || v === undefined ? '' : String(v);
+    // Text a spreadsheet would run as a formula is written as text. Trims,
+    // sellers and places come from whoever listed the car, and a formula can
+    // reach out of the file once it is opened. Numbers are left as they are.
+    if (typeof v === 'string' && /^[=+\-@\t\r]/.test(text)) text = "'" + text;
+    return /[",\r\n]/.test(text) ? '"' + text.replace(/"/g, '""') + '"' : text;
+  };
+  return [cols.join(',')].concat(
+    (app.data.listings || []).map(l => cols.map(c => cell(l[c])).join(','))
+  ).join('\n');
+}
+
+function download(name, text) {
+  const blob = new Blob([text], { type: 'text/plain;charset=utf-8' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url; a.download = name;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
+/* ----------------------------------------------------------------- searches */
+function renderSearches() {
+  const host = document.querySelector('[data-view="searches"]');
+  host.innerHTML = '';
+  const head = el('div', 'view__head');
+  head.innerHTML = `<h1 id="searches-h">Searches</h1>
+    <p>What the bot is looking at, and the rules applied to what it finds. Editing a
+       rule shows what it would keep before you commit to it.</p>`;
+  host.appendChild(head);
+
+  host.appendChild(recentChanges());
+
+  for (const s of (app.data.searches || [])) {
+    const sec = el('section', 'section');
+    const h = s.health || {};
+    const bad = h.consecutive_failures > 0;
+    const shutOut = h.shut_out;
+    sec.innerHTML = `<div class="section__head">
+        <h2 class="name">${esc(s.name)}</h2>
+        <span class="count num">${s.counts?.active ?? 0} live · ${s.counts?.filtered ?? 0} hidden</span>
+      </div>`;
+
+    const kv = el('dl', 'kv');
+    const area = s.area?.text;
+    // The model and area the bot enforces itself are shown, so every rule
+    // applied is visible somewhere on the page. A distance with no place the
+    // bot can measure from keeps every car, and says so.
+    const models = [].concat(s.rules?.filters?.models ?? []);
+    kv.innerHTML =
+      `<dt>Watching</dt><dd>${esc(searchWords(s))}
+         · <a href="${esc(s.url)}" rel="noopener" target="_blank">open on autotrader.ca</a></dd>` +
+      (models.length ? `<dt>Model</dt><dd>${esc(models.join(', '))} <span class="note" style="margin:0">— a backstop. The site does honour the model, and the bot reads only the results it declares, so this rule has nothing left to turn away</span></dd>` : '') +
+      (area ? `<dt>Area</dt><dd>${esc(area)} ${s.area.enforced === false
+        ? `<span class="warnt">— not applied: ${esc(s.area.why || 'there is no place to measure from')}</span>`
+        : '<span class="note" style="margin:0">— enforced here, because the site ignores it</span>'}</dd>` : '') +
+      `<dt>Last read</dt><dd>${h.last_ok
+          ? `${stamp(h.last_ok)} · ${h.last_count || 0} listing${(h.last_count || 0) === 1 ? '' : 's'}`
+            + (h.not_this_car
+               ? ` · ${num(h.not_this_car)} of them a different car, discarded`
+               : '')
+          : 'never — this search has not been read yet'}</dd>` +
+      (bad ? `<dt>Trouble</dt><dd class="err">${h.consecutive_failures} failure${
+        h.consecutive_failures === 1 ? '' : 's'} in a row — ${esc(h.last_error || '')}</dd>` : '') +
+      (shutOut ? `<dt>Note</dt><dd class="warnt">Reads fine, keeps nothing: ${esc(shutOut)}</dd>` : '');
+    sec.appendChild(kv);
+    sec.appendChild(rulesEditor(s));
+    const alias = aliasesEditor(s);
+    if (alias) sec.appendChild(alias);
+    if (usesMarketplace()) sec.appendChild(marketplaceSwitch(s));
+    if ((app.data.searches || []).length > 1) {
+      const stop = el('div', 'bar');
+      stop.style.marginTop = 'var(--s3)';
+      stop.appendChild(askButton('Stop watching this search', 'Remove a search',
+        [{ action: 'remove-search', search: s.id }]));
+      sec.appendChild(stop);
+    }
+    host.appendChild(sec);
+  }
+
+  if (usesMarketplace()) host.appendChild(marketplaceSettings());
+  host.appendChild(pasteALink());
+}
+
+/* Other spellings that also count as a search's model: the owner's fix when
+   a seller writes the model some way the matching does not catch. */
+function aliasesEditor(s) {
+  const models = [].concat(s.rules?.filters?.models ?? []);
+  if (!models.length) return null;
+  // A list, or one name when set by hand with `python -m autotrader set`.
+  const saved = [].concat(s.rules?.filters?.aliases ?? []);
+  const id = s.id.replace(/[^a-z0-9]/gi, '');
+  const box = el('div');
+  box.style.marginTop = 'var(--s4)';
+  box.innerHTML = `
+    <label class="labelled"><span>Also counts as ${esc(models.join(', '))}</span>
+      <span class="field"><input type="text" id="al-${id}" autocomplete="off"
+        placeholder="other spellings, separated by commas" value="${esc(saved.join(', '))}"></span></label>
+    <p class="note">For a car whose title spells the model some other way. Written without
+      its spaces, or with a short trim run on after a number, it already counts.</p>`;
+  const ask = el('div', 'bar');
+  box.appendChild(ask);
+  // Held to what the bot takes (control._ALIAS and MAX_ALIASES), so the
+  // page never offers a list the next check would refuse whole.
+  const rule = app.data.bounds?.aliases || {};
+  let fits = () => true;
+  try {
+    const re = rule.pattern ? new RegExp(rule.pattern) : null;
+    if (re) fits = x => re.test(x);
+  } catch { /* a pattern this browser cannot read checks nothing */ }
+  const update = () => {
+    const list = box.querySelector('input').value.split(',').map(x => x.trim()).filter(Boolean);
+    ask.innerHTML = '';
+    if (JSON.stringify(list) === JSON.stringify(saved)) return;
+    const bad = list.find(x => !fits(x));
+    if (bad || (rule.most && list.length > rule.most)) {
+      ask.appendChild(el('p', 'why err', bad
+        ? `\u201c${esc(bad)}\u201d is not a model name the bot takes: letters, digits, spaces `
+          + 'and - . + / only, up to 40 characters.'
+        : `At most ${num(rule.most)} other spellings, for one search.`));
+      return;
+    }
+    ask.appendChild(askButton(list.length ? 'Save these spellings' : 'Clear the spellings',
+      `Other spellings for ${s.name}`,
+      [{ action: 'set-rule', search: s.id, rule: 'aliases', value: list.length ? list : null }]));
+    ask.appendChild(el('span', 'note', CHANGE_NOTE));
+  };
+  box.addEventListener('input', update);
+  update();
+  return box;
+}
+
+/* Whether the Marketplace collector reads this search too. */
+function marketplaceSwitch(s) {
+  const on = s.marketplace !== false;
+  const box = el('div', 'bar');
+  box.style.marginTop = 'var(--s3)';
+  box.appendChild(el('span', 'note',
+    on ? 'Read on Facebook Marketplace too.' : 'Not read on Facebook Marketplace.'));
+  box.appendChild(askButton(on ? 'Stop reading it on Marketplace' : 'Read it on Marketplace too',
+    `${on ? 'Stop reading' : 'Read'} ${s.name} on Marketplace`,
+    [{ action: 'set-marketplace', search: s.id, enabled: !on }]));
+  return box;
+}
+
+/* A Marketplace place, as control._PLACE_SLUG takes it once lowercased: the
+   word in Marketplace's own web addresses. */
+const PLACE_WORD = '[A-Za-z0-9][A-Za-z0-9\\-]{1,40}';
+
+/* The Marketplace settings the watch keeps. The collector's own pace is set
+   on the Mac and shown on the Status tab. */
+const MP_SETTINGS = [
+  ['radius_km', 'Radius, km', 'number', 'per search',
+   'How far from the place Marketplace is asked to look, up to 500. Left blank, each search '
+   + 'uses its own distance. Each search\'s distance rule still applies.'],
+  ['place', 'Place', 'text', 'per search',
+   'The word for your area in Marketplace\'s own web addresses: what follows /marketplace/ '
+   + 'when you browse it. Left blank, each search\'s \u201cnear\u201d is used.'],
+  ['new_within_days', 'New within, days', 'number', '7',
+   'A car Facebook dates further back is recorded, not announced, when it first shows up among the results read.'],
+  ['gone_after_days', 'Gone after, days', 'number', '10',
+   'A car not seen for this long, while its search reads fine, counts as gone.'],
+  ['exact', 'Match', 'bool', '',
+   'Loose asks Marketplace for anything like the search and reads most cars of the make; '
+   + 'exact reads fewer cars of other models, and may miss one titled some other way. '
+   + 'The same pages are read either way.'],
+];
+function marketplaceSettings() {
+  const conf = app.data.config?.marketplace || {};
+  const bounds = app.data.bounds?.marketplace || {};
+  const sec = el('section', 'section');
+  sec.innerHTML = `<div class="section__head"><h2>Facebook Marketplace</h2></div>
+    <div class="bar">${MP_SETTINGS.map(([k, label, type, hint]) => type === 'bool' ? `
+      <label class="labelled"><span>${label}</span>
+        <select id="mp-${k}">
+          <option value=""${conf[k] ? '' : ' selected'}>Loose</option>
+          <option value="true"${conf[k] ? ' selected' : ''}>Exact</option>
+        </select></label>` : `
+      <label class="labelled"><span>${label}</span>
+        <span class="field"><input type="${type}" id="mp-${k}"
+          ${type === 'number' ? `inputmode="numeric" ${wholeNumber(bounds[k])}` : ''}
+          ${k === 'place' ? `pattern="${PLACE_WORD}" spellcheck="false"` : ''}
+          placeholder="${esc(hint)}" value="${esc(conf[k] ?? '')}"></span></label>`).join('')}
+    </div>
+    <dl class="kv">${MP_SETTINGS.map(([, label, , , why]) =>
+      `<dt>${label}</dt><dd><span class="note" style="margin:0">${why}</span></dd>`).join('')}</dl>
+    <p class="note">How often the collector reads, and its overnight pause, are set on the
+      Mac itself; the Status tab shows them.</p>`;
+  const ask = el('div', 'bar');
+  sec.appendChild(ask);
+  const update = () => {
+    ask.innerHTML = '';
+    // As on the rules: a value the bot would refuse offers nothing unless it
+    // is the one saved, and a box whose text is not a number is not taken
+    // for an empty one.
+    const wrong = MP_SETTINGS.find(([k]) => {
+      const box = sec.querySelector('#mp-' + k);
+      return box.validity.badInput
+        || (!box.validity.valid && box.value.trim() !== String(conf[k] ?? ''));
+    });
+    if (wrong) {
+      const [k, label, type] = wrong;
+      ask.appendChild(el('p', 'why err', type === 'number'
+        ? needsWhole(label, bounds[k])
+        : `<b>${esc(label)}</b> needs the word from Marketplace's own address: letters, `
+          + 'digits and hyphens. Nothing is sent until it has one.'));
+      return;
+    }
+    const changes = [];
+    for (const [k, , type] of MP_SETTINGS) {
+      const raw = sec.querySelector('#mp-' + k).value.trim();
+      const value = raw === '' ? null : type === 'number' ? Number(raw)
+        : type === 'bool' ? true : raw;
+      const now = type === 'bool' ? (conf[k] ? true : null) : (conf[k] ?? null);
+      if (now === value || (value === null && (now ?? '') === '')) continue;
+      changes.push({ action: 'set-marketplace', setting: k, value });
+    }
+    if (!changes.length) return;
+    ask.appendChild(askButton('Save Marketplace settings', 'Change the Marketplace settings', changes));
+    ask.appendChild(el('span', 'note', CHANGE_NOTE));
+  };
+  sec.addEventListener('input', update);
+  sec.addEventListener('change', update);
+  update();
+  return sec;
+}
+
+/* What became of the changes sent from this page. A refused change is
+   otherwise invisible: the file is consumed either way. */
+function recentChanges() {
+  const frag = document.createDocumentFragment();
+  const changes = (app.data.changes || []).slice(0, 3);
+  if (!changes.length) return frag;
+  const sec = el('section', 'section');
+  sec.innerHTML = '<div class="section__head"><h2>Your recent changes</h2></div>';
+  const list = el('ul', 'limits');
+  for (const c of changes) {
+    const li = el('li');
+    li.innerHTML = `<b class="${c.ok ? '' : 'err'}">${c.ok ? 'Applied' : 'Refused'}</b>
+      ${esc(when(c.at))} — `;
+    li.appendChild(document.createTextNode(String(c.text || '').split('\n')
+      .filter(Boolean).join(' ')));
+    list.appendChild(li);
+  }
+  sec.appendChild(list);
+  frag.appendChild(sec);
+  return frag;
+}
+
+/* The search as a sentence, from the parts of the link the bot understood,
+   so the reader can see it was read correctly. */
+function searchWords(s) {
+  const m = s.summary || {};
+  const bits = [[m.make, m.model].filter(Boolean).join(' ') || 'any car'];
+  if (m.year_min && m.year_max) bits.push(`${m.year_min}–${m.year_max}`);
+  else if (m.year_min) bits.push(`${m.year_min} or newer`);
+  else if (m.year_max) bits.push(`up to ${m.year_max}`);
+  else bits.push('any year');
+  if (m.price_max) bits.push(`under ${money(m.price_max)}`);
+  if (m.mileage_max) bits.push(`under ${km(m.mileage_max)} km`);
+  for (const chip of (m.chips || [])) bits.push(chip);
+  return bits.join(' · ');
+}
+
+/* The rule boxes on each search: the rule each one sets, what it says when
+   it is blank, and how its value is written. */
+const RULE_BOXES = [
+  { box: 'mx', rule: 'max_price', label: 'Max asking', hint: 'no ceiling', says: money },
+  { box: 'y0', rule: 'min_year', label: 'From year', hint: 'any', says: String },
+  { box: 'y1', rule: 'max_year', label: 'To year', hint: 'any', says: String },
+  { box: 'km', rule: 'max_distance_km', label: 'Within km', hint: 'anywhere', says: n => `${num(n)} km` },
+];
+
+/* A number box's attributes: whole numbers only, between the bounds the bot
+   holds a change to when the data carries them (control.RULE_BOUNDS and
+   MARKETPLACE_SETTINGS, published as `bounds`). */
+function wholeNumber(range) {
+  return 'step="1"' + (Array.isArray(range)
+    ? ` min="${esc(range[0])}" max="${esc(range[1])}"` : '');
+}
+
+/* What a number box needs, said in place of the change it cannot offer. */
+function needsWhole(label, range, says = num) {
+  return `<b>${esc(label)}</b> needs a whole number`
+    + (Array.isArray(range) ? ` from ${esc(says(range[0]))} to ${esc(says(range[1]))}` : '')
+    + '. Nothing is sent until it has one.';
+}
+
+function rulesEditor(s) {
+  const box = el('div');
+  box.style.marginTop = 'var(--s4)';
+  const f = { ...(s.rules?.filters || {}) };
+  // A box left blank takes the rule set for every search, as the bot reads
+  // them (Config.rules_for) - unless this search sets that rule to none.
+  // The published settings carry those shared rules.
+  const shared = app.data.config?.filters || {};
+  const blank = k => (f[k] === null ? null : shared[k] ?? null);
+  const bounds = app.data.bounds?.rules || {};
+  const id = s.id.replace(/[^a-z0-9]/gi, '');
+  const field = r => box.querySelector(`#${r.box}-${id}`);
+  // A distance needs a place to be measured from, and the bot refuses one
+  // for a search without a place it can find (control.py), so the box is
+  // offered only once it has one. s.area is the search's near as the bot
+  // reads it: its own, or the one set for every search.
+  const placed = Boolean(s.area?.reference) && s.area.resolved === true;
+  const boxes = RULE_BOXES.filter(r => placed || r.rule !== 'max_distance_km');
+  const inherited = boxes.filter(r => f[r.rule] == null && blank(r.rule) !== null);
+  box.innerHTML = `
+    <div class="bar">${boxes.map(r => `
+      <label class="labelled"><span>${r.label}</span>
+        <span class="field"><input type="number" inputmode="numeric" id="${r.box}-${id}"
+          ${wholeNumber(bounds[r.rule])}
+          placeholder="${esc(blank(r.rule) === null ? r.hint : r.says(blank(r.rule)))}"
+          value="${esc(f[r.rule] ?? '')}"></span></label>`).join('')}
+    </div>
+    ${placed ? '' : `<p class="note">No <b>Within km</b> box: ${s.area?.reference
+      ? `the bot cannot find ${esc(s.area.reference)}, so it has nowhere to measure a distance from`
+      : 'this search has no place to measure a distance from'}, and the bot refuses a
+      distance without one. Set <code class="mono">near</code> first, to a postcode or a
+      city and province: <code class="mono">python -m autotrader set near "…" --search
+      ${esc(s.id)}</code>, as <i>Running it locally</i> in the README says.</p>`}
+    ${inherited.length ? `<p class="note">Left blank, a box takes the rule set for every
+      search: ${esc(andList(inherited.map(r => `${r.label.toLowerCase()} ${r.says(blank(r.rule))}`)))}.</p>` : ''}
+    <p class="why" id="pv-${id}"></p>`;
+  const ask = el('div', 'bar');
+  ask.style.marginTop = 'var(--s3)';
+  box.appendChild(ask);
+
+  const preview = () => {
+    const pv = box.querySelector('#pv-' + id);
+    ask.innerHTML = '';
+    const v = r => {
+      const n = field(r).value.trim();
+      return n === '' ? null : Number(n);
+    };
+    const saved = Object.fromEntries(boxes.map(r => [r.rule, f[r.rule] ?? null]));
+    // A value the bot would refuse offers nothing, unless it is the one
+    // already saved and so not sent. Nor does a box a browser reads as empty
+    // because what is in it is not a number ("45e", "45,000"): taken as
+    // empty, it would clear the saved rule.
+    const wrong = boxes.find(r => field(r).validity.badInput
+      || (!field(r).validity.valid && v(r) !== saved[r.rule]));
+    pv.classList.toggle('err', Boolean(wrong));
+    if (wrong) {
+      pv.innerHTML = needsWhole(wrong.label, bounds[wrong.rule], wrong.says);
+      return;
+    }
+    const rule = Object.fromEntries(boxes.map(r => [r.rule, v(r)]));
+    // Each rule as it would stand once saved: a blank box falls back.
+    const at = k => rule[k] ?? blank(k);
+    const pool = (app.data.listings || []).filter(l => l.status === 'active' && l.search_id === s.id);
+    // A car hidden by a rule this editor does not show stays hidden. The
+    // preview re-runs only its boxes; `filter_rule` is the bot's own
+    // verdict, named by config key. A car with no recorded rule counts as
+    // held too, the safe direction.
+    const elsewhere = l => l.filtered && !(l.filter_rule in rule);
+    const held = pool.filter(elsewhere);
+    const kept = pool.filter(l => {
+      if (elsewhere(l)) return false;
+      if (at('max_price') !== null && l.price !== null && l.price > at('max_price')) return false;
+      if (at('min_year') !== null && l.year && l.year < at('min_year')) return false;
+      if (at('max_year') !== null && l.year && l.year > at('max_year')) return false;
+      if (placed && at('max_distance_km') !== null && l.distance_km !== null &&
+          l.distance_km !== undefined && l.distance_km > at('max_distance_km')) return false;
+      return true;
+    });
+    const changed = JSON.stringify(rule) !== JSON.stringify(saved);
+    pv.innerHTML = pool.length
+      ? `<b>${num(kept.length)}</b> of the ${plural(pool.length, 'car')} this search currently holds would pass`
+        + (changed ? ' under the rule above.' : ' under the rule as saved.')
+        // The cars held are among those counted, and not among those that
+        // pass: said so, rather than "not counted".
+        + (held.length ? ` ${num(held.length)} of them ${held.length === 1 ? 'is' : 'are'} `
+            + 'hidden by another rule, which this preview cannot re-run, and '
+            + `${held.length === 1 ? 'stays' : 'stay'} hidden.` : '')
+      : 'This search is not holding any cars to test the rule against.';
+
+    if (!changed) return;
+    const instructions = Object.entries(rule)
+      .filter(([k, v]) => v !== saved[k])
+      .map(([k, v]) => ({ action: 'set-rule', search: s.id, rule: k, value: v }));
+    if (!instructions.length) return;
+    ask.appendChild(askButton(
+      `Apply this to ${s.name}`,
+      `Change the rules on ${s.name}`, instructions,
+      `Rules for ${s.name}. On today's ${plural(pool.length, 'car')} this would keep ${num(kept.length)}.`));
+    ask.appendChild(el('span', 'note', CHANGE_NOTE));
+  };
+  box.addEventListener('input', preview);
+  preview();
+  return box;
+}
+
+/* A pasted link read the way the bot reads it (describe_search in urls.py),
+   or the reason the bot would refuse it (add-search in control.py), so the
+   page never offers a change the next check turns down. */
+function readSearchLink(raw) {
+  let url;
+  try { url = new URL(raw); } catch {
+    return { error: `That is not a web address yet — it should
+      start with <span class="mono">https://</span>.` };
+  }
+  // The whole name, not its ending: notautotrader.ca ends the same way.
+  if (!/^(www\.)?autotrader\.ca$/i.test(url.host) || url.username || url.password) {
+    return { error: `That is a link to <b>${esc(url.host || raw)}</b>, not
+      www.autotrader.ca. Open the search there and copy its address.` };
+  }
+  if (url.protocol !== 'https:') {
+    return { error: `The bot takes only addresses that start with
+      <span class="mono">https://</span>. Copy this one again from the address bar.` };
+  }
+  const path = url.pathname;
+  const seg = path.split('/').filter(Boolean).map(part => {
+    try { return decodeURIComponent(part.replace(/\+/g, ' ')); } catch { return part; }
+  });
+  if (!seg.length) {
+    return { error: `That is the autotrader.ca home page. Run a search there first,
+      then copy the address of the results.` };
+  }
+  if (/[_/-]\d{5,}(?:[_/]|$)/.test(path)
+      || /\/offers?\/[^/]*?[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}/i.test(path)) {
+    return { error: `That is one car's page, not a search. Run the search on
+      autotrader.ca first, then copy the address of the results.` };
+  }
+
+  const bits = [];
+  let city = '';
+  if (/^(cars|autos)$/i.test(seg[0])) {
+    // /cars/<make>/<model>/, and on the newer platform va_<trim>, reg_<province>
+    // and cit_<city> after them.
+    const province = /^(ab|bc|mb|nb|nl|ns|nt|nu|on|pe|qc|sk|yt)$/i;
+    const tagged = /^(va|reg|cit|mcat)_/i;
+    const rest = seg.slice(1);
+    const car = [];
+    while (car.length < 2 && rest.length && !province.test(rest[0]) && !tagged.test(rest[0])) {
+      car.push(rest.shift());
+    }
+    for (const part of rest) {
+      if (/^va_./i.test(part)) car.push(part.slice(3));
+      else if (/^cit_./i.test(part)) city = part.slice(4);
+    }
+    if (car.length) bits.push(car.join(' ').replace(/[-_+]+/g, ' ').toUpperCase());
+  }
+  const q = url.searchParams;
+  const int = v => /^\s*[-+]?\d+\s*$/.test(v || '') ? parseInt(v, 10) : null;
+  // Each figure from the older range parameter or, failing that, the
+  // newer platform's own.
+  const range = (name, low, high) => {
+    const [a, b] = (q.get(name) || '').split(',');
+    return [int(a) ?? int(q.get(low)), int(b) ?? int(q.get(high))];
+  };
+  const [y0, y1] = range('yRng', 'modelyearfrom', 'modelyearto');
+  if (y0 && y1) bits.push(`${y0}–${y1}`);
+  else if (y0) bits.push(`${y0} or newer`);
+  else if (y1) bits.push(`up to ${y1}`);
+  const [p0, p1] = range('pRng', 'pricefrom', 'priceto');
+  if (p0 && p1) bits.push(`${money(p0)}–${money(p1)}`);
+  else if (p1) bits.push(`under ${money(p1)}`);
+  else if (p0) bits.push(`over ${money(p0)}`);
+  const odo = int((q.get('odRng') || '').split(',')[1]) ?? int(q.get('kmto'))
+    ?? int(q.get('mileageto'));
+  if (odo) bits.push(`under ${km(odo)} km`);
+  const place = (q.get('loc') || '').trim() || (q.get('zip') || '').trim() || city;
+  const radius = [int(q.get('prx')), int(q.get('zipr'))].find(r => r > 0);
+  if (place) bits.push(`near ${place}` + (radius ? ` (${num(radius)} km)` : ''));
+  // Sent as the browser wrote it back, which is how the bot's own check
+  // (AUTOTRADER_LINK) expects to see it.
+  return { words: bits.join(' · '), href: url.href };
+}
+
+/* Paste a link and see what it would watch, before committing to it. The
+   page is static and cannot write to the repository, so it reads the link
+   back and offers the change as a GitHub link (see "the ask" below). */
+function pasteALink() {
+  const sec = el('section', 'section');
+  sec.innerHTML = `<div class="section__head"><h2>Add a search</h2></div>
+    <p class="note" style="margin-top:0">Set up the search you want on autotrader.ca, then
+       paste the address of the results page here.</p>
+    <div class="bar">
+      <label class="field" style="flex:1 1 320px"><span class="sr">Search link</span>
+        <input type="url" id="paste" placeholder="https://www.autotrader.ca/cars/…"
+          spellcheck="false" autocomplete="off"></label>
+    </div>
+    <div id="paste-out"></div>`;
+
+  const out = sec.querySelector('#paste-out');
+  sec.querySelector('#paste').addEventListener('input', e => {
+    const raw = e.target.value.trim();
+    if (!raw) { out.innerHTML = ''; return; }
+    const read = readSearchLink(raw);
+    if (read.error) {
+      out.innerHTML = `<p class="why err">${read.error}</p>`;
+      return;
+    }
+    out.innerHTML = `
+      <p class="why"><b>Reads as:</b> ${read.words ? esc(read.words) : 'every car on that page'}.
+        The bot re-reads the link itself on every check, so anything it did not
+        understand here is still applied by the site.</p>`;
+    const bar = el('div', 'bar');
+    // The address as the browser reads it, so "https://www.autotrader.ca"
+    // arrives with the slash the bot looks for.
+    bar.appendChild(askButton('Add this search', 'Add a search',
+      [{ action: 'add-search', url: read.href }]));
+    bar.appendChild(el('span', 'note', CHANGE_NOTE));
+    out.appendChild(bar);
+  });
+  return sec;
+}
+
+/* ----------------------------------------------------------------- status */
+/* What is set up, in one place: each part with a dot, a line, and the next
+   step when something is missing or wrong. */
+function setupPanel(d) {
+  const rows = [];
+  const add = (state, text, next) => rows.push({ state, text, next });
+  const searches = d.searches || [];
+  const run = lastCheck(d);
+  if (searches.length) {
+    add('ok', `${num(searches.length)} AutoTrader search${searches.length === 1 ? '' : 'es'}, `
+      + (run.at ? `last read ${when(run.at)}` : 'not read yet'));
+  } else {
+    add('todo', 'No search yet', 'Paste an autotrader.ca search link on the Searches tab.');
+  }
+  const m = d.marketplace;
+  const mt = collectorTiming(m);
+  if (mt) {
+    // Read by whichever computer is reading: a standby in the place of one
+    // Facebook signed out.
+    const last = mt.covered || m.last_batch;
+    add(mt.signedOut || mt.late ? 'todo' : 'ok',
+      `Facebook Marketplace, read by ${esc(last.host || 'the collector')}${
+        mt.covered?.standingIn ? ' standing in' : ''}: last batch ${when(last.received)}`,
+      mt.signedOut ? `${esc(mt.says)}.`
+      : mt.late ? 'It is late. On the Mac, <code class="mono">collector/run status</code> says why.'
+      : '');
+  } else {
+    add('off', 'Facebook Marketplace: not set up',
+      'Optional. A Mac at home can read your searches there too: '
+      + '<code class="mono">collector/README.md</code> in the repository.');
+  }
+  const channels = d.notify?.active || [];
+  if (channels.length) {
+    add('ok', `Alerts go to ${esc(andList(channels))}`,
+      'To send a test: <code class="mono">collector/run test-alert</code> on the Mac, '
+      + 'or <code class="mono">python -m autotrader test-notify</code> where the '
+      + "repository's secrets are set.");
+  } else {
+    add('todo', 'No alert channel is switched on', 'Alerts, further down this tab, sets up ntfy in a minute.');
+  }
+  const cov = d.coverage || {};
+  if (hasOutsideTimer(cov)) {
+    // In the schedule's own numbers, which the owner can change: the strip
+    // at the top of the page already counts in them.
+    const due = Number(cov.expected_interval_minutes) || 0;
+    const floor = standDown(d);
+    add('ok', `Checks kept on time by ${esc(triggerName(cov.timekeeper) || 'an outside timer')}`,
+      (due ? `A check is due every ${every(due)}.` : '')
+      + (mt ? ' Each Marketplace batch also wakes the bot, which reads AutoTrader too'
+          + (!floor ? '.' : ` once it has been ${plural(floor, 'minute')}`
+            + (floor < due ? `, so checks land ${num(floor)} to ${num(due)} minutes apart.` : '.'))
+        : ''));
+  } else {
+    add('todo', "Only GitHub's schedule starts checks",
+      'It runs late or not at all. The Marketplace collector keeps time when it runs; '
+      + 'otherwise an outside timer does (README, Schedule).');
+  }
+  add('ok', vault.lock ? 'This dashboard is published and locked' : 'This is a local, unlocked copy of the dashboard');
+
+  const s = el('section', 'section');
+  s.innerHTML = '<div class="section__head"><h2>What is set up</h2></div>';
+  const list = el('ul', 'setup');
+  list.innerHTML = rows.map(r => `<li data-state="${r.state}"><i aria-hidden="true"></i>
+      <span>${r.text}${r.state === 'todo' ? ' <span class="sr">(needs attention)</span>' : ''}</span>
+      ${r.next ? `<p class="note">${r.next}</p>` : ''}</li>`).join('');
+  s.appendChild(list);
+  return s;
+}
+
+/* The computer reading Facebook Marketplace: when it last checked in,
+   whether Facebook still lets it in, and what each search read. */
+const SESSION_SAYS = {
+  signed_out: 'Signed out — run collector/run login on that computer',
+  checkpoint: 'Facebook wants the account confirmed — run collector/run login',
+  blocked: 'Facebook is refusing its searches',
+};
+function marketplaceSection(m) {
+  if (!m || !m.last_batch) return null;
+  const last = m.last_batch;
+  const quietHours = (Date.now() - Date.parse(last.received)) / 3.6e6;
+  const s = el('section', 'section');
+  s.innerHTML = `<div class="section__head"><h2>Facebook Marketplace</h2>
+    <span class="count num">${num(m.cars ?? 0)} watched</span></div>`;
+  const stats = el('dl', 'stats');
+  const timing = collectorTiming(m);
+  const session = timing.says;
+  // The latest thing that went wrong: a pass that failed before it could
+  // send, a search that did not read, or one read only in part. Only within
+  // the last day.
+  const recent = at => at && Date.now() - Date.parse(at) < 864e5;
+  // Read only in part: one of its queries failed, so it counts as read (no
+  // failure in a row) and keeps the error, stamped no earlier than the read.
+  // A later whole read clears it, so it always speaks of the last read.
+  const partly = x => Boolean(x.last_error) && !x.consecutive_failures
+    && !(Date.parse(x.last_error_at) < Date.parse(x.last_ok));
+  const problems = [
+    last.last_failure && recent(last.last_failure.at)
+      ? { at: last.last_failure.at, text: last.last_failure.error } : null,
+    ...(m.searches || []).filter(x => x.consecutive_failures && x.last_error)
+      .map(x => ({ at: x.last_error_at || last.received, text: `${x.name}: ${x.last_error}` })),
+    ...(m.searches || []).filter(x => partly(x) && recent(x.last_error_at))
+      .map(x => ({ at: x.last_error_at, text: `${x.name}: read only in part (${x.last_error})` })),
+  ].filter(Boolean)
+    // Newest first, so the tile names the latest.
+    .sort((a, b) => (Date.parse(b.at) || 0) - (Date.parse(a.at) || 0));
+  stats.innerHTML = `
+    <div class="stat" data-tone="${quietHours > 2 ? 'bad' : 'good'}">
+      <dt>Collector last heard</dt><dd>${when(last.received)}</dd>
+      <dd class="stat__note">${esc(last.host || 'collector')}${
+        last.role ? ` · ${esc(last.role)}` : ''}${
+        last.polled ? '' : ` · ${esc(last.note || 'resting')}`}</dd></div>
+    <div class="stat" data-tone="${timing.late ? 'warn' : ''}">
+      <dt>Next batch</dt><dd>${timing.late ? 'Late' : `about ${clockTime(timing.due)}`}</dd>
+      <dd class="stat__note">${timing.late
+        ? `was due ${when(new Date(timing.due).toISOString())} — on the Mac, `
+          + '<code class="mono">collector/run status</code> says why'
+        : `then ${paceOf(last.settings)}`}</dd></div>
+    <div class="stat" data-tone="${!session ? 'good' : timing.covered ? 'warn' : 'bad'}">
+      <dt>Facebook</dt><dd style="overflow-wrap:anywhere">${!session ? 'Signed in'
+        : timing.covered ? `Read by ${esc(timing.covered.host)}` : 'Not reading'}</dd>
+      <dd class="stat__note">${esc(session || 'reading as the signed-in account')}</dd></div>
+    ${problems.length ? `<div class="stat" data-tone="warn">
+      <dt>Last problem</dt><dd>${when(problems[0].at)}</dd>
+      <dd class="stat__note">${esc(problems[0].text)}</dd></div>` : ''}`;
+  s.appendChild(stats);
+  // Every computer that has sent a batch, when there is more than one.
+  const hosts = Object.entries(m.hosts || {});
+  if (hosts.length > 1) {
+    s.appendChild(el('p', 'note', 'Collectors: ' + hosts.map(([name, h]) =>
+      `${esc(name)} (${esc(h.role || 'primary')}, last heard ${when(h.received)})`).join('; ') + '.'));
+  }
+  if ((m.searches || []).length) {
+    // Where every car read went. A Marketplace search is loose - it returns
+    // most cars of the make - so "read 60, kept 3" is the normal shape, and
+    // the columns say where the other 57 went rather than let it look lost.
+    // Labelled, so the table can stack on a phone without its header.
+    const cell = (n, label) => `<td class="r num" data-label="${label}">${
+      n === undefined || n === null ? '\u2014' : num(n)}</td>`;
+    const breakdown = table(`<thead><tr><th>Search</th><th>Last read</th>
+        <th class="r">Read</th><th class="r">Other models</th>
+        <th class="r">Hidden by a rule</th><th class="r">On your list</th></tr></thead><tbody>` +
+      m.searches.map(x => {
+        const b = x.breakdown || {};
+        const aside = (x.other_examples || [])
+          .map(([name, n]) => `${esc(name)}${n > 1 ? ` \u00d7${num(n)}` : ''}`).join(', ');
+        const also = b.elsewhere
+          ? `<br><span class="note" style="margin:0">${num(b.elsewhere)} also found, and kept, by another search</span>` : '';
+        return `<tr><td>${esc(x.name)}${aside
+            ? `<br><span class="note" style="margin:0">set aside: ${aside}</span>` : ''}${also}</td>
+          <td data-label="Last read">${x.last_error && x.consecutive_failures
+            ? `<span class="err">${esc(x.last_error)}</span>`
+            : partly(x) ? `${when(x.last_ok)}<br><span class="warnt">read only in part: ${
+                esc(x.last_error)}</span>`
+            : when(x.last_ok)}</td>
+          ${cell(x.breakdown ? b.read : x.last_count, 'Read')}${cell(b.other_models, 'Other models')}
+          ${cell(b.hidden, 'Hidden by a rule')}${cell(b.kept, 'On your list')}</tr>`;
+      }).join('') + `</tbody>`);
+    breakdown.firstChild.classList.add('tbl--stack');
+    s.appendChild(breakdown);
+  }
+  if (m.refused && Date.now() - Date.parse(m.refused.at) < 864e5) {
+    s.appendChild(el('p', 'note warnt',
+      `A batch was refused ${when(m.refused.at)}: ${esc(m.refused.why)}`));
+  }
+  s.appendChild(el('p', 'note',
+    'A Mac at home reads each search on Marketplace while signed in to '
+    + 'Facebook and sends what the page showed it here, sealed. Marketplace '
+    + 'has no model filter, so a search for one model returns most cars of the '
+    + 'make: those are counted under <b>Other models</b> and not kept. The rest '
+    + 'go through the same rules as AutoTrader cars: <b>Hidden by a rule</b> '
+    + 'are stored with the reason, and <b>On your list</b> are the ones you '
+    + 'see and hear about. To see every car it read and where each went, run '
+    + '<code class="mono">collector/run explain</code> on the Mac.'));
+  s.appendChild(collectorSettings(last.settings));
+  return s;
+}
+
+/* "every 20–30 minutes", from what the collector said of itself. */
+function paceOf(cs) {
+  const every = cs?.every_minutes ?? 25;
+  const jitter = cs?.jitter_minutes ?? 5;
+  return `every ${num(Math.max(1, every - jitter))}–${num(every + jitter)} minutes`
+    + (cs?.quiet_start && cs?.quiet_end ? ', and only a check-in overnight' : '');
+}
+
+/* How the collector is set up, as it reported itself. Shown, never
+   editable: only the Mac decides how often it visits Facebook. */
+function collectorSettings(cs) {
+  const frag = document.createDocumentFragment();
+  if (!cs || !Object.keys(cs).length) return frag;
+  const dl = el('dl', 'kv');
+  dl.innerHTML =
+    `<dt>Pace</dt><dd>a pass ${paceOf({ ...cs, quiet_start: '' })}
+       <span class="note" style="margin:0">— slow on purpose, and never on the minute: it reads
+       the way a person browsing would, which keeps the account clear of Facebook's checks</span></dd>` +
+    (cs.quiet_start && cs.quiet_end ? `<dt>Overnight</dt><dd>${esc(cs.quiet_start)}–${esc(cs.quiet_end)} on the Mac's clock
+       <span class="note" style="margin:0">— it only checks in: few cars are listed then, and
+       reading all night is the pattern that looks least like a person</span></dd>` : '') +
+    (cs.details_per_cycle !== undefined ? `<dt>Listing pages</dt><dd>up to ${num(cs.details_per_cycle)} a pass
+       <span class="note" style="margin:0">— opened once each, newest first, for cars that pass
+       your rules, to read the exact odometer and the title status</span></dd>` : '') +
+    (cs.scrolls !== undefined ? `<dt>Scrolls</dt><dd>${num(cs.scrolls)} per search
+       <span class="note" style="margin:0">— each brings another screenful of results</span></dd>` : '');
+  frag.appendChild(dl);
+  frag.appendChild(el('p', 'note',
+    'These are set on the Mac, not here. To change one, edit '
+    + '<code class="mono">~/Library/Application Support/AutoTrader Watch/settings.json</code> '
+    + 'on it, then run <code class="mono">collector/run install</code>.'));
+  return frag;
+}
+
+function renderStatus() {
+  const host = document.querySelector('[data-view="status"]');
+  host.innerHTML = '';
+  const d = app.data;
+  // As in trustState: "Last good check", "Requests last check" and "Check
+  // took" describe a check, and a firing that stood down is not one.
+  const run = lastCheck(d);
+  const firing = d.last_run || {};
+  const cov = d.coverage || {};
+  const h = d.health || {};
+
+  const head = el('div', 'view__head');
+  head.innerHTML = `<h1 id="status-h">Status</h1>
+    <p>Whether the thing watching is working. The useful measure is not whether the
+       last check passed — it is what share of the checks it was meant to make it made.</p>`;
+  host.appendChild(head);
+
+  // The site answering the newest check that went ahead with a page meant
+  // to stop robots, as the run records it. Said first and plainly: every
+  // figure below it is about checks the site let through.
+  const newest = (d.runs || []).find(r => !r.skipped);
+  if (newest?.blocked) {
+    const p = el('p', 'why measure');
+    p.style.marginBottom = 'var(--s5)';
+    p.innerHTML = `<b>autotrader.ca turned the last check away</b> ${when(newest.at)}. It
+      sent a page meant to stop robots instead of the results. Nothing is lost: the next
+      check tries again, at the usual pace rather than at once.`;
+    host.appendChild(p);
+  }
+
+  // The colour goes with the number: no number, no colour.
+  const covPct = coveragePct(cov);
+  const covKept = whoKeptTime(cov);
+  const covTone = covPct === null ? ''
+    : covPct >= 80 ? 'good' : covPct >= 40 ? 'warn' : 'bad';
+  const stats = el('dl', 'stats');
+  stats.innerHTML = `
+    <div class="stat${covKept && covKept.level !== 'all' ? ' stat--wide' : ''}"
+         data-tone="${covKept && covKept.level === 'none' ? 'warn' : covTone}">
+      <dt>Coverage, ${hours(cov.window_hours ?? 24)}</dt>
+      <dd class="num">${covPct === null ? '—' : `${covPct}%`}</dd>
+      <dd class="stat__note">${cov.too_short && cov.new_install
+        // Under a minute old, "in its first 0 minutes" is not a sentence.
+        ? ((cov.window_hours || 0) * 60 < 1 && (cov.successful ?? 0) <= 1
+          ? 'a new watch: its first check has just run'
+          : `a new watch: ${plural(cov.successful ?? 0, 'check')} in its first ${hours(cov.window_hours)}`)
+        : cov.too_short
+        ? `measuring for ${hours(cov.window_hours)} so far, since the schedule `
+          + `changed to one check every ${every(cov.expected_interval_minutes)}. `
+          + `${cov.successful ?? 0} check${cov.successful === 1 ? '' : 's'} in that time.`
+        : `${cov.slots_covered ?? cov.successful ?? 0} of ${cov.expected ?? 0} ${slotWord(cov)}`
+          // The run log keeps its newest runs only; before the oldest of
+          // them nothing is known, so the window stops there, and says so.
+          + `${cov.truncated ? ` in the ${hours(cov.window_hours)} the run log reaches back`
+            : cov.partial ? ` in the ${hours(cov.window_hours)} since the schedule changed`
+            : cov.new_install ? ' since it started' : ''}`
+          // `> 0`, not truthy: a count of events is never negative, even if
+          // a malformed payload says so.
+          + `${cov.complained > 0 ? ` · ${cov.complained} of ${cov.successful} checks complained` : ''}`
+        }</dd>
+      ${covKept && covKept.level !== 'all' ? `<dd class="stat__note">${
+        covKept.level === 'unknown'
+          ? 'These checks were recorded before the bot noted what started '
+            + 'them, so this cannot say how many the schedule filled.'
+        : covKept.level === 'none'
+          ? `<b>The schedule filled none of them.</b> Every check came from `
+            + `${andList(Object.keys(cov.by_trigger || {})
+                  .filter(k => !isSchedule(k))
+                  .map(triggerWord))}.`
+            // "Stop doing that" only applies to triggers the bot can name;
+            // an unattributed run might have been the schedule.
+            + ((cov.by_trigger || {}).unattributed
+               ? ' The unattributed ones may have been the schedule — they'
+                 + ' predate the bot recording what started a run.'
+               : ' Stop doing that and this number goes to zero.')
+          : `${num(covKept.mine)} of those ${num(covKept.all)} came from the `
+            + `schedule; the rest from `
+            + `${andList(Object.keys(cov.by_trigger || {})
+                  .filter(k => !isSchedule(k))
+                  .map(triggerWord))}.`
+      }</dd>` : ''}</div>
+    <div class="stat"><dt>Last good check</dt><dd>${when(run.at)}</dd>
+      <dd class="stat__note">${stamp(run.at)}${
+        // When the most recent firing was not this check, say what it was.
+        firing.at && firing.at !== run.at
+          ? ` \u00b7 ${firing.skipped
+                ? 'a firing stood down'
+                : (firing.ok === false ? 'a firing failed' : 'a firing ran')} ${when(firing.at)}`
+          : ''}</dd></div>
+    <div class="stat" data-tone="${cov.longest_gap_minutes > 180 ? 'warn' : ''}"><dt>Longest gap</dt>
+      <dd class="num">${cov.longest_gap_minutes
+        ? `${Math.round(cov.longest_gap_minutes / 60 * 10) / 10}h` : '—'}</dd>
+      <dd class="stat__note">between good checks</dd></div>
+    <div class="stat"><dt>Requests last check</dt><dd class="num">${run.requests_made ?? '—'}</dd>
+      <dd class="stat__note">budget ${h.budget?.limit ?? '—'}</dd></div>
+    <div class="stat"><dt>Check took</dt><dd class="num">${
+      run.duration_s == null ? '—' : `${Math.round(run.duration_s)}s`}</dd>
+      <dd class="stat__note">${d.cost
+        ? `${plural(d.cost.checks, 'check')} · `
+          + `${plural(d.cost.billed_minutes ?? d.cost.minutes, 'billed minute')} in ${d.cost.window_hours}h`
+          + (cov.stood_down ? ` · ${num(cov.stood_down)} firing${
+              cov.stood_down === 1 ? '' : 's'} stood down` : '')
+        : ''}</dd></div>
+    ${d.budget ? `<div class="stat" data-tone="${
+        d.budget.state === 'stop' ? 'bad' : d.budget.state === 'over' ? 'warn' : ''}">
+      <dt>Allowance minutes this month</dt>
+      <dd class="num">${num(d.budget.drawing_minutes ?? d.budget.used)}${
+        (d.budget.drawing_minutes ?? 0) > 0
+          ? `<small style="display:inline"> / ${num(d.budget.allowance)}</small>`
+          : ''}</dd>
+      <dd class="stat__note">${esc(d.budget.short || d.budget.text)}</dd></div>
+    <div class="stat"><dt>Exempt minutes</dt>
+      <dd class="num">${num(d.budget.exempt_minutes ?? 0)}</dd>
+      <dd class="stat__note">${(d.budget.exempt_minutes ?? 0) > 0
+        ? 'ran free' : 'none labelled yet'} \u2014 ${
+        esc(d.budget.why || 'reason not recorded')}</dd></div>
+    <div class="stat" data-tone="${d.budget.can_still_run === false ? 'bad' : 'good'}">
+      <dt>Can it still run</dt>
+      <dd>${d.budget.can_still_run === false ? 'No' : 'Yes'}</dd>
+      <dd class="stat__note">${d.budget.can_still_run === false
+        ? 'the bot has stopped itself; delete BUDGET-STOP to start it again'
+        : `nothing here is stopping it \u2014 ${plural(d.budget.days_to_reset ?? 0, 'day')} `
+          + 'until the allowance refills'}</dd></div>` : ''}
+    ${cov.timekeeper ? `<div class="stat" data-tone="${
+        covKept && covKept.level === 'none' ? 'warn' : ''}">
+      <dt>Keeping time</dt>
+      <dd>${esc(triggerName(cov.timekeeper))}</dd>
+      <dd class="stat__note">${andList(Object.entries(cov.slots_by_trigger || {})
+        .map(([k, n]) => `${plural(n, slotWord(cov, false))} from ${esc(triggerWord(k))}`))
+        || 'nothing has filled a slot yet'}</dd></div>` : ''}
+    <div class="stat" data-tone="${h.accounted?.unexplained ? 'bad' : 'good'}"><dt>Unaccounted cars</dt>
+      <dd class="num">${h.accounted?.unexplained ?? 0}</dd>
+      <dd class="stat__note">${h.accounted?.delivered ?? 0} told, ${h.accounted?.quiet ?? 0} deliberately quiet</dd></div>`;
+  host.appendChild(stats);
+
+  host.appendChild(setupPanel(d));
+
+  const mp = marketplaceSection(d.marketplace);
+  if (mp) host.appendChild(mp);
+
+  // When the checks happened, not just how many: a percentage cannot tell a
+  // schedule thin everywhere from one absent for hours at a stretch.
+  if ((cov.slots || []).length) {
+    const sec = el('section', 'section measure');
+    sec.innerHTML = `<div class="section__head"><h2>When it checked</h2>
+      <span class="count num">${cov.slots_covered ?? 0}/${cov.expected ?? 0}</span></div>`;
+    const strip = el('div', 'slots');
+    strip.setAttribute('role', 'img');
+    strip.setAttribute('aria-label',
+      `${cov.slots_covered ?? 0} of ${cov.expected ?? 0} ${slotWord(cov)} in the `
+      + `last ${hours(cov.window_hours ?? 24)} had a check. `
+      + `Longest gap ${Math.round((cov.longest_gap_minutes || 0) / 6) / 10} hours.`);
+    const begin = Date.parse(cov.since);
+    const step = (cov.expected_interval_minutes || 30) * 60000;
+    cov.slots.forEach((v, i) => {
+      const cell = el('i', 'slot');
+      cell.dataset.state = v === 0 ? 'miss' : v === 1 ? 'ok' : 'warn';
+      const at = new Date(begin + i * step);
+      cell.title = `${at.toLocaleString('en-CA', { weekday: 'short', hour: '2-digit',
+        minute: '2-digit' })} — ` + (v === 0 ? 'no check'
+          : v === 1 ? 'checked' : 'checked, reported a problem');
+      strip.appendChild(cell);
+    });
+    sec.appendChild(strip);
+    const ends = el('div', 'slots__ends');
+    ends.innerHTML = `<span>${when(cov.since)}</span><span>now</span>`;
+    sec.appendChild(ends);
+    sec.appendChild(el('p', 'note',
+      `Each mark is ${every(cov.expected_interval_minutes || 30)}. `
+      + `Longest gap ${hours((cov.longest_gap_minutes || 0) / 60)}.`));
+    host.appendChild(sec);
+  }
+
+  if ((run.invariants || []).length) {
+    const s = el('section', 'section');
+    s.innerHTML = `<div class="section__head"><h2>Bookkeeping failures</h2></div>` +
+      `<ul class="note" style="padding-left:var(--s4)">` +
+      run.invariants.map(v => `<li class="err">${esc(v)}</li>`).join('') + `</ul>`;
+    host.appendChild(s);
+  }
+
+  // Run history as one mark per check. A gap reads as a gap.
+  const runs = (d.runs || []).slice().reverse();
+  if (runs.length) {
+    const s = el('section', 'section');
+    s.innerHTML = `<div class="section__head"><h2>Recent checks</h2>
+      <span class="count num">${runs.length} kept</span></div>`;
+    const tl = el('div', 'timeline');
+    tl.setAttribute('role', 'img');
+    tl.setAttribute('aria-label',
+      `${runs.filter(r => r.ok).length} of the last ${runs.length} checks succeeded`);
+    let prev = null;
+    for (const r of runs) {
+      const t = Date.parse(r.at);
+      if (prev && t - prev > (cov.expected_interval_minutes || 30) * 60000 * 2) {
+        const g = el('i'); g.dataset.gap = '1'; tl.appendChild(g);
+      }
+      const i = el('i');
+      i.dataset.ok = r.ok ? '1' : '0';
+      i.style.height = Math.max(16, Math.min(100, (r.duration_s || 10) * 2)) + '%';
+      i.title = `${stamp(r.at)} — ${r.ok ? 'ok' : 'failed'}, ${r.listings_seen ?? 0} listings, ${r.duration_s ?? '?'}s`;
+      tl.appendChild(i);
+      prev = t;
+    }
+    s.appendChild(tl);
+    s.appendChild(el('p', 'note',
+      `One mark per check, oldest first; height is how long it took. A dotted line is a gap longer than two intervals — a stretch with no check in it at all.`));
+    host.appendChild(s);
+  }
+
+  // Parser ladder: which rungs scored, not just which one won.
+  const strat = h.strategies || {};
+  if (Object.keys(strat).length) {
+    const s = el('section', 'section');
+    s.innerHTML = `<div class="section__head"><h2>Parser ladder</h2></div>`;
+    const ladderHtml = `<thead><tr><th>Search</th><th>Winner</th><th>Working</th><th class="r">Scores</th></tr></thead><tbody>` +
+      Object.entries(strat).map(([, v]) => {
+        const order = v.order || [];
+        const lad = order.map(n => `<i data-on="${(v.working || []).includes(n) ? 1 : 0}" title="${esc(n)}"></i>`).join('');
+        const scores = order.map(n => `${n} ${v.scores?.[n] ?? 0}`).join(' · ');
+        return `<tr><td>${esc(v.name)}</td><td class="mono">${esc(v.winner || '—')}</td>
+          <td><span class="ladder" role="img" aria-label="${(v.working || []).length} of ${v.of} strateg${v.of === 1 ? 'y' : 'ies'} working">${lad}</span></td>
+          <td class="r mono" style="font-size:var(--t-micro)">${esc(scores)}</td></tr>`;
+      }).join('') + `</tbody>`;
+    s.appendChild(table(ladderHtml));
+    if ((h.drift || []).length) {
+      s.appendChild(el('p', 'note warnt', 'Shape drift: ' + esc(h.drift.join('; '))));
+    }
+    host.appendChild(s);
+  }
+
+  // Where alerts go, and whether they arrived.
+  const s2 = el('section', 'section');
+  s2.innerHTML = `<div class="section__head"><h2>Alerts</h2></div>`;
+  const rows = Object.entries(d.channel_health || {});
+  const active = (d.notify?.active || []);
+  const channelsHtml = `<thead><tr><th>Channel</th><th>State</th><th>Last good</th></tr></thead><tbody>` +
+    (active.length ? active.map(name => {
+      const ch = (d.channel_health || {})[name] || {};
+      const fails = ch.consecutive_failures || 0;
+      return `<tr><td>${esc(d.channels?.[name]?.label || name)}</td>
+        <td class="${fails ? 'err' : 'ok'}">${fails ? `${fails} failure${fails === 1 ? '' : 's'} in a row` : 'delivering'}</td>
+        <td class="num">${ch.last_ok ? when(ch.last_ok) : '—'}</td></tr>`;
+    }).join('') : `<tr><td colspan="3">No channel is switched on, so nothing is being sent.</td></tr>`) +
+    // A channel switched off on purpose, with the reason given, so a
+    // deliberate decision does not read as a fault.
+    Object.entries(d.channels || {})
+      .filter(([name, c]) => !c.active && c.disabled_reason && !(c.missing || []).length)
+      .map(([name, c]) => `<tr><td>${esc(c.label || name)}</td>
+        <td colspan="2" class="note">${esc(sentence(labelled(c.disabled_reason, 'Switched off')))}</td></tr>`).join('') +
+    `</tbody>`;
+  s2.appendChild(table(channelsHtml));
+  // A channel the bot switched off, whose secrets are all still set, can be
+  // switched back on from here once the one it rejected is fixed. One with a
+  // secret missing has nothing to switch on until it is set.
+  const retired = Object.entries(d.channels || {})
+    .filter(([, c]) => !c.active && c.disabled_reason && !(c.missing || []).length);
+  if (retired.length) {
+    const bar = el('div', 'bar');
+    bar.style.cssText = 'margin:var(--s3) 0 0';
+    for (const [name, c] of retired) {
+      const label = c.label || name;
+      bar.appendChild(askButton(`Switch ${label} back on`, `Switch ${label} on`,
+        [{ action: 'set-channel', channel: name, enabled: true }]));
+    }
+    s2.appendChild(bar);
+    s2.appendChild(el('p', 'note', `Do this once ${retired.length === 1
+      ? 'its secret is fixed' : 'their secrets are fixed'} in the repository's settings, `
+      + `or the bot switches ${retired.length === 1 ? 'it' : 'them'} off again. ${CHANGE_NOTE}`));
+  }
+  if (d.notify?.ntfy_url) s2.appendChild(onYourPhone(d.notify));
+  host.appendChild(s2);
+
+  // What this page cannot tell you: the bounds on every figure above, where
+  // the reader is deciding whether to believe it. Built from the same values
+  // as the tiles, so a line that stops applying stops appearing.
+  const limits = [];
+  if (d.budget?.blind_spot) limits.push(d.budget.blind_spot);
+  const gap = cov.longest_gap_minutes;
+  if (gap) {
+    limits.push(`A car could have been listed and taken down inside the `
+      + `longest gap between checks - ${hours(gap / 60)} - and nothing here `
+      + `would ever have known about it. That is what the coverage figure is `
+      + `for.`);
+  }
+  if (cov.truncated) {
+    limits.push(`The run log reaches back only ${hours(cov.window_hours)}: the bot `
+      + `keeps its newest runs, and every firing is one, including those that `
+      + `stood down. Coverage is measured over those hours rather than a full `
+      + `day, because before them nothing is known either way.`);
+  } else if (cov.partial) {
+    limits.push(`Coverage is measured over ${hours(cov.window_hours)} rather `
+      + `than a full day, because that is how long the current schedule has `
+      + `been running. It is not yet a statement about a day.`);
+  }
+  const unattributed = (cov.by_trigger || {}).unattributed || 0;
+  if (unattributed) {
+    limits.push(unattributed === 1
+      ? `One check on record carries no note of what started it, so it `
+        + `counts towards coverage and not towards the schedule. It may have `
+        + `been the schedule; this cannot say.`
+      : `${num(unattributed)} of the checks on record carry no note of what `
+        + `started them, so they count towards coverage and not towards the `
+        + `schedule. They may have been the schedule; this cannot say.`);
+  }
+  limits.push('A listing coming down means the seller stopped advertising '
+    + 'it. Whether it sold, and for what, is not on the site and is not '
+    + 'guessed at here.');
+  if (limits.length) {
+    const s3 = el('section', 'section measure');
+    s3.innerHTML = '<div class="section__head"><h2>What this page cannot '
+      + 'tell you</h2></div>';
+    const list = el('ul', 'limits');
+    for (const line of limits) {
+      const li = el('li');
+      li.textContent = line;
+      list.appendChild(li);
+    }
+    s3.appendChild(list);
+    host.appendChild(s3);
+  }
+  void rows;
+}
+
+/* -------------------------------------------------------------- the ask
+   A static page cannot write to the repository, and a phone should not carry
+   a token. So a change opens GitHub's web editor with the file already filled
+   in, and the next check applies it whole or refuses it whole. The file is
+   sealed with the vault key and named by time alone, because the repository
+   is public: neither the file nor its commit may say what the change is.
+   An unencrypted page has no key to seal with, so it offers no change links. */
+async function askUrl(title, instructions) {
+  const repo = app.data?.repo;
+  if (!repo || !vault.lock) return null;
+  const now = new Date();
+  const stamp = now.toISOString().replace(/[-:T]/g, '').slice(0, 14);
+  // A one-time id and the time, so the bot can refuse a replayed change,
+  // padded with spaces to a whole kilobyte so the file's size does not say
+  // what kind of change it is.
+  const raw = te.encode(JSON.stringify({
+    id: hex(crypto.getRandomValues(new Uint8Array(16))),
+    at: now.toISOString(),
+    changes: instructions,
+  }));
+  const body = new Uint8Array(Math.ceil((raw.length + 1) / 1024) * 1024).fill(0x20);
+  body.set(raw);
+  const sealed = await sealBytes(vault.enc, body, 'control');
+  const nonce = hex(crypto.getRandomValues(new Uint8Array(3)));
+  return `https://github.com/${repo}/new/main`
+       + `?filename=${encodeURIComponent(`control/${stamp}-${nonce}.enc`)}`
+       + `&value=${encodeURIComponent(toB64(sealed))}`
+       + `&message=${encodeURIComponent('Change from the dashboard')}`;
+}
+
+const CHANGE_NOTE = 'Opens GitHub with the change filled in. Commit it, and a '
+  + 'workflow applies it and runs a check — usually inside a minute.';
+
+/* Opens the change in a new tab. The tab is opened first, while the tap
+   still counts as a user gesture, and pointed at the URL once it is sealed:
+   popup blockers refuse a window opened after an await. */
+function openAsk(title, instructions, prose) {
+  if (!vault.lock || !app.data?.repo) return;
+  askedAt = Date.now();
+  const tab = window.open('about:blank', '_blank');
+  askUrl(title, instructions, prose).then(url => {
+    if (!url) { if (tab) tab.close(); return; }
+    if (tab) { tab.opener = null; tab.location.href = url; }
+    else window.open(url, '_blank', 'noopener');
+  });
+}
+
+function askButton(label, title, instructions, prose) {
+  if (!app.data?.repo || !vault.lock) {
+    const dead = el('button', 'btn');
+    dead.textContent = label;
+    dead.type = 'button';
+    dead.disabled = true;
+    dead.title = vault.lock
+      ? 'This page does not know which repository it belongs to.'
+      : 'Changes are sent from the published, locked dashboard.';
+    return dead;
+  }
+  const a = el('a', 'btn');
+  a.textContent = label;
+  a.target = '_blank'; a.rel = 'noopener';
+  a.style.cssText = 'display:inline-flex;align-items:center;text-decoration:none';
+  a.setAttribute('aria-disabled', 'true');
+  a.addEventListener('click', () => {
+    askedAt = Date.now();
+    // What was typed beside it has been sent: from here the page may redraw
+    // it with whatever the bot publishes (see busy()).
+    const own = a.closest('section');
+    for (const f of own?.querySelectorAll('input, textarea') || []) f.defaultValue = f.value;
+    for (const o of own?.querySelectorAll('option') || []) o.defaultSelected = o.selected;
+  });
+  askUrl(title, instructions, prose).then(url => {
+    a.href = url;
+    a.removeAttribute('aria-disabled');
+  });
+  return a;
+}
+
+/* Your marks on a car. The bot's record, published as `you`, is the one that
+   counts and the one every device sees. A tap is also kept in the browser,
+   so it shows at once, and it keeps what it set - false and an empty note
+   too - so taking back a mark the bot holds shows at once as well.
+
+   The browser's copy stands in only until the bot has the change. It goes
+   once the published data agrees with it, or once the data is plainly newer
+   than the tap and still does not: the change was never committed, was
+   refused, or was changed again from another device. That last only where
+   the change could be sent: on a page that cannot send one (the local
+   viewer, an unlocked copy) the tap is all there is, and it stays until it
+   is taken back. */
+const MARK_KEYS = ['shortlisted', 'muted', 'dismissed', 'note'];
+// A committed change is applied within minutes; this allows for a check
+// already running when it was sent.
+const MARK_GRACE = 30 * 60000;
+const markSays = (m, k) => k === 'note' ? String(m[k] || '') : Boolean(m[k]);
+const marks = {
+  // Read afresh only when the stored text changes: one drawing of the list
+  // asks after every car's marks several times over.
+  seen: undefined,
+  held: {},
+  all() {
+    const raw = store.raw('marks');
+    if (raw !== this.seen) { this.seen = raw; this.held = store.get('marks', {}); }
+    return this.held;
+  },
+  of(id) {
+    const local = { ...(this.all()[String(id)] || {}) };
+    delete local.at;
+    const remote = (byId(id) || {}).you || {};
+    return { ...remote, ...local };
+  },
+  // True while this device shows a mark the bot has not recorded.
+  pending(id) {
+    const local = this.all()[String(id)] || {};
+    const remote = (byId(id) || {}).you || {};
+    return MARK_KEYS.some(k => k in local && markSays(local, k) !== markSays(remote, k));
+  },
+  set(id, patch) {
+    const all = this.all();
+    // Shortlisting and dismissing exclude each other, as they do in the bot.
+    if (patch.shortlisted) patch = { ...patch, dismissed: false };
+    if (patch.dismissed) patch = { ...patch, shortlisted: false };
+    all[String(id)] = { ...(all[String(id)] || {}), ...patch, at: new Date().toISOString() };
+    store.set('marks', all);
+    // The view under the sheet shows marks too; it is redrawn on closing.
+    app.renderPending = true;
+  },
+  // Run whenever new data lands.
+  settle() {
+    const all = this.all();
+    const published = Date.parse(app.data?.generated_at) || 0;
+    // As openAsk() decides whether a tap sends anything.
+    const sends = Boolean(vault.lock && app.data?.repo);
+    let changed = false;
+    for (const [id, local] of Object.entries(all)) {
+      const remote = (byId(id) || {}).you || {};
+      const lapsed = sends && published
+        && published - (Date.parse(local.at) || 0) > MARK_GRACE;
+      for (const k of MARK_KEYS) {
+        if (!(k in local)) continue;
+        if (lapsed || (byId(id) && markSays(local, k) === markSays(remote, k))) {
+          delete local[k];
+          changed = true;
+        }
+      }
+      if (!MARK_KEYS.some(k => k in local)) { delete all[id]; changed = true; }
+    }
+    if (changed) store.set('marks', all);
+  },
+};
+
+/* ----------------------------------------------------------------- sheet */
+let lastFocus = null;
+// Whether a car is open, from the moment openSheet runs: data-open follows
+// a frame later, for the slide.
+let sheetUp = false;
+// The frame that slides the sheet in and the timer that hides it once it
+// has slid out. Each cancels the other, so a quick close and reopen cannot
+// leave the sheet hidden with the page locked behind it.
+let sheetFrame = 0, sheetTimer = 0;
+
+function openSheet(id, title) {
+  const l = byId(id);
+  const sheet = document.getElementById('sheet');
+  const scrim = document.getElementById('scrim');
+  const body = document.getElementById('sheet-body');
+  // Redrawn in place after a mark, the sheet keeps where it was opened from.
+  if (!sheetUp) lastFocus = document.activeElement;
+  sheetUp = true;
+
+  if (!l) {
+    // Named by what opened it, never by the car shown before.
+    document.getElementById('sheet-title').textContent = title || 'Listing not found';
+    body.innerHTML = '';
+    body.appendChild(emptyState('That listing is not in the published data',
+      'It may have been dropped when the file was trimmed, or the link may be from an older alert.'));
+  } else {
+    document.getElementById('sheet-title').textContent = carName(l);
+    body.innerHTML = '';
+    body.appendChild(sheetBody(l));
+  }
+  clearTimeout(sheetTimer);
+  sheet.hidden = false; scrim.hidden = false;
+  cancelAnimationFrame(sheetFrame);
+  sheetFrame = requestAnimationFrame(() => { sheet.dataset.open = '1'; scrim.dataset.open = '1'; });
+  document.body.style.overflow = 'hidden';
+  document.getElementById('sheet-close').focus();
+  // Unless this device is kept unlocked, a car's id stays out of the
+  // browser's history: nothing about your cars may outlive the tab.
+  if (l && store.persist) history.replaceState(null, '', `#/listing/${encodeURIComponent(l.id)}`);
+}
+
+function closeSheet() {
+  const sheet = document.getElementById('sheet');
+  const scrim = document.getElementById('scrim');
+  sheetUp = false;
+  cancelAnimationFrame(sheetFrame);
+  sheet.dataset.open = '0'; scrim.dataset.open = '0';
+  document.body.style.overflow = '';
+  const done = () => { sheet.hidden = true; scrim.hidden = true; };
+  clearTimeout(sheetTimer);
+  if (matchMedia('(prefers-reduced-motion: reduce)').matches) done();
+  else sheetTimer = setTimeout(done, 180);
+  history.replaceState(null, '', `#/${app.view}`);
+  // What changed while the sheet was open - new data, or a mark you set - is
+  // drawn now, and focus goes back to the same car in the new drawing.
+  const was = lastFocus;
+  if (app.renderPending) render();
+  refocus(was);
+}
+
+/* Focus back on the control the sheet was opened from, or on its twin - the
+   same car, drawn the same way, or the same chip - when a re-render has
+   replaced it. */
+function refocus(was) {
+  if (was && was.isConnected) { was.focus(); return; }
+  const chip = was?.dataset?.chip;
+  const twinChip = chip && document.querySelector(
+    `[data-view="${app.view}"] .chips [data-chip="${CSS.escape(chip)}"]`);
+  if (twinChip) { twinChip.focus(); return; }
+  const id = was?.dataset?.id;
+  const drawn = was?.classList?.contains('card') ? '.card'
+    : was?.classList?.contains('ev') ? '.ev' : '';
+  const within = `[data-view="${app.view}"] ${drawn}[data-id="${CSS.escape(id || '')}"]`;
+  const twin = id && drawn && (document.querySelector(
+    within + (was.dataset.kind ? `[data-kind="${CSS.escape(was.dataset.kind)}"]` : ''))
+    || document.querySelector(within));
+  if (twin) twin.focus();
+  else document.getElementById('main').focus({ preventScroll: true });
+}
+
+function sheetBody(l) {
+  const frag = document.createDocumentFragment();
+  const move = priceMove(l);
+  const cmp = app.data.comparables?.[String(l.id)];
+  const says = comparableSays(cmp, l);
+
+  const gal = el('div', 'gallery');
+  // Only the photos we hold a copy of. The seller's CDN is unreachable
+  // offline and drops photos once the car is delisted.
+  const imgs = (l.thumbs && l.thumbs.length ? l.thumbs
+                : [l.thumb].filter(Boolean)).slice(0, 8);
+  const published = l.photo_count || 0;
+  if (imgs.length) {
+    for (const src of imgs) {
+      const box = el('div', 'shotbox');
+      const img = new Image();
+      img.loading = 'lazy'; img.decoding = 'async'; img.alt = '';
+      img.width = 400; img.height = 300;
+      img.style.cssText = 'width:100%;height:100%;object-fit:cover;border-radius:var(--r-sm)';
+      img.addEventListener('error', () => {
+        box.innerHTML = `<div class="shot__fallback">${CAR_GLYPH}<span>photo not loaded</span></div>`;
+      }, { once: true });
+      setPhoto(img, src, true);
+      box.appendChild(img);
+      gal.appendChild(box);
+    }
+    gal.setAttribute('role', 'group');
+    gal.setAttribute('aria-label',
+      `${imgs.length} photo${imgs.length === 1 ? '' : 's'}`);
+    frag.appendChild(gal);
+    if (published > imgs.length) {
+      const note = el('p', 'note');
+      note.style.margin = '0 0 var(--s4)';
+      note.innerHTML = `${imgs.length} of ${published} photos kept here. `
+        + `<a href="${esc(l.url || '#')}" rel="noopener" target="_blank">See them all on ${siteName(l)}</a>`;
+      frag.appendChild(note);
+    }
+  } else {
+    const box = el('div', 'shotbox');
+    box.style.cssText = 'width:100%;aspect-ratio:4/3;border-radius:var(--r-sm);margin-bottom:var(--s4)';
+    // The bot drops its copies of a car's photos once the car leaves, so a
+    // car that had photos says so rather than that it never had any.
+    const why = l.filtered ? 'photos not kept for hidden cars'
+      : !published ? 'no photo published'
+      : l.status === 'gone' ? 'photos not kept after it left'
+      : 'photos not copied yet';
+    box.innerHTML = `<div class="shot__fallback">${CAR_GLYPH}<b>${esc(carName(l))}</b><span>${why}</span></div>`;
+    frag.appendChild(box);
+  }
+
+  // A car that has left the market says so above its price, and the price
+  // is struck through as it is on the card: it is what was asked, not what
+  // anyone is asking now.
+  const gone = l.status === 'gone';
+  const seen = gone ? when(l.last_seen) : '';
+  const price = el('div');
+  price.style.marginBottom = 'var(--s4)';
+  price.innerHTML =
+    (gone ? `<p style="margin:0 0 var(--s2)"><span class="flag flag--gone">${
+      unwatched(l) ? 'No longer watched' : KIND.removed.group}${
+      seen ? ` · last seen ${esc(seen)}` : ''}</span></p>` : '') +
+    `<div style="display:flex;align-items:baseline;gap:var(--s3);flex-wrap:wrap">
+      <span class="num" style="font-size:var(--t-display);font-weight:560;letter-spacing:-.02em${
+        gone && !l.unpriced ? ';text-decoration:line-through;color:var(--text-3)' : ''}">
+        ${l.unpriced ? 'Call for price' : money(l.price)}</span>
+      ${move ? `<span class="card__was num">${money(move.was)}</span>
+        <span class="num ${move.delta < 0 ? 'drop' : 'rise'}" style="font-weight:520">${signed(move.delta)}</span>` : ''}
+    </div>` +
+    (says?.sentence ? `<p class="note note--cmp">${says.sentence}</p>` : '');
+  frag.appendChild(price);
+
+  // Why you are seeing this, or why you did not hear about it.
+  const why = el('p', 'why');
+  if (l.filtered) {
+    // A car told about before a rule hid it was told about all the same.
+    why.innerHTML = (l.notified_at
+      ? `<b>You were told about this</b> at ${stamp(l.notified_at)}. It is hidden now by a rule on`
+      : '<b>You were not told about this.</b> It is hidden by a rule on') + `
+      ${esc(l.search_name || 'this search')}: ${esc(l.filter_reason || 'a rule of yours')}.
+      It is kept and tracked so a change to it is never silently lost.`;
+  } else if (l.notified_at) {
+    why.innerHTML = `<b>You were told about this</b> at ${stamp(l.notified_at)}, via the
+      channels switched on at the time.`;
+  } else if (l.quiet_reason) {
+    why.innerHTML = `<b>Deliberately quiet.</b> ${esc(l.quiet_reason)}.`;
+  } else {
+    why.innerHTML = `<b>No delivery record.</b> That is a fault rather than a decision, and
+      the next check's bookkeeping test should fail on it.`;
+  }
+  frag.appendChild(why);
+
+  const hist = (l.price_history || []).filter(p => p.price);
+  if (hist.length >= 2) {
+    const s = el('section', 'section');
+    s.innerHTML = `<div class="section__head"><h2>Asking price</h2>
+      <span class="count num">${hist.length} observation${hist.length === 1 ? '' : 's'}</span></div>`;
+    s.appendChild(sparkline(hist));
+    host_append(s, frag);
+  }
+
+  const spec = el('section', 'section');
+  spec.innerHTML = `<div class="section__head"><h2>Specification</h2></div>`;
+  const kv = el('dl', 'kv');
+  const pairs = [
+    ['Year', l.year], ['Odometer', l.mileage_km ? `${km(l.mileage_km)} km` : null],
+    // This row explains its own blank: most causes are about the ratio,
+    // not the car.
+    [`Asking ${PER_KM}`, l.per_1000km ? money(l.per_1000km)
+      : l.per_1000km_why ? `not shown — ${l.per_1000km_why}` : null],
+    // Plain text, like every value in this list: they are escaped once, below.
+    ['Distance', (l.distance_km ?? null) === null ? null
+      : l.distance_km < 1 ? `in ${l.distance_from || 'your area'}`
+      : `${km(l.distance_km)} km from ${l.distance_from || 'home'}`],
+    [gone ? 'Was on the market' : 'On the market',
+      l.days_listed === undefined ? null : daysListed(l.days_listed)], ['Colour', l.color], ['Body', l.body],
+    ['Transmission', l.transmission], ['Drivetrain', l.drivetrain], ['Fuel', l.fuel],
+    ['Location', [l.location, l.province].filter(Boolean).join(', ')],
+    ['Seller', l.seller], ['Watched by', l.search_name],
+  ].filter(([, v]) => v !== null && v !== undefined && v !== '');
+  kv.innerHTML = pairs.map(([k, v]) => `<dt>${esc(k)}</dt><dd>${esc(v)}</dd>`).join('');
+  spec.appendChild(kv);
+  const extras = carExtras(l);
+  if (extras.length) {
+    // The seller's own words, so each piece is escaped: a title is whatever
+    // a dealer, or anyone on Marketplace, chose to type.
+    spec.appendChild(el('p', 'note', 'Dealer copy: ' + extras.map(esc).join(' · ')));
+  }
+  host_append(spec, frag);
+
+  const events = (app.data.events || []).filter(e => String(e.listing_id) === String(l.id));
+  if (events.length) {
+    const s = el('section', 'section');
+    s.innerHTML = `<div class="section__head"><h2>Its life so far</h2>
+      <span class="count num">${events.length}</span></div>`;
+    const ul = el('ul', 'life');
+    for (const e of events) {
+      const li = el('li');
+      let what = KIND[e.kind]?.rule || esc(e.kind);
+      if (e.kind === 'price_drop' || e.kind === 'price_rise') {
+        what = `${money(e.old_price)} → ${money(e.new_price)} <span class="num ${e.kind === 'price_drop' ? 'drop' : 'rise'}">${signed(e.delta)}</span>`;
+      }
+      // For a sent alert the sentence is built here, where the date
+      // formatter lives; delivery.text would carry a raw ISO timestamp.
+      const told = e.delivery?.state === 'sent' && e.delivery.at
+        ? `Told you ${stamp(e.delivery.at)}`
+        : (e.delivery?.text || '');
+      li.innerHTML = `<time datetime="${esc(e.at)}">${stamp(e.at)}</time>
+        <span>${what}<br><span class="note" style="margin:0">${esc(told)}</span></span>`;
+      ul.appendChild(li);
+    }
+    s.appendChild(ul);
+    host_append(s, frag);
+  }
+
+  const yours = el('div', 'bar');
+  yours.style.marginTop = 'var(--s6)';
+  const mine = marks.of(l.id);
+  const name = carName(l);
+  // Toggles: the label stays put and aria-pressed carries the state, so
+  // a screen reader never hears a label that already says the opposite.
+  for (const [key, label, action, undo] of [
+    ['shortlisted', 'Shortlist', 'shortlist', 'unshortlist'],
+    ['muted', 'Mute this car', 'mute-listing', 'unmute-listing'],
+    ['dismissed', 'Not interested', 'dismiss', 'undismiss'],
+  ]) {
+    const active = !!mine[key];
+    const b = el('button', 'chip', label);
+    b.type = 'button';
+    b.dataset.key = key;
+    b.setAttribute('aria-pressed', String(active));
+    b.addEventListener('click', () => {
+      marks.set(l.id, { [key]: !active });
+      // The Listings count sits outside the sheet, and takes the mark now.
+      renderTabs();
+      // Instant here, permanent there: the tap lands now, and the change
+      // file makes it survive a new device.
+      openAsk(
+        `${active ? undo : action}: ${name}`,
+        [{ action: active ? undo : action, listing: String(l.id) }],
+        `${active ? undo : action} for ${name} — opened from the dashboard.`);
+      openSheet(l.id);
+      document.querySelector(`#sheet-body [data-key="${key}"]`)?.focus();
+    });
+    yours.appendChild(b);
+  }
+  frag.appendChild(yours);
+  if (marks.pending(l.id)) {
+    // Say which marks are only on this device so far.
+    frag.appendChild(el('p', 'note', vault.lock && app.data.repo
+      ? 'Shown from this device until the bot records the change. Commit it on '
+        + 'GitHub to keep it; a change never committed lapses here after a later check.'
+      : 'Kept on this device only for now: changes are sent from the published, locked dashboard.'));
+  }
+
+  // A free-text note to yourself, shown on the card as well.
+  const noteBox = el('div', 'note-edit');
+  noteBox.style.marginTop = 'var(--s3)';
+  const field = el('textarea', 'field');
+  field.rows = 2;
+  field.maxLength = 400;
+  field.placeholder = 'A note to yourself about this car…';
+  field.value = mine.note || '';
+  field.id = `note-${l.id}`;
+  const label = el('label', 'note-edit__label', mine.note ? 'Your note' : 'Add a note');
+  label.setAttribute('for', field.id);
+  const save = el('button', 'chip', 'Save note');
+  save.type = 'button';
+  save.disabled = true;
+  field.addEventListener('input', () => {
+    save.disabled = field.value.trim() === (mine.note || '').trim();
+  });
+  save.addEventListener('click', () => {
+    const text = field.value.trim().slice(0, 400);
+    marks.set(l.id, { note: text });
+    openAsk(
+      text ? `Note on ${name}` : `Clear the note on ${name}`,
+      [{ action: 'note', listing: String(l.id), text }],
+      `A note on ${name} — opened from the dashboard.`);
+    openSheet(l.id);
+    // Save is disabled again once saved; the note itself keeps the focus.
+    document.getElementById(field.id)?.focus();
+  });
+  noteBox.appendChild(label);
+  noteBox.appendChild(field);
+  const noteBar = el('div', 'bar');
+  noteBar.style.marginTop = 'var(--s2)';
+  noteBar.appendChild(save);
+  noteBox.appendChild(noteBar);
+  frag.appendChild(noteBox);
+
+  const go = el('div', 'bar');
+  go.style.marginTop = 'var(--s3)';
+  // The listing of a car that has gone is kept, but it is no longer the
+  // thing to do next.
+  const a = gone ? el('a', 'btn', `Old listing on ${siteName(l)} (may no longer load)`)
+    : el('a', 'btn btn--primary', `Open on ${siteName(l)}`);
+  a.href = l.url; a.rel = 'noopener'; a.target = '_blank';
+  a.style.cssText = 'display:inline-flex;align-items:center;text-decoration:none';
+  go.appendChild(a);
+  frag.appendChild(go);
+  return frag;
+}
+function host_append(section, frag) { frag.appendChild(section); }
+
+/* A price history needs no chart library: a few points, and the only
+   question is which way it went. */
+function sparkline(hist) {
+  const w = 100, h = 44, pad = 3;
+  const prices = hist.map(p => p.price);
+  const min = Math.min(...prices), max = Math.max(...prices);
+  const span = (max - min) || 1;
+  const pts = prices.map((p, i) => {
+    const x = pad + (i / Math.max(1, prices.length - 1)) * (w - pad * 2);
+    const y = h - pad - ((p - min) / span) * (h - pad * 2);
+    return [x, y];
+  });
+  const d = pts.map((p, i) => `${i ? 'L' : 'M'}${p[0].toFixed(1)} ${p[1].toFixed(1)}`).join(' ');
+  const area = `${d} L${pts[pts.length - 1][0].toFixed(1)} ${h} L${pts[0][0].toFixed(1)} ${h} Z`;
+  const svg = el('div');
+  svg.innerHTML =
+    `<svg class="hist" viewBox="0 0 ${w} ${h}" preserveAspectRatio="none" role="img"
+       aria-label="Asking price from ${money(prices[0])} to ${money(prices[prices.length - 1])} over ${prices.length} observation${prices.length === 1 ? '' : 's'}">
+      <path class="area" d="${area}"/><path d="${d}"/>
+      <circle cx="${pts[pts.length - 1][0].toFixed(1)}" cy="${pts[pts.length - 1][1].toFixed(1)}" r="1.8"/>
+    </svg>
+    <div class="facts" style="justify-content:space-between;margin-top:var(--s2)">
+      <span class="num">${money(min)} low</span><span class="num">${money(max)} high</span>
+    </div>`;
+  return svg;
+}
+
+/* ----------------------------------------------------------------- boot */
+function skeleton() {
+  const remembered = store.get('lastTrust', null);
+  if (remembered) {
+    // The pill only, never the alarm: a stale pill is corrected a moment
+    // later, but a stale alarm would be a false claim. renderTrust() raises
+    // the alarm once there is data to raise it from.
+    document.getElementById('trust').dataset.state = remembered.state;
+    document.getElementById('trust-text').textContent = remembered.text;
+  }
+  const host = document.querySelector('[data-view="feed"]');
+  host.hidden = false;
+  host.innerHTML = `<div class="view__head measure"><h1 id="feed-h">What changed</h1>
+    <p>Everything that has happened to a car you are watching, newest first — including
+       cars your rules hide, which the run counters never counted.</p></div>`;
+  const sec = el('section', 'section measure');
+  sec.innerHTML = `<div class="section__head"><h2>&nbsp;</h2></div>`;
+  const list = el('ul', 'feed');
+  /* Real rows with the text taken out, not bars of a guessed height: same
+     elements, classes and font metrics, so the height matches the real row
+     and the page does not shift when the data lands. */
+  const bar = n => '\u00a0'.repeat(n);
+  for (let i = 0; i < 8; i++) {
+    const li = el('li');
+    li.innerHTML = `<div class="ev skel-row" aria-hidden="true">
+        <time class="ev__when skel__text">${bar(6)}</time>
+        <span class="ev__title skel__text">${bar(16 + (i % 4) * 4)}</span>
+        <span class="ev__fig skel__text">${bar(8)}</span>
+        <span class="ev__sub"><span class="skel__text">${bar(20 + (i % 3) * 5)}</span></span>
+      </div>`;
+    list.appendChild(li);
+  }
+  sec.appendChild(list);
+  host.appendChild(sec);
+}
+
+function render() {
+  if (!app.data) {
+    // A load that failed says so on whichever tab is open, not only on the
+    // first one.
+    if (app.loadError) renderLoadError();
+    return;
+  }
+  app.renderPending = false;
+  eagerSlots = 6;
+  // The masthead names every site being watched.
+  const sites = document.querySelector('.brand span');
+  if (sites) sites.textContent = usesMarketplace() ? 'autotrader.ca + Marketplace' : 'autotrader.ca';
+  document.querySelector('.brand')?.classList.toggle('brand--two', usesMarketplace());
+  renderTrust();
+  renderClock();
+  if (app.view === 'feed') renderFeed();
+  else if (app.view === 'listings') renderListings();
+  else if (app.view === 'market') renderMarket();
+  else if (app.view === 'searches') renderSearches();
+  else if (app.view === 'status') renderStatus();
+}
+
+/* The view the address names. Run once at start, and on every change of
+   address: Back, Forward, a link, or go() itself. */
+function route(e) {
+  const h = location.hash.replace(/^#\/?/, '');
+  const [what, arg] = h.split('/');
+  if (what === 'listing' && arg) {
+    const view = app.view || 'feed';
+    go(view, { silent: true, focus: false });
+    // A mangled link must not stop the page: taken as it came, it names no
+    // car, and the sheet says so.
+    let id = arg;
+    try { id = decodeURIComponent(arg); } catch { /* keep it as it came */ }
+    openSheet(id);
+    // The link is in the history already; nothing more about the car goes
+    // there unless this device is kept unlocked.
+    if (!store.persist) history.replaceState(null, '', `#/${app.view}`);
+    return;
+  }
+  const view = VIEWS.some(v => v.id === what) ? what : 'feed';
+  // The change of address go() made itself: the view is drawn already, and
+  // drawing it twice cost every tab switch a second full drawing.
+  if (!(e && view === app.view)) go(view, { silent: true, focus: false });
+  // Back with a car open: the address has left the car, so the sheet goes
+  // too, after go() so its own address is the view's.
+  if (sheetUp) closeSheet();
+}
+
+function showLock() {
+  document.body.dataset.locked = '1';
+  const form = document.getElementById('lock');
+  const pass = document.getElementById('lock-pass');
+  const go = document.getElementById('lock-go');
+  const msg = document.getElementById('lock-msg');
+  form.hidden = false;
+  pass.focus();
+  form.addEventListener('submit', async e => {
+    e.preventDefault();
+    go.disabled = true;
+    go.textContent = 'Unlocking…';
+    msg.textContent = '';
+    try {
+      await unlockWith(pass.value, document.getElementById('lock-keep').checked);
+    } catch (err) {
+      // A wrong key fails the check value, or AES-GCM refuses it. Anything
+      // else is not the passphrase's fault, and is said as it is.
+      const wrongKey = err?.message === 'wrong key' || err?.name === 'OperationError';
+      msg.textContent = wrongKey ? 'That passphrase does not open this dashboard.'
+        : `Could not unlock: ${err?.message || err}`;
+      go.disabled = false;
+      go.textContent = 'Unlock';
+      pass.select();
+      return;
+    }
+    pass.value = '';
+    form.hidden = true;
+    delete document.body.dataset.locked;
+    // The box that had the keyboard has just been hidden, which would leave
+    // it nowhere; it goes to the page instead.
+    document.getElementById('main').focus({ preventScroll: true });
+    start();
+  });
+}
+
+async function boot() {
+  renderTabs();
+  vault.lock = await fetchLock();
+  if (vault.lock) {
+    const lockNow = document.getElementById('lock-now');
+    lockNow.addEventListener('click', lockAgain);
+    // A browser decrypts only on a secure page: over plain http:// there is
+    // no WebCrypto at all, and every passphrase would read as wrong.
+    if (!(window.isSecureContext && window.crypto?.subtle)) { insecureLock(); return; }
+    if (!(await savedKey())) { showLock(); return; }
+  }
+  start();
+}
+
+/* The lock, on a page that cannot unlock: say why, and where it can. */
+function insecureLock() {
+  showLock();
+  const msg = document.getElementById('lock-msg');
+  const where = `https://${location.host}${location.pathname}`;
+  msg.textContent = 'This page can only be unlocked over a secure connection. Open it at ';
+  const a = el('a');
+  a.href = where;
+  a.textContent = where;
+  msg.appendChild(a);
+  msg.appendChild(document.createTextNode('.'));
+  document.getElementById('lock-pass').disabled = true;
+  document.getElementById('lock-go').disabled = true;
+}
+
+async function start() {
+  if (vault.lock) document.getElementById('lock-now').hidden = false;
+  skeleton();
+  try {
+    // With a worker installed, an offline load still succeeds from its
+    // cache, marked so the page can say it is offline.
+    const { data, cached } = await fetchData({ cache: 'no-cache' });
+    app.data = data;
+    marks.settle();
+    if (cached) app.offline = true;
+  } catch (err) {
+    if (!app.data) {
+      app.loadError = err.message;
+      // Take the pill down too: skeleton() restored it from the last visit,
+      // and it must not reassure above a load failure.
+      const pill = document.getElementById('trust');
+      pill.dataset.state = 'bad';
+      document.getElementById('trust-text').textContent = 'No data';
+      renderTabs();
+      renderLoadError();
+      // An installed app has no reload button of its own: a connection that
+      // comes back tries again by itself.
+      window.addEventListener('online', () => location.reload(), { once: true });
+      return;
+    }
+  }
+
+  if (app.lastSeen === null) {
+    app.lastSeen = new Date().toISOString();
+    store.set('lastSeen', app.lastSeen);
+    app.firstVisit = true;
+  }
+
+  // Which ids are new to this browser, so a card animates once on arrival
+  // rather than every time the list re-renders.
+  const ids = (app.data.listings || []).map(l => String(l.id));
+  for (const id of ids) if (!app.seenIds.has(id)) app.freshIds.add(id);
+  app.seenIds = new Set(ids);
+  store.set('seenIds', ids.slice(0, 1200));
+
+  // A newer worker has taken over, so a newer page is cached for the next
+  // load. Offered rather than applied, so code never changes mid-tap. Not on
+  // a first visit, where the installing worker claims the page anyway.
+  if ('serviceWorker' in navigator) {
+    const hadOne = !!navigator.serviceWorker.controller;
+    navigator.serviceWorker.addEventListener('controllerchange', () => {
+      if (hadOne) newVersionReady();
+    });
+  }
+
+  renderTabs();
+  route();
+  // After route(), which has drawn the first view: the strip is painted by
+  // render(), and this only takes over the ticking from here on.
+  startClock();
+  window.addEventListener('hashchange', route);
+  document.getElementById('sheet-close').addEventListener('click', closeSheet);
+  document.getElementById('scrim').addEventListener('click', closeSheet);
+  document.addEventListener('keydown', e => {
+    // Four shortcuts, deliberately few: a view, find a car, the list, and
+    // Escape. Never while typing: a "/" inside the search box is a slash.
+    const typing = /^(input|textarea|select)$/i.test(
+      (document.activeElement || {}).tagName || '');
+    const sheetOpen = sheetUp;
+    if (!typing && !sheetOpen && !e.metaKey && !e.ctrlKey && !e.altKey) {
+      if (e.key >= '1' && e.key <= String(VIEWS.length)) {
+        e.preventDefault();
+        go(VIEWS[Number(e.key) - 1].id);
+        return;
+      }
+      if (e.key === '/') {
+        e.preventDefault();
+        go('listings');
+        const box = document.getElementById('q');
+        if (box) { box.focus(); box.select(); }
+        return;
+      }
+      if (e.key === '?') { e.preventDefault(); showShortcuts(); return; }
+    }
+    // Escape gets you out of whatever you are in, innermost first.
+    if (e.key === 'Escape') {
+      if (sheetOpen) { closeSheet(); return; }
+      if (document.getElementById('shortcuts')) { hideShortcuts(); return; }
+      if (typing && document.activeElement.id === 'q' && app.q) {
+        // Emptied in place, so the keyboard stays in the box.
+        document.activeElement.value = '';
+        app.q = '';
+        renderListingResults();
+        return;
+      }
+    }
+    if (e.key === 'Tab' && sheetUp) {
+      const f = document.getElementById('sheet').querySelectorAll(
+        'a[href],button,input,select,[tabindex]:not([tabindex="-1"])');
+      if (!f.length) return;
+      const first = f[0], last = f[f.length - 1];
+      if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last.focus(); }
+      else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
+    }
+  });
+  // Push the sheet back down with a thumb. Only downward, only from the top
+  // of its own scroll, so it never fights the content inside it.
+  const sheet = document.getElementById('sheet');
+  let startY = null;
+  sheet.addEventListener('touchstart', e => {
+    startY = sheet.scrollTop <= 0 ? e.touches[0].clientY : null;
+  }, { passive: true });
+  sheet.addEventListener('touchmove', e => {
+    if (startY === null) return;
+    const dy = e.touches[0].clientY - startY;
+    if (dy > 0 && innerWidth < 700) sheet.style.transform = `translateY(${dy}px)`;
+  }, { passive: true });
+  sheet.addEventListener('touchend', e => {
+    if (startY === null) return;
+    const dy = (e.changedTouches[0].clientY - startY);
+    sheet.style.transform = '';
+    startY = null;
+    if (dy > 110 && innerWidth < 700) closeSheet();
+  });
+
+  if ('serviceWorker' in navigator) {
+    navigator.serviceWorker.register('sw.js').catch(() => { /* file:// or no https */ });
+  }
+}
+
+boot();
