@@ -1,11 +1,20 @@
 name: Tests
 
+# Minutes are metered per job. A branch is tested once, by its pull request,
+# not by the push as well; main is tested on push. A newer push cancels the run
+# it replaces. Agents run the suite in their own environment before pushing;
+# see "GitHub Actions budget" in CLAUDE.md.
 on:
   push:
-    branches-ignore: [vault, gh-pages]
-    paths-ignore: ['control/**', 'BUDGET-STOP']
+    branches: [main]
+    paths-ignore: ['control/**', 'BUDGET-STOP', '**.md']
   pull_request:
+    paths-ignore: ['**.md']
   workflow_dispatch:
+
+concurrency:
+  group: tests-${{ github.ref }}
+  cancel-in-progress: true
 
 # Read only. This runs whatever the test requirements install, and a token
 # that could push would let one of them change the code a check runs with
