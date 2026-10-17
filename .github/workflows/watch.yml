@@ -189,8 +189,40 @@ jobs:
           echo "::error::could not push to $GITHUB_REF_NAME"
           exit 1
 
+      # Every publish also costs a "pages build and deployment" run, billed
+      # like any other job: with a check every half hour that was over half
+      # this repository's minutes. A changed page waits until the last
+      # publish is PAGE_MIN_GAP_MINUTES old, and the page is published
+      # regardless once it is PAGE_MAX_AGE_MINUTES old, so a change held
+      # back is never lost. A hand-started check always publishes.
+      - name: Decide whether to publish
+        id: when
+        if: ${{ !steps.guard.outputs.stop && !inputs.dry_run }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CHANGED: ${{ steps.save.outputs.page }}
+          MANUAL: ${{ github.event_name == 'workflow_dispatch' && !inputs.automatic && !inputs.from }}
+          MIN_GAP: ${{ vars.PAGE_MIN_GAP_MINUTES || '120' }}
+          MAX_AGE: ${{ vars.PAGE_MAX_AGE_MINUTES || '360' }}
+        run: |
+          last=$(gh api "repos/$GITHUB_REPOSITORY/commits/gh-pages" --jq .commit.committer.date 2>/dev/null || true)
+          if [ -n "$last" ]; then
+            age=$(( ($(date +%s) - $(date -d "$last" +%s)) / 60 ))
+          else
+            age=999999
+          fi
+          if [ "$MANUAL" = true ] && [ -n "$CHANGED" ]; then
+            echo "publish=1" >> "$GITHUB_OUTPUT"
+          elif [ -n "$CHANGED" ] && [ "$age" -ge "$MIN_GAP" ]; then
+            echo "publish=1" >> "$GITHUB_OUTPUT"
+          elif [ "$age" -ge "$MAX_AGE" ]; then
+            echo "publish=1" >> "$GITHUB_OUTPUT"
+          else
+            echo "::notice::Dashboard publish held (last one ${age} min ago, changed='${CHANGED}')."
+          fi
+
       - name: Publish the dashboard
-        if: ${{ steps.save.outputs.page }}
+        if: ${{ steps.when.outputs.publish }}
         env:
           WATCH_PASSPHRASE: ${{ secrets.WATCH_PASSPHRASE }}
         run: |
