@@ -159,14 +159,6 @@ class Listing:
     def thumbnail(self) -> str:
         return self.images[0] if self.images else ""
 
-    def summary_line(self) -> str:
-        bits = [self.display_title, self.price_text]
-        if self.mileage_km is not None:
-            bits.append(self.mileage_text)
-        if self.location:
-            bits.append(self.location)
-        return " - ".join(bits)
-
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
 

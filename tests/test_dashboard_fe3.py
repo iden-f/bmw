@@ -548,7 +548,7 @@ class TestTheStatusTilesReadAsWords:
         ctx, page, _ = _open(browser, site, d, "#/status")
         try:
             text = _said(page.inner_text('[data-view="status"] .stats'))
-            assert "LONGEST GAP 1.6h" in text, text
+            assert "Longest gap 1.6h" in text, text
             assert "42s" in text and "3 checks · 5 billed minutes in 24h" in text, text
         finally:
             ctx.close()

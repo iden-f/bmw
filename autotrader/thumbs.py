@@ -79,7 +79,6 @@ class Report:
     skipped: int = 0
     failed: int = 0
     pruned: int = 0
-    bytes_added: int = 0
     total_bytes: int = 0
     kept: int = 0
     notes: list[str] = field(default_factory=list)
@@ -286,7 +285,6 @@ def sync(entries: Iterable[dict[str, Any]], fetcher: Any,
                 have.append({"file": name, "bytes": len(blob), "n": n,
                              "w": found.get("w"), "h": found.get("h")})
                 report.fetched += 1
-                report.bytes_added += len(blob)
                 total += len(blob)
 
             fresh: dict[str, Any] = {}

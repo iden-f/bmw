@@ -38,14 +38,6 @@ LOOSE_ID_RE = re.compile(r"[_/-](\d{5,})(?:[_/?#]|$)")
 _TRUE = {"1", "true", "yes", "on"}
 
 
-def is_autotrader_url(url: str) -> bool:
-    try:
-        host = (urlparse(url).hostname or "").lower()
-    except ValueError:
-        return False
-    return host in KNOWN_HOSTS
-
-
 def is_listing_url(url: str) -> bool:
     return bool(listing_id_from_url(url))
 

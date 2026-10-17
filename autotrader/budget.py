@@ -333,14 +333,6 @@ def label_for(cfg: Any, state: Any) -> tuple[str, str]:
                     "on standard runners, which GitHub does not bill")
 
 
-def draws_on_the_allowance(cfg: Any, state: Any) -> bool:
-    """Will the next minute come out of the allowance? Unknown counts as yes.
-
-    For callers that need only the decision; label_for also gives the evidence.
-    """
-    return label_for(cfg, state)[0] != EXEMPT
-
-
 def record(state: Any, minutes: float, *, cfg: Any = None,
            now: datetime | None = None) -> dict[str, Any]:
     """Add this run's minutes to the month and return where that leaves it."""

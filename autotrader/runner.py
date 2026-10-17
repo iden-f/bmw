@@ -1728,7 +1728,7 @@ def _write_the_run_down(cfg: Config, state: State, report: "RunReport",
     # What GitHub says this repository is, so the minute ledger can tell
     # minutes that are merely spent from minutes that are charged. Absent
     # outside Actions, and absence means "assume charged" - see
-    # budget.draws_on_the_allowance.
+    # budget.label_for.
     visibility = (env or {}).get("REPO_VISIBILITY", "").strip()
     if visibility:
         state.data.setdefault("repo", {})["visibility"] = visibility
