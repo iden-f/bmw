@@ -1,5 +1,32 @@
 # Working in this repository
 
+## GitHub Actions budget (read first)
+
+This repository's workflows bill against the owner's monthly Actions minutes
+(3,000 included, shared with their other repositories). Every job rounds up to a
+whole minute, so many short runs cost more than they look. In October 2026 the
+check timer plus the Pages builds it triggers used well over half the month.
+
+- Run tests, builds and Playwright yourself, in your own environment:
+  `.venv/bin/python -m pytest tests/ -q`. Do not start a workflow to find out
+  whether something passes, and never re-run CI to "see if it was flaky".
+- Do not use `workflow_dispatch`, `repository_dispatch`, empty commits, or a
+  closed and reopened PR to trigger runs. The one exception is the final
+  Check AutoTrader run that the merge procedure below asks for.
+- Batch work: push a branch once, when the suite is green locally. Each push to
+  a pull request starts a CI run; a newer push cancels the older one.
+- Do not add triggers, schedules, matrix legs or jobs without saying what they
+  cost per month. New workflows need `concurrency` and `timeout-minutes`.
+- Never delete or skip tests to save minutes; save them by running fewer
+  workflows. `ci.yml` runs on pushes to `main` and on pull requests only, and
+  Cold start runs weekly or by hand.
+- The dashboard is published at most every `PAGE_MIN_GAP_MINUTES` (default 120)
+  and at least every `PAGE_MAX_AGE_MINUTES` (default 360), set as repository
+  variables. Each publish is a billed Pages build.
+- The cheapest remaining lever is the check interval
+  (`health.expected_interval_minutes`, in the vault's config.json, and the
+  outside timer's schedule): one check is about one billed minute.
+
 ## Standing permission: merge to main
 
 The owner has given standing, explicit permission to merge finished work into
