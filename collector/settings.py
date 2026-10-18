@@ -64,8 +64,11 @@ class Settings:
     jitter_minutes: int = 5
     # Local time. Overnight it only checks in, which also keeps the bot's own
     # timer going.
-    quiet_start: str = "00:30"
-    quiet_end: str = "06:30"
+    quiet_start: str = "02:00"
+    quiet_end: str = "08:00"
+    # How often it checks in while resting. Each check-in starts a run of the
+    # bot's check, which is billed by the minute, so it is rare.
+    quiet_every_minutes: int = 120
     # A standby takes over when the primary has not been heard for this long.
     takeover_after_minutes: int = 75
     # Listing pages opened per cycle for cars that pass your rules, for the

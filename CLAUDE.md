@@ -27,8 +27,11 @@ check timer plus the Pages builds it triggers used well over half the month.
   The owner wants a check every 30 minutes by day and every 2 hours from 02:00
   to 08:00 Toronto time (`health.overnight`, in `config.py`; the interval
   itself is `health.expected_interval_minutes` in the vault's config.json).
-  The outside timer (cron-job.org) has to fire on the same pattern, because a
-  firing the bot turns away still bills a minute.
+  What fires most checks is the Marketplace collector on the owner's Mac
+  (`collector/`, `repository_dispatch` type `marketplace`), not an outside
+  timer: each pass starts a run, so its overnight pause (`quiet_start`,
+  `quiet_end`, `quiet_every_minutes` in its settings.json) is what saves
+  minutes. A run the bot turns away still bills a minute.
 
 ## Standing permission: merge to main
 
