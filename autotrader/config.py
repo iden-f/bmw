@@ -235,6 +235,11 @@ DEFAULTS: dict[str, Any] = {
         # may both fire. state.mark_missing reads it as the floor on the
         # removal grace. Below the interval because GitHub also fires early.
         "min_interval_minutes": 90,
+        # A slower interval overnight, in the zone of notifications.timezone:
+        # between `start` and `end` the bot checks every `interval_minutes`
+        # instead of expected_interval_minutes. Only ever slows the watch down.
+        "overnight": {"enabled": True, "start": "02:00", "end": "08:00",
+                      "interval_minutes": 120},
         # No successful check for this long raises the "gone quiet" alarm.
         # Several intervals, because GitHub drops windows in pairs and an alarm
         # that cries wolf gets muted; tests/test_config.py keeps it at least

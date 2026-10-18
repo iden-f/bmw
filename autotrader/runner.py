@@ -13,6 +13,7 @@ import logging
 import os
 import re
 import time
+from datetime import timedelta
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -433,6 +434,30 @@ def _why_none_survived(dropped: list[tuple[Listing, filters.Verdict]]) -> str:
         buckets[label] = buckets.get(label, 0) + 1
     ranked = sorted(buckets.items(), key=lambda kv: (-kv[1], kv[0]))
     return ", ".join(f"{n} {label}" for label, n in ranked) or "every one of them"
+
+
+def _overnight_interval(cfg: Config, when: Any) -> int:
+    """The slower interval in force at ``when``, or 0 outside the overnight window.
+
+    The window is read in notifications.timezone. Anything unreadable means no
+    window: a bad setting must never slow the watch down by accident.
+    """
+    window = cfg.get("health.overnight") or {}
+    if not isinstance(window, dict) or not window.get("enabled"):
+        return 0
+    try:
+        from zoneinfo import ZoneInfo
+        local = when.astimezone(ZoneInfo(str(cfg.get("notifications.timezone") or "UTC")))
+        start_h, _, start_m = str(window.get("start")).partition(":")
+        end_h, _, end_m = str(window.get("end")).partition(":")
+        start = int(start_h) * 60 + int(start_m)
+        end = int(end_h) * 60 + int(end_m)
+        every = int(window.get("interval_minutes") or 0)
+    except Exception:  # noqa: BLE001
+        return 0
+    minutes = local.hour * 60 + local.minute
+    inside = start <= minutes < end if start < end else (minutes >= start or minutes < end)
+    return every if inside and every > 0 else 0
 
 
 def _minutes_since_last_ok(state: State) -> float | None:
@@ -920,6 +945,11 @@ def run(cfg: Config | None = None, state: State | None = None, *,
     turned_away = _minutes_since_turned_away(state)
     if (gap is not None or turned_away is not None) and expected > 0:
         floor = float(health_conf.get("min_interval_minutes", expected / 3.0) or 0)
+        # Overnight the watch slows down: the interval is longer, and a firing
+        # is turned away until three quarters of it has passed.
+        night = _overnight_interval(cfg, clock.now())
+        if night > expected:
+            floor = max(floor, night * 0.75)
         # Only scheduled firings are deduplicated; a manual run always runs.
         on_a_schedule = str(env.get("AUTOTRADER_SCHEDULED") or "").strip().lower() \
             not in ("", "0", "false", "no")
@@ -937,7 +967,10 @@ def run(cfg: Config | None = None, state: State | None = None, *,
             if not dry_run:
                 _write_the_run_down(cfg, state, report, env, notify)
             return report
-        if gap is not None and gap > expected * 2:
+        # A gap that began overnight is measured against the slower interval.
+        slowest = max([expected, night] + ([_overnight_interval(
+            cfg, clock.now() - timedelta(minutes=gap))] if gap is not None else []))
+        if gap is not None and gap > slowest * 2:
             report.missed_by = round(gap)
             # A bot that runs and fails looks the same, from the last
             # successful run alone, as a schedule that stopped firing. Ask
