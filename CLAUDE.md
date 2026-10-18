@@ -23,9 +23,12 @@ check timer plus the Pages builds it triggers used well over half the month.
 - The dashboard is published at most every `PAGE_MIN_GAP_MINUTES` (default 120)
   and at least every `PAGE_MAX_AGE_MINUTES` (default 360), set as repository
   variables. Each publish is a billed Pages build.
-- The cheapest remaining lever is the check interval
-  (`health.expected_interval_minutes`, in the vault's config.json, and the
-  outside timer's schedule): one check is about one billed minute.
+- The check interval is the main cost: one check is about one billed minute.
+  The owner wants a check every 30 minutes by day and every 2 hours from 02:00
+  to 08:00 Toronto time (`health.overnight`, in `config.py`; the interval
+  itself is `health.expected_interval_minutes` in the vault's config.json).
+  The outside timer (cron-job.org) has to fire on the same pattern, because a
+  firing the bot turns away still bills a minute.
 
 ## Standing permission: merge to main
 

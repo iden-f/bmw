@@ -378,3 +378,51 @@ class TestAnOutsideTimerCannotDoubleScrape:
         assert _is_a_schedule("schedule")
         assert not _is_a_schedule("push")
         assert not _is_a_schedule("workflow_dispatch")
+
+
+class TestTheOvernightInterval:
+    """Every 30 minutes by day, every 2 hours from 02:00 to 08:00 Toronto time."""
+
+    @pytest.fixture(autouse=True)
+    def thirty(self, bench):
+        bench.cfg.set("health.expected_interval_minutes", 30)
+        bench.cfg.set("health.min_interval_minutes", 10)
+
+    def second_run(self, bench, monkeypatch, first, minutes):
+        from datetime import datetime
+        start = datetime.fromisoformat(first)
+        monkeypatch.setenv("AUTOTRADER_NOW", start.isoformat())
+        bench.run()
+        monkeypatch.setenv("AUTOTRADER_NOW", (start + timedelta(minutes=minutes)).isoformat())
+        return bench.run(SCHEDULED)
+
+    def test_by_day_a_firing_after_the_floor_goes_ahead(self, bench, monkeypatch):
+        # 14:00 Toronto (EDT)
+        assert not self.second_run(bench, monkeypatch, "2026-10-20T18:00:00+00:00", 20).skipped
+
+    def test_overnight_the_same_gap_stands_down(self, bench, monkeypatch):
+        # 04:00 Toronto (EDT)
+        assert self.second_run(bench, monkeypatch, "2026-10-20T08:00:00+00:00", 30).skipped
+        assert self.second_run(bench, monkeypatch, "2026-10-20T08:00:00+00:00", 85).skipped
+
+    def test_overnight_a_firing_after_two_hours_goes_ahead(self, bench, monkeypatch):
+        assert not self.second_run(bench, monkeypatch, "2026-10-20T08:00:00+00:00", 115).skipped
+
+    def test_the_window_follows_the_clock_in_winter(self):
+        from datetime import datetime, timezone
+        cfg = Config.defaults(None)
+        cfg.set("notifications.timezone", "America/Toronto")
+        night = runner_mod._overnight_interval
+        # 02:30 and 07:59 EST, then 08:00 EST
+        assert night(cfg, datetime(2026, 12, 1, 7, 30, tzinfo=timezone.utc)) == 120
+        assert night(cfg, datetime(2026, 12, 1, 12, 59, tzinfo=timezone.utc)) == 120
+        assert night(cfg, datetime(2026, 12, 1, 13, 0, tzinfo=timezone.utc)) == 0
+        assert night(cfg, datetime(2026, 12, 1, 6, 59, tzinfo=timezone.utc)) == 0
+
+    def test_a_bad_window_means_no_window(self):
+        from datetime import datetime, timezone
+        cfg = Config.defaults(None)
+        cfg.set("health.overnight", {"enabled": True, "start": "late", "end": "08:00",
+                                     "interval_minutes": 120})
+        assert runner_mod._overnight_interval(
+            cfg, datetime(2026, 12, 1, 8, 0, tzinfo=timezone.utc)) == 0
