@@ -121,7 +121,8 @@ cars it has opened) is in that folder, never in the clone.
 | Setting | Default | Meaning |
 |---|---|---|
 | `every_minutes`, `jitter_minutes` | 25, 5 | A pass every 20 to 30 minutes |
-| `quiet_start`, `quiet_end` | `00:30`, `06:30` | Overnight it only checks in, in this Mac's time |
+| `quiet_start`, `quiet_end` | `02:00`, `08:00` | Overnight it only checks in, in this Mac's time |
+| `quiet_every_minutes` | 120 | How often it checks in overnight; each check-in starts a billed run |
 | `details_per_cycle` | 3 | Listing pages opened per pass, for cars that pass your rules |
 | `scrolls` | 2 | Screens of results per search beyond the first |
 | `role` | `primary` | `standby` reads only when the primary has gone quiet or Facebook will not let it in |

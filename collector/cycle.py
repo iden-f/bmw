@@ -131,8 +131,17 @@ def resting(cfg: S.Settings, now: datetime | None = None) -> bool:
     return start <= at < end if start < end else (at >= start or at < end)
 
 
-def next_wait(cfg: S.Settings) -> float:
-    """Seconds until the next pass: the interval, give or take the jitter."""
+def next_wait(cfg: S.Settings, now: datetime | None = None) -> float:
+    """Seconds until the next pass: the interval, give or take the jitter.
+
+    While resting the interval is quiet_every_minutes, cut short so the first
+    pass after the pause is on time rather than up to that long late.
+    """
+    now = now or datetime.now()
+    if cfg.quiet_every_minutes > cfg.every_minutes and resting(cfg, now):
+        end, at = _minutes(cfg.quiet_end), now.hour * 60 + now.minute
+        until_end = ((end - at) % (24 * 60)) * 60 - now.second
+        return max(5.0, min(cfg.quiet_every_minutes * 60, until_end))
     minutes = cfg.every_minutes + random.uniform(-cfg.jitter_minutes, cfg.jitter_minutes)
     return max(5.0, minutes) * 60
 

@@ -360,8 +360,27 @@ class TestTheClock:
     def test_waits_twenty_to_thirty_minutes(self):
         from collector.cycle import next_wait
         from collector.settings import Settings
-        waits = [next_wait(Settings()) / 60 for _ in range(200)]
+        noon = datetime(2026, 1, 1, 12, 0)
+        waits = [next_wait(Settings(), noon) / 60 for _ in range(200)]
         assert 20 <= min(waits) and max(waits) <= 30
+
+    def test_overnight_it_checks_in_every_two_hours(self):
+        from collector.cycle import next_wait
+        from collector.settings import Settings
+        assert next_wait(Settings(), datetime(2026, 1, 1, 2, 0)) == 120 * 60
+        assert next_wait(Settings(), datetime(2026, 1, 1, 4, 10)) == 120 * 60
+
+    def test_the_last_overnight_wait_ends_when_the_pause_does(self):
+        from collector.cycle import next_wait
+        from collector.settings import Settings
+        # 07:00 plus two hours would be 09:00; the pause ends at 08:00.
+        assert next_wait(Settings(), datetime(2026, 1, 1, 7, 0)) == 60 * 60
+
+    def test_the_day_is_unchanged_either_side_of_the_pause(self):
+        from collector.cycle import next_wait
+        from collector.settings import Settings
+        for hour in (1, 8, 9, 23):
+            assert 20 <= next_wait(Settings(), datetime(2026, 1, 1, hour, 5)) / 60 <= 30
 
 
 class TestTheService:
