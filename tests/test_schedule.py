@@ -381,7 +381,7 @@ class TestAnOutsideTimerCannotDoubleScrape:
 
 
 class TestTheOvernightInterval:
-    """Every 30 minutes by day, every 2 hours from 02:00 to 08:00 Toronto time."""
+    """Every 30 minutes by day, every 2 hours from 02:00 to 08:00 Vancouver time."""
 
     @pytest.fixture(autouse=True)
     def thirty(self, bench):
@@ -397,27 +397,31 @@ class TestTheOvernightInterval:
         return bench.run(SCHEDULED)
 
     def test_by_day_a_firing_after_the_floor_goes_ahead(self, bench, monkeypatch):
-        # 14:00 Toronto (EDT)
-        assert not self.second_run(bench, monkeypatch, "2026-10-20T18:00:00+00:00", 20).skipped
+        # 12:00 Vancouver (PDT)
+        assert not self.second_run(bench, monkeypatch, "2026-10-20T19:00:00+00:00", 20).skipped
 
     def test_overnight_the_same_gap_stands_down(self, bench, monkeypatch):
-        # 04:00 Toronto (EDT)
-        assert self.second_run(bench, monkeypatch, "2026-10-20T08:00:00+00:00", 30).skipped
-        assert self.second_run(bench, monkeypatch, "2026-10-20T08:00:00+00:00", 85).skipped
+        # 04:00 Vancouver (PDT)
+        assert self.second_run(bench, monkeypatch, "2026-10-20T11:00:00+00:00", 30).skipped
+        assert self.second_run(bench, monkeypatch, "2026-10-20T11:00:00+00:00", 85).skipped
 
     def test_overnight_a_firing_after_two_hours_goes_ahead(self, bench, monkeypatch):
-        assert not self.second_run(bench, monkeypatch, "2026-10-20T08:00:00+00:00", 115).skipped
+        assert not self.second_run(bench, monkeypatch, "2026-10-20T11:00:00+00:00", 115).skipped
 
-    def test_the_window_follows_the_clock_in_winter(self):
-        from datetime import datetime, timezone
+    def test_the_window_follows_the_local_clock_all_year(self):
+        from datetime import datetime
+        from zoneinfo import ZoneInfo
         cfg = Config.defaults(None)
-        cfg.set("notifications.timezone", "America/Toronto")
         night = runner_mod._overnight_interval
-        # 02:30 and 07:59 EST, then 08:00 EST
-        assert night(cfg, datetime(2026, 12, 1, 7, 30, tzinfo=timezone.utc)) == 120
-        assert night(cfg, datetime(2026, 12, 1, 12, 59, tzinfo=timezone.utc)) == 120
-        assert night(cfg, datetime(2026, 12, 1, 13, 0, tzinfo=timezone.utc)) == 0
-        assert night(cfg, datetime(2026, 12, 1, 6, 59, tzinfo=timezone.utc)) == 0
+        local = ZoneInfo("America/Vancouver")
+        # Built in local time, so it holds whatever offset the zone has in
+        # each season (British Columbia is dropping the seasonal change).
+        for month in (1, 7, 12):
+            at = lambda h, m: datetime(2026, month, 15, h, m, tzinfo=local)
+            assert night(cfg, at(2, 0)) == 120
+            assert night(cfg, at(7, 59)) == 120
+            assert night(cfg, at(8, 0)) == 0
+            assert night(cfg, at(1, 59)) == 0
 
     def test_a_bad_window_means_no_window(self):
         from datetime import datetime, timezone

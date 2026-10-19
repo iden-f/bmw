@@ -131,7 +131,8 @@
       "enabled": true,
       "start": "02:00",
       "end": "08:00",
-      "interval_minutes": 120
+      "interval_minutes": 120,
+      "timezone": "America/Vancouver"
     },
     "silent_after_hours": 6
   },
