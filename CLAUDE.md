@@ -25,7 +25,7 @@ check timer plus the Pages builds it triggers used well over half the month.
   variables. Each publish is a billed Pages build.
 - The check interval is the main cost: one check is about one billed minute.
   The owner wants a check every 30 minutes by day and every 2 hours from 02:00
-  to 08:00 Toronto time (`health.overnight`, in `config.py`; the interval
+  to 08:00 Pacific time (`health.overnight`, in `config.py`; the interval
   itself is `health.expected_interval_minutes` in the vault's config.json).
   What fires most checks is the Marketplace collector on the owner's Mac
   (`collector/`, `repository_dispatch` type `marketplace`), not an outside

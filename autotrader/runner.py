@@ -439,7 +439,7 @@ def _why_none_survived(dropped: list[tuple[Listing, filters.Verdict]]) -> str:
 def _overnight_interval(cfg: Config, when: Any) -> int:
     """The slower interval in force at ``when``, or 0 outside the overnight window.
 
-    The window is read in notifications.timezone. Anything unreadable means no
+    The window is read in its own timezone. Anything unreadable means no
     window: a bad setting must never slow the watch down by accident.
     """
     window = cfg.get("health.overnight") or {}
@@ -447,7 +447,7 @@ def _overnight_interval(cfg: Config, when: Any) -> int:
         return 0
     try:
         from zoneinfo import ZoneInfo
-        local = when.astimezone(ZoneInfo(str(cfg.get("notifications.timezone") or "UTC")))
+        local = when.astimezone(ZoneInfo(str(window.get("timezone") or "UTC")))
         start_h, _, start_m = str(window.get("start")).partition(":")
         end_h, _, end_m = str(window.get("end")).partition(":")
         start = int(start_h) * 60 + int(start_m)
