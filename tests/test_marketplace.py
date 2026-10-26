@@ -222,14 +222,45 @@ class TestThePlan:
         [item] = M.plan(cfg)
         assert item["search"] == cfg.searches[0].id
         assert item["make"] == "Honda" and item["models"] == ["Civic"]
-        [query] = item["queries"]
-        assert query["query"] == "Honda Civic"
+        query, _ = item["queries"]
+        assert query["query"] == "Honda Civic" and query["order"] == "newest"
         url = query["url"]
         assert url.startswith("https://www.facebook.com/marketplace/ottawa/search/?")
         for part in ("query=Honda+Civic", "minYear=2015", "sortBy=creation_time_descend",
                      "radius=500"):
             assert part in url, part
         assert item["latitude"] and item["longitude"]
+
+    def test_and_the_same_query_in_marketplace_s_own_order(self, cfg):
+        # Marketplace's newest-first page leaves some listings out that its
+        # default order shows (a dealer's post, for three days, in October
+        # 2026), so each model is read both ways and the cars are one list.
+        [item] = M.plan(cfg)
+        newest, best = item["queries"]
+        assert best["query"] == newest["query"] and best["order"] == "best match"
+        assert "sortBy=" not in best["url"]
+        assert best["url"].replace("&exact=", "&sortBy=creation_time_descend&exact=") \
+            == newest["url"]
+        assert [q["order"] for q in item["queries"]] == list(M.ORDERS)
+
+    def test_the_second_order_is_not_a_new_starting_point(self, cfg):
+        # The scope is what Marketplace is asked; the second order asks the
+        # same thing, so a collector updated to read it baselines nothing.
+        [item] = M.plan(cfg)
+        only_newest = dict(item, queries=[{"query": q["query"], "url": q["url"]}
+                                          for q in item["queries"]
+                                          if q["order"] == "newest"])
+        assert item["scope"] == M.hashlib.sha256(M.json.dumps(
+            {k: only_newest[k] for k in M.SCOPE_KEYS}, sort_keys=True,
+            default=str).encode()).hexdigest()[:16]
+
+    def test_two_models_are_four_pages(self, cfg):
+        cfg.data["searches"][0]["filters"]["models"] = ["Civic", "Accord"]
+        cfg.save()
+        [item] = M.plan(cfg)
+        assert [(q["query"], q["order"]) for q in item["queries"]] == [
+            ("Honda Civic", "newest"), ("Honda Civic", "best match"),
+            ("Honda Accord", "newest"), ("Honda Accord", "best match")]
 
     def test_the_radius_is_capped_at_what_marketplace_offers(self, cfg):
         assert M.plan(cfg)[0]["radius_km"] == M.MAX_RADIUS_KM

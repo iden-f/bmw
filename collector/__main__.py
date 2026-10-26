@@ -59,7 +59,7 @@ def cmd_check(args) -> int:
     plan = M.plan(watch)
     print(f"ok   {len(plan)} search{'es' if len(plan) != 1 else ''} to read:")
     for item in plan:
-        print(f"       {item['name']}: {', '.join(q['query'] for q in item['queries'])}"
+        print(f"       {item['name']}: {', '.join(dict.fromkeys(q['query'] for q in item['queries']))}"
               f" within {item['radius_km']} km")
     if not profile_exists():
         print("next  sign in to Facebook: collector/run login")

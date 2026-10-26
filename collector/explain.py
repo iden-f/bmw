@@ -66,7 +66,7 @@ def explain(settings: S.Settings, *, github: GitHub | None = None,
         owned.update(l.id for l in judged.kept + judged.unpriced)
         out["kept_anywhere"] = owned
         out["searches"].append({
-            "name": search.name, "queries": [q["query"] for q in item["queries"]],
+            "name": search.name, "queries": list(dict.fromkeys(q["query"] for q in item["queries"])),
             "landed": part.get("landed", ""), "ok": part["ok"], "error": part["error"],
             "records": {M.MARKETPLACE_PREFIX + r["id"]: r for r in part["listings"]},
             "judged": judged})
