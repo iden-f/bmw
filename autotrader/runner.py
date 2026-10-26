@@ -81,6 +81,8 @@ class RunReport:
     invariants: list[str] = field(default_factory=list)
     # What the run did about photographs. Nothing here can fail a check.
     photos: dict[str, Any] = field(default_factory=dict)
+    # The pictures a Marketplace batch carried, and how many were kept.
+    pictures: dict[str, Any] = field(default_factory=dict)
     # Our copies of the Carfax reports sellers published: see carfax.py.
     reports: dict[str, Any] = field(default_factory=dict)
     # What this run cost and where the month stands - see budget.py.
@@ -149,7 +151,7 @@ class RunReport:
             "notified": self.notified, "errors": self.errors[:10],
             "warnings": self.warnings[:10], "strategies": self.strategies,
             "quiet": self.quiet, "dry_run": self.dry_run,
-            "photos": self.photos, "reports": self.reports,
+            "photos": self.photos, "pictures": self.pictures, "reports": self.reports,
             "your_call": self.your_call,
             "archived": self.archived,
             "pinned_checked": self.pinned_checked,

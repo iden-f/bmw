@@ -9,8 +9,11 @@ opening. The CDN serves resized variants, so there is nothing to re-encode
 and no image library to install: the work is requesting a small variant,
 checking that the response is really an image, and staying inside a budget.
 
-Copies go only when the car itself is forgotten (its row leaves state) or a
-rule hides it. The budget is a visible setting (dashboard.photo_budget_mb),
+Copies go only when the car itself is forgotten (its row leaves state). A
+car a rule hides keeps what was saved: one on the edge of a rule crossed
+it on alternate checks and had its copies dropped and fetched again, a
+dozen requests every other check. Hidden cars are simply not fetched for.
+The budget is a visible setting (dashboard.photo_budget_mb),
 and when it is full the page says which cars have no photo rather than
 quietly dropping an old car's gallery.
 
@@ -226,13 +229,15 @@ def sync(entries: Iterable[dict[str, Any]], fetcher: Any,
     entries = list(entries)
     index = _load_index()
 
-    # Only visible cars: a hidden car's photos are not published in the data
-    # file either, so fetching them would be wasted. Gone cars are kept, not
-    # fetched for.
+    # Copies are kept for every car still in state (and gone ones, with
+    # ``keep_gone``), hidden or not. Fetched for only visible, live cars: a
+    # hidden car's photos are not published in the data file, so fetching
+    # them would be wasted, and a gone car's links have expired.
     wanted = {str(e["id"]): e for e in entries
-              if (e.get("status") == "active" or (keep_gone and e.get("status") == "gone"))
-              and not e.get("filtered") and (e.get("images") or [])}
-    fetch_for = {lid for lid, e in wanted.items() if e.get("status") == "active"}
+              if e.get("status") == "active" or (keep_gone and e.get("status") == "gone")}
+    fetch_for = {lid for lid, e in wanted.items()
+                 if e.get("status") == "active" and not e.get("filtered")
+                 and (e.get("images") or [])}
 
     # Prune first, so space freed by forgotten cars goes to live ones.
     for listing_id in list(index):
@@ -352,6 +357,56 @@ def sync(entries: Iterable[dict[str, Any]], fetcher: Any,
     if not dry_run:
         _save_index(index)
     return report
+
+
+def store(listing_id: str, blob: bytes, content_type: str, *, url: str = "",
+          n: int = 0) -> bool:
+    """Keep a photo somebody else fetched, as if the bot had fetched it.
+
+    The Marketplace collector fetches a car's card photo while its signed
+    link is fresh and carries the picture in the batch. Checked the same
+    way a fetched one is: a real image type, under the size cap, a header
+    that parses. Replaces the car's photo at that position, so a fresh
+    picture of a car whose copy was from an earlier link wins.
+    """
+    content_type = str(content_type or "").split(";")[0].strip().lower()
+    if content_type not in OK_TYPES or not blob or len(blob) > MAX_BYTES_EACH:
+        return False
+    size = _dimensions(blob)
+    if not size:
+        return False
+    name = _safe_name(str(listing_id), content_type, n)
+    if not name:
+        return False
+    try:
+        THUMB_DIR.mkdir(parents=True, exist_ok=True)
+        (THUMB_DIR / name).write_bytes(blob)
+    except OSError as exc:
+        log.warning("could not write %s: %s", name, exc)
+        return False
+    index = _load_index()
+    row = index.get(str(listing_id)) or {}
+    have = [f for f in _files_of(row)
+            if f.get("n", 0) != n and (THUMB_DIR / f["file"]).exists()]
+    for old in _files_of(row):
+        if old.get("n", 0) == n and old.get("file") != name:
+            try:
+                (THUMB_DIR / old["file"]).unlink(missing_ok=True)
+            except OSError:
+                pass
+    have.append({"file": name, "bytes": len(blob), "n": n, "w": size[0], "h": size[1]})
+    have.sort(key=lambda f: f.get("n", 0))
+    fresh: dict[str, Any] = {"files": have, "file": have[0]["file"],
+                             "bytes": sum(f.get("bytes", 0) for f in have),
+                             "w": have[0].get("w"), "h": have[0].get("h")}
+    # The link's failure note is moot now that its picture is here.
+    notes = _failures(row.get("failed"))
+    notes.pop(url, None)
+    if notes:
+        fresh["failed"] = notes
+    index[str(listing_id)] = fresh
+    _save_index(index)
+    return True
 
 
 def _failures(saved: Any) -> dict[str, dict[str, Any]]:

@@ -222,10 +222,19 @@ class TestStayingSmall:
         report = thumbs.sync([car(1, status="gone")], CDN(), keep_gone=False)
         assert report.pruned == 1 and thumbs.locals_for(car(1)["id"]) == []
 
-    def test_a_hidden_car_still_loses_its_photo(self, here):
+    def test_a_hidden_car_keeps_its_photos_but_gets_no_more(self, here):
+        """A car on the edge of a rule crossed it on alternate checks, and
+        had its copies dropped and fetched again: twelve requests every
+        other check. Its copies stay; nothing more is fetched for it."""
         thumbs.sync([car(1)], CDN())
-        report = thumbs.sync([car(1, filtered=True)], CDN())
-        assert report.pruned == 1
+        cdn = CDN()
+        report = thumbs.sync([car(1, filtered=True)], cdn)
+        assert report.pruned == 0 and report.kept == 1
+        assert cdn.calls == []
+        assert thumbs.locals_for(car(1)["id"])
+        # Back inside the rules: nothing to fetch, the copy was kept.
+        cdn = CDN()
+        assert thumbs.sync([car(1)], cdn).fetched == 0 and cdn.calls == []
 
     def test_pruning_frees_room_for_a_live_car(self, here):
         """The budget is for cars still in state, not cars forgotten."""
@@ -602,3 +611,31 @@ class TestAPhotoThatNeverComesIsLeftAlone:
         report = thumbs.sync([car(1), car(2)], CDN(mode="404"))
         assert report.kept == 0
         assert thumbs.locals_for(car(1)["id"]) == []
+
+
+class TestAPictureSomebodyElseFetched:
+    """The Marketplace collector carries a car's card photo in the batch."""
+
+    def test_is_kept_as_the_car_s_first_photo(self, here):
+        assert thumbs.store(car(1)["id"], webp(), "image/webp", url="https://cdn.test/1.webp")
+        assert thumbs.locals_for(car(1)["id"]) == [f"thumbs/{car(1)['id']}.webp"]
+        # And the sync then asks nothing of the CDN for it.
+        cdn = CDN()
+        report = thumbs.sync([car(1)], cdn)
+        assert cdn.calls == [] and report.kept == 1 and report.fetched == 0
+
+    def test_is_checked_like_a_fetched_one(self, here):
+        lid = car(1)["id"]
+        assert not thumbs.store(lid, b"not an image", "image/webp")
+        assert not thumbs.store(lid, webp(), "text/html")
+        assert not thumbs.store(lid, webp(pad=200_000), "image/webp")
+        assert not thumbs.store("../escape", webp(), "image/webp")
+        assert thumbs.locals_for(lid) == []
+        assert not list((here / "docs/thumbs").glob("*.webp"))
+
+    def test_clears_the_link_s_failure_note(self, here):
+        lid = car(1)["id"]
+        thumbs.sync([{**car(1), "images": ["https://cdn.test/missing.webp"]}], CDN(mode="404"))
+        assert thumbs._load_index()[lid]["failed"]
+        assert thumbs.store(lid, webp(), "image/webp", url="https://cdn.test/missing.webp")
+        assert "failed" not in thumbs._load_index()[lid]

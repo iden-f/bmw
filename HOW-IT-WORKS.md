@@ -110,8 +110,9 @@ All in `autotrader/`, in the order the data moves.
   shaped like a credential.
 - **`thumbs`**: small copies of listing photos, at most 40 new photos per
   check and up to `dashboard.photos_per_car` (12) per car, the newest cars'
-  first photos first. A car that goes keeps its photos; only a car you forget
-  or a rule hides loses them, and the whole store stays under
+  first photos first. A car that goes keeps its photos, and so does one a
+  rule hides (nothing more is fetched for either); only a car you forget
+  loses them, and the whole store stays under
   `dashboard.photo_budget_mb` (600). A photo that fails twice running is left
   alone for a week.
 - **`carfax`**: the Carfax report a seller published with the listing. The
@@ -264,10 +265,18 @@ the bot stays the only writer of the watch's data.
    "settings", "next_at", "last_failure", "searches": [...]}`, sealed like everything else with the name
    `marketplace` and padded to 4 KiB, sent as `repository_dispatch` of type
    `marketplace` with the sealed text in `client_payload.batch`. GitHub
-   carries at most 65,535 characters there, so an oversized batch leaves out
-   photos first, the oldest cars' first, and later batches carry them; only
-   if that is not enough are the oldest cars left out, and the next batch
-   carries those. GitHub keeps one run waiting per concurrency group and
+   carries at most 65,535 characters there; a bigger batch (five searches
+   read a thousand cars, and their photo links do not compress) goes up
+   first as a git blob of the repository, unreferenced, and the dispatch
+   carries its hash in `client_payload.blob`. The ingest reads it back with
+   the workflow's own token. Only past 8 MB is anything left out: pictures
+   first, then the oldest cars' photo links, then the oldest cars, and later
+   batches carry them. Facebook's photo links are signed and die within
+   days, and its CDN turns the runner away once they have, so the collector
+   fetches the card photo of each car the rules keep while the link is
+   fresh, newest cars first and 40 a pass, and carries the picture itself
+   (`photo_data`, `photo_type`), once per car; the ingest keeps it as the
+   car's photo. GitHub keeps one run waiting per concurrency group and
    cancels it when a newer one arrives, so a batch can be dropped; nothing
    the collector found is sent in one batch only.
 4. **The ingest.** `marketplace ingest` reads the batch from the event file,

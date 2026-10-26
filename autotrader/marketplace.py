@@ -73,8 +73,11 @@ BATCH_VERSION = 1
 # found on a car's own page.
 BATCH_MAX_AGE_HOURS = 12
 BATCH_IDS_KEPT = 500
-# repository_dispatch refuses a client_payload over 65,535 characters.
+# repository_dispatch refuses a client_payload over 65,535 characters. A
+# bigger batch goes up as a git blob and the dispatch names its hash.
 PAYLOAD_LIMIT = 60_000
+_BLOB_SHA = re.compile(r"^[0-9a-f]{40}$")
+_REPO = re.compile(r"^[A-Za-z0-9_-][A-Za-z0-9_.-]*/[A-Za-z0-9_-][A-Za-z0-9_.-]*$")
 
 
 class BatchError(ValueError):
@@ -91,6 +94,37 @@ def seal_batch(key: bytes, batch: dict[str, Any]) -> str:
     blob = seal(key, json.dumps(batch, separators=(",", ":")).encode(),
                 BATCH_NAME, pad=PAD_SMALL)
     return base64.b64encode(blob).decode("ascii")
+
+
+def fetch_blob(env: dict[str, str], sha: str, http=None) -> str:
+    """The sealed batch the collector put in the repository as a blob.
+
+    Read with the workflow's own token (GH_TOKEN or GITHUB_TOKEN), from the
+    repository the workflow runs in. The text is the same sealed base64 a
+    dispatch carries inline, so it opens with ``open_batch``.
+    """
+    import requests
+    sha = str(sha or "").strip().lower()
+    if not _BLOB_SHA.match(sha):
+        raise BatchError("the dispatch names a blob with a malformed hash")
+    repo = str(env.get("GITHUB_REPOSITORY") or "").strip()
+    if not _REPO.match(repo):
+        raise BatchError("GITHUB_REPOSITORY is not set, so the blob cannot be read")
+    token = str(env.get("GH_TOKEN") or env.get("GITHUB_TOKEN") or "").strip()
+    if not token:
+        raise BatchError("no GH_TOKEN in the environment, so the blob cannot be read")
+    api = str(env.get("GITHUB_API_URL") or "https://api.github.com").rstrip("/")
+    http = http or requests
+    try:
+        r = http.get(f"{api}/repos/{repo}/git/blobs/{sha}", timeout=120,
+                     headers={"Authorization": f"Bearer {token}",
+                              "Accept": "application/vnd.github.raw",
+                              "X-GitHub-Api-Version": "2022-11-28"})
+    except Exception as exc:  # noqa: BLE001 - said, not raised bare
+        raise BatchError(f"reading the batch blob: {str(exc)[:140]}") from None
+    if r.status_code != 200:
+        raise BatchError(f"reading the batch blob: HTTP {r.status_code}")
+    return r.text
 
 
 def open_batch(key: bytes, text: str, state: State | None = None,
@@ -570,6 +604,37 @@ def to_listing(rec: dict[str, Any], search, *, make: str = "",
     return listing
 
 
+def keep_pictures(state: State, batch: dict[str, Any]) -> dict[str, int]:
+    """Save the photos the collector carried, for the cars this batch kept.
+
+    Facebook's photo links are signed and die within days, and its CDN turns
+    the bot away once they have, so the collector fetches a car's card photo
+    while the link is fresh and carries the picture. Only a car in state
+    gets its picture kept: one set aside as another model was not stored.
+    """
+    from . import thumbs
+    out = {"carried": 0, "kept": 0, "refused": 0}
+    for part in batch.get("searches") or []:
+        for rec in part.get("listings") or []:
+            if not isinstance(rec, dict) or not rec.get("photo_data"):
+                continue
+            out["carried"] += 1
+            lid = MARKETPLACE_PREFIX + str(rec.get("id") or "")
+            if lid not in state.listings:
+                continue
+            try:
+                blob = base64.b64decode(str(rec["photo_data"]), validate=True)
+            except (binascii.Error, ValueError):
+                out["refused"] += 1
+                continue
+            if thumbs.store(lid, blob, str(rec.get("photo_type") or ""),
+                            url=str(rec.get("photo") or "")):
+                out["kept"] += 1
+            else:
+                out["refused"] += 1
+    return out
+
+
 @dataclass
 class Judged:
     """Where every car one search read went, as the bot decides it."""
@@ -1035,6 +1100,10 @@ def ingest(cfg, state: State, batch: dict[str, Any], *,
 
     if not dry_run and fetcher is not None and cfg.get("dashboard.photos", True):
         from . import thumbs
+        try:
+            report.pictures = keep_pictures(state, batch)
+        except Exception as exc:  # noqa: BLE001 - a picture never fails a batch
+            log.warning("carried pictures not kept: %s", exc)
         try:
             shots = thumbs.sync(state.listings.values(), fetcher, **thumbs.settings(cfg))
             report.photos = {"kept": shots.kept, "fetched": shots.fetched,
