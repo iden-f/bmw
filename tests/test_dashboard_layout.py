@@ -203,6 +203,9 @@ def _page(browser, site, width, theme, view=None):
     page.goto(site, wait_until="networkidle")
     page.wait_for_timeout(250)
     if view:
+        if view == "market":   # behind the Archive tab's switch
+            page.click('[data-view-link="archive"]')
+            page.wait_for_timeout(250)
         page.click(f'[data-view-link="{view}"]')
         page.wait_for_timeout(250)
     return ctx, page, errors
@@ -458,7 +461,7 @@ class TestWhatAScreenshotDoesNotCatch:
         """
         ctx, page, _ = _page(browser, site, 390, "light")
         try:
-            for view in ("feed", "listings", "market", "searches", "status"):
+            for view in ("feed", "listings", "archive", "market", "searches", "status"):
                 page.click(f'[data-view-link="{view}"]')
                 page.wait_for_timeout(200)
                 text = page.evaluate("() => document.body.innerText")
@@ -1271,7 +1274,7 @@ class TestTheFourKeysWorthHaving:
     def test_the_number_keys_switch_views(self, browser, site):
         ctx, page, errors = _page(browser, site, 1440, "light")
         try:
-            for key, want in (("3", "market"), ("5", "status"), ("1", "feed")):
+            for key, want in (("3", "archive"), ("4", "status"), ("2", "searches"), ("1", "feed")):
                 page.keyboard.press(key)
                 page.wait_for_timeout(250)
                 assert want in page.evaluate("() => location.hash"), key
@@ -1355,10 +1358,15 @@ class TestTheFourKeysWorthHaving:
                 const el = document.getElementById('shortcuts');
                 return el ? getComputedStyle(el).display !== 'none' : false; }""")
             assert not shown, "the shortcut panel is showing on a phone"
-            for view in ("feed", "listings", "market", "searches", "status"):
+            # The four tabs, and the switch inside the one that is open.
+            for view in ("feed", "listings", "searches", "archive", "status"):
                 assert page.evaluate(
                     "v => !!document.querySelector(`[data-view-link=\"${v}\"]`)",
                     view), view
+            page.click('[data-view-link="archive"]')
+            page.wait_for_timeout(200)
+            assert page.evaluate(
+                "() => !!document.querySelector('[data-view-link=\"market\"]')")
         finally:
             ctx.close()
 

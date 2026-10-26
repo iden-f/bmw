@@ -158,15 +158,25 @@ could not be delivered is held and sent on the next check.
 
 ## The dashboard
 
+Four tabs: **Discover** (Feed and Listings), **Watches** (Searches),
+**Archive** (Archive and Market) and **Settings** (Status). Keys 1 to 4 on a
+keyboard.
+
 - **Feed**: what changed, newest first, and which of it reached your phone.
-- **Listings**: every car, with its photos, price history and your marks.
+- **Listings**: every live car, with its photos, price history and your marks.
+- **Searches**: what is being watched and how each search is reading. Add a
+  search, remove one, change its rules, or set it to archive only here.
+- **Archive**: every car the bot has ever recorded, the gone ones included,
+  with every price it asked, the seller's edits and the photos the bot kept.
+  Which searches only archive, and the listings you saved by pasting their
+  link, are set here.
 - **Market**: what the cars say together: median asking prices, how long cars
   stay listed, how often prices move, and a deal score with its own track
   record.
-- **Searches**: what is being watched and how each search is reading. Add a
-  search, remove one or change its rules here.
-- **Status**: when it checked, how well the schedule is keeping time, the
-  alert channels, and the QR code for your phone.
+- **Status**: the settings the page can change (alerts, photos, retention),
+  sending changes straight from your phone with a GitHub token kept only on
+  the device, and then when it checked, how well the schedule is keeping
+  time, the alert channels, and the QR code for your phone.
 
 A car one of your rules hides is kept, counted and explained rather than
 dropped: click the count to see it and the rule.

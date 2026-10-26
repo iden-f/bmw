@@ -12,10 +12,22 @@
 const VIEWS = [
   { id: 'feed', label: 'Feed' },
   { id: 'listings', label: 'Listings' },
-  { id: 'market', label: 'Market' },
   { id: 'searches', label: 'Searches' },
+  { id: 'archive', label: 'Archive' },
+  { id: 'market', label: 'Market' },
   { id: 'status', label: 'Status' },
 ];
+/* The four tabs. Each is a group of views: the tab lands on the first, and
+   the others sit behind a switch at the top of the view. Discover is what is
+   happening now; Watches is what the bot looks at and the rules; Archive is
+   everything it has ever kept; Settings is how it behaves and how it is. */
+const GROUPS = [
+  { id: 'discover', label: 'Discover', views: ['feed', 'listings'] },
+  { id: 'watches',  label: 'Watches',  views: ['searches'] },
+  { id: 'archive',  label: 'Archive',  views: ['archive', 'market'] },
+  { id: 'settings', label: 'Settings', views: ['status'] },
+];
+const groupOf = view => GROUPS.find(g => g.views.includes(view)) || GROUPS[0];
 
 const KIND = {
   new:        { label: 'New',        group: 'New to the market',  flag: 'new',    rule: 'Appeared on the site' },
@@ -152,6 +164,9 @@ const app = {
   limit: 0,
   limitFor: '',
   draft: null,
+  // The Archive tab's filter chip and how many cards it has drawn.
+  archiveChip: 'all',
+  archiveLimit: 0,
   // Set when the view is out of date under an open sheet, or under an edit
   // (see busy()): new data landed, or a mark was set. Closing the sheet
   // redraws it, and so does the clock once the edit is done.
@@ -1101,32 +1116,70 @@ function renderTrust() {
 }
 
 /* ----------------------------------------------------------------- tabs */
+/* The count beside a view's name, on the tab bar and on the switch inside
+   a view. Empty when there is nothing worth counting. */
+function badgeFor(view) {
+  if (!app.data) return '<span class="tab__n num"></span>';
+  if (view === 'feed') {
+    const unread = feedEvents().filter(e => isUnread(e)).length;
+    return unread ? `<span class="tab__n num" data-unread="1">${unread}</span>`
+      : '<span class="tab__n num"></span>';
+  }
+  // What the Live chip counts: a car marked not interested is out of it.
+  if (view === 'listings') {
+    return `<span class="tab__n num">${visible().filter(l => !marks.of(l.id).dismissed).length}</span>`;
+  }
+  if (view === 'searches') return `<span class="tab__n num">${(app.data.searches || []).length}</span>`;
+  if (view === 'archive') return `<span class="tab__n num">${(app.data.listings || []).length}</span>`;
+  return '<span class="tab__n num"></span>';
+}
+
 function renderTabs() {
   const host = document.getElementById('tabs');
-  const unread = app.data ? feedEvents().filter(e => isUnread(e)).length : 0;
   // A refresh in the background redraws the tabs too; a keyboard resting on
   // one stays on it.
   const held = host.contains(document.activeElement) && document.activeElement.dataset.viewLink;
   host.innerHTML = '';
-  for (const v of VIEWS) {
+  // The switch inside the open view counts too, and it is not redrawn with
+  // the view while a car is open or an edit is under way (see busy()).
+  for (const b of document.querySelectorAll('.seg__btn[data-view-link]')) {
+    const n = b.querySelector('.tab__n');
+    if (n) n.outerHTML = badgeFor(b.dataset.viewLink);
+  }
+  const current = groupOf(app.view);
+  for (const g of GROUPS) {
     const b = el('button', 'tab');
     b.type = 'button';
-    b.dataset.viewLink = v.id;
+    b.dataset.viewLink = g.views[0];
+    b.dataset.group = g.id;
     b.setAttribute('role', 'link');
-    if (app.view === v.id) b.setAttribute('aria-current', 'page');
-    let n = '';
-    if (v.id === 'feed' && unread) n = `<span class="tab__n num" data-unread="1">${unread}</span>`;
-    // What the Live chip counts: a car marked not interested is out of it.
-    else if (v.id === 'listings' && app.data) {
-      n = `<span class="tab__n num">${visible().filter(l => !marks.of(l.id).dismissed).length}</span>`;
-    }
-    else if (v.id === 'searches' && app.data) n = `<span class="tab__n num">${(app.data.searches || []).length}</span>`;
-    else n = '<span class="tab__n num"></span>';
-    b.innerHTML = `<span>${v.label}</span>${n}`;
-    b.addEventListener('click', () => go(v.id));
+    if (current === g) b.setAttribute('aria-current', 'page');
+    b.innerHTML = `<span>${g.label}</span>${badgeFor(g.views[0])}`;
+    b.addEventListener('click', () => go(g.views[0]));
     host.appendChild(b);
-    if (held === v.id) b.focus({ preventScroll: true });
+    if (held === g.views[0]) b.focus({ preventScroll: true });
   }
+}
+
+/* The switch between the views of one tab, at the top of each of them. A
+   tab with one view has none. */
+function subnav(view) {
+  const g = groupOf(view);
+  if (g.views.length < 2) return null;
+  const nav = el('div', 'seg');
+  nav.setAttribute('role', 'navigation');
+  nav.setAttribute('aria-label', `Within ${g.label}`);
+  for (const id of g.views) {
+    const v = VIEWS.find(x => x.id === id);
+    const b = el('button', 'seg__btn');
+    b.type = 'button';
+    b.dataset.viewLink = id;
+    if (id === view) b.setAttribute('aria-current', 'page');
+    b.innerHTML = `<span>${v.label}</span>${badgeFor(id)}`;
+    b.addEventListener('click', () => go(id));
+    nav.appendChild(b);
+  }
+  return nav;
 }
 
 function go(view, opts = {}) {
@@ -1185,10 +1238,11 @@ function welcome() {
     <p>${esc(andList(searches) || 'nothing yet')} — ${visible().length} cars live
        right now, re-read about every ${every(cov.expected_interval_minutes || 30)}.</p>
     <p><b>Alerts</b> go to ${(d.notify?.active || []).join(', ') || 'nowhere yet — no channel is switched on'}.
-       <b>Feed</b> is what changed since you last looked. <b>Status</b> says whether
+       <b>Discover</b> is what changed since you last looked. <b>Settings</b> says whether
        the bot itself is healthy, and the dot beside the title up there says it at a glance.</p>
-    <p>Add a search by pasting its link on the Searches tab.</p>
-    <p class="only-keyboard">On a keyboard: <kbd>1</kbd>–<kbd>5</kbd> for the
+    <p>Add a search by pasting its link on the Watches tab. <b>Archive</b> keeps
+       every car, price and photo the bot has ever seen.</p>
+    <p class="only-keyboard">On a keyboard: <kbd>1</kbd>–<kbd>4</kbd> for the
        tabs, <kbd>/</kbd> to find a car, <kbd>?</kbd> for the rest.</p>`;
   const b = el('button', 'btn btn--primary', 'Got it');
   b.type = 'button';
@@ -1205,6 +1259,7 @@ function welcome() {
 function renderFeed() {
   const host = document.querySelector('[data-view="feed"]');
   host.innerHTML = '';
+  host.appendChild(subnav('feed'));
   const head = el('div', 'view__head');
   head.classList.add('measure');
   head.innerHTML = `<h1 id="feed-h">What changed</h1>
@@ -1242,7 +1297,7 @@ function renderFeed() {
       !app.data.last_run
         ? 'The first check has not run. When it does, everything already on the site is recorded as a starting point — you will hear about what changes after that, not about the back catalogue.'
         : noCarsAtAll
-        ? 'The searches have not turned up a car yet. That is either a narrow search or a new one — the Searches tab says which, and how many listings each one read last time.'
+        ? 'The searches have not turned up a car yet. That is either a narrow search or a new one — the Watches tab says which, and how many listings each one read last time.'
         : 'Every car the searches found was already there when the bot started watching. This fills up as prices move and cars come and go.'));
     return;
   }
@@ -1424,6 +1479,7 @@ function listingPool() {
 function renderListings() {
   const host = document.querySelector('[data-view="listings"]');
   host.innerHTML = '';
+  host.appendChild(subnav('listings'));
   const head = el('div', 'view__head');
   head.innerHTML = `<h1 id="listings-h">Listings</h1>
     <p>Every car the searches have turned up. Cars your rules hide are kept and
@@ -1827,7 +1883,7 @@ function noResults() {
 /* The shortcut list, shown by "?" and mentioned in the welcome box. Kept
    short enough never to need scrolling. */
 const SHORTCUTS = [
-  ['1 – 5', 'Feed, Listings, Market, Searches, Status'],
+  ['1 – 4', 'Discover, Watches, Archive, Settings'],
   ['/', 'Find a car by colour, city, trim or seller'],
   ['Esc', 'Close a car, or clear what you typed'],
   ['?', 'This list'],
@@ -1874,6 +1930,10 @@ function renderLoadError() {
   const host = document.querySelector(`[data-view="${app.view}"]`);
   if (!host) return;
   host.innerHTML = '';
+  // The switch between this tab's views stays: the data failing to load is
+  // no reason to lose the way around the page.
+  const nav = subnav(app.view);
+  if (nav) host.appendChild(nav);
   const s = emptyState('Could not load the data',
     `The page could not read its data: ${app.loadError}. On a fresh install nothing has been published yet — run a check and it will appear.`);
   const b = el('button', 'btn', 'Try again');
@@ -1901,7 +1961,7 @@ function shot(l, cls) {
     // being offline), not a copy that is missing.
     const why = (failedToLoad && l.thumb) ? 'photo not loaded'
               : l.filtered ? 'not kept for hidden cars'
-              : has && l.status === 'gone' ? 'photo not kept after it left'
+              : has && l.status === 'gone' ? 'photo not copied before it left'
               : has ? 'photo not copied yet'
               : 'no photo';
     box.innerHTML = `<div class="shot__fallback">${CAR_GLYPH}
@@ -2155,6 +2215,7 @@ function trimLabel(name) {
 function renderMarket() {
   const host = document.querySelector('[data-view="market"]');
   host.innerHTML = '';
+  host.appendChild(subnav('market'));
   const m = app.data.market || {};
 
   // With no cars, one empty state rather than a skeleton of zero tiles.
@@ -2458,9 +2519,10 @@ function renderSearches() {
   const host = document.querySelector('[data-view="searches"]');
   host.innerHTML = '';
   const head = el('div', 'view__head');
-  head.innerHTML = `<h1 id="searches-h">Searches</h1>
+  head.innerHTML = `<h1 id="searches-h">Watches</h1>
     <p>What the bot is looking at, and the rules applied to what it finds. Editing a
-       rule shows what it would keep before you commit to it.</p>`;
+       rule shows what it would keep before you commit to it. A search set to
+       <b>archive only</b> keeps everything it finds and never sends an alert.</p>`;
   host.appendChild(head);
 
   host.appendChild(recentChanges());
@@ -2496,19 +2558,23 @@ function renderSearches() {
           : 'never — this search has not been read yet'}</dd>` +
       (bad ? `<dt>Trouble</dt><dd class="err">${h.consecutive_failures} failure${
         h.consecutive_failures === 1 ? '' : 's'} in a row — ${esc(h.last_error || '')}</dd>` : '') +
-      (shutOut ? `<dt>Note</dt><dd class="warnt">Reads fine, keeps nothing: ${esc(shutOut)}</dd>` : '');
+      (shutOut ? `<dt>Note</dt><dd class="warnt">Reads fine, keeps nothing: ${esc(shutOut)}</dd>` : '') +
+      `<dt>Mode</dt><dd>${s.notify === 'archive'
+        ? '<span class="mode mode--archive">Archive only</span> <span class="note" style="margin:0">— recorded in full, never announced</span>'
+        : '<span class="mode mode--alert">Alerts</span> <span class="note" style="margin:0">— each change goes to your phone</span>'}</dd>`;
     sec.appendChild(kv);
     sec.appendChild(rulesEditor(s));
     const alias = aliasesEditor(s);
     if (alias) sec.appendChild(alias);
     if (usesMarketplace()) sec.appendChild(marketplaceSwitch(s));
+    const stop = el('div', 'bar');
+    stop.style.marginTop = 'var(--s3)';
+    stop.appendChild(modeSwitch(s));
     if ((app.data.searches || []).length > 1) {
-      const stop = el('div', 'bar');
-      stop.style.marginTop = 'var(--s3)';
       stop.appendChild(askButton('Stop watching this search', 'Remove a search',
         [{ action: 'remove-search', search: s.id }]));
-      sec.appendChild(stop);
     }
+    sec.appendChild(stop);
     host.appendChild(sec);
   }
 
@@ -2582,7 +2648,7 @@ function marketplaceSwitch(s) {
 const PLACE_WORD = '[A-Za-z0-9][A-Za-z0-9\\-]{1,40}';
 
 /* The Marketplace settings the watch keeps. The collector's own pace is set
-   on the Mac and shown on the Status tab. */
+   on the Mac and shown on the Settings tab. */
 const MP_SETTINGS = [
   ['radius_km', 'Radius, km', 'number', 'per search',
    'How far from the place Marketplace is asked to look, up to 500. Left blank, each search '
@@ -2619,7 +2685,7 @@ function marketplaceSettings() {
     <dl class="kv">${MP_SETTINGS.map(([, label, , , why]) =>
       `<dt>${label}</dt><dd><span class="note" style="margin:0">${why}</span></dd>`).join('')}</dl>
     <p class="note">How often the collector reads, and its overnight pause, are set on the
-      Mac itself; the Status tab shows them.</p>`;
+      Mac itself; the Settings tab shows them.</p>`;
   const ask = el('div', 'bar');
   sec.appendChild(ask);
   const update = () => {
@@ -2953,7 +3019,7 @@ function setupPanel(d) {
     add('ok', `${num(searches.length)} AutoTrader search${searches.length === 1 ? '' : 'es'}, `
       + (run.at ? `last read ${when(run.at)}` : 'not read yet'));
   } else {
-    add('todo', 'No search yet', 'Paste an autotrader.ca search link on the Searches tab.');
+    add('todo', 'No search yet', 'Paste an autotrader.ca search link on the Watches tab.');
   }
   const m = d.marketplace;
   const mt = collectorTiming(m);
@@ -3164,10 +3230,17 @@ function renderStatus() {
   const h = d.health || {};
 
   const head = el('div', 'view__head');
-  head.innerHTML = `<h1 id="status-h">Status</h1>
-    <p>Whether the thing watching is working. The useful measure is not whether the
-       last check passed — it is what share of the checks it was meant to make it made.</p>`;
+  head.innerHTML = `<h1 id="status-h">Settings</h1>
+    <p>How the bot behaves, and whether the thing watching is working. The useful
+       measure of that is not whether the last check passed — it is what share of
+       the checks it was meant to make it made.</p>`;
   host.appendChild(head);
+  host.appendChild(optionsPanel());
+  host.appendChild(devicePanel());
+  const healthHead = el('div', 'section__head');
+  healthHead.style.marginTop = 'var(--s7)';
+  healthHead.innerHTML = '<h2>Health</h2>';
+  host.appendChild(healthHead);
 
   // The site answering the newest check that went ahead with a page meant
   // to stop robots, as the run records it. Said first and plainly: every
@@ -3476,6 +3549,397 @@ function renderStatus() {
   void rows;
 }
 
+/* ---------------------------------------------------------------- archive
+   Everything the bot has ever recorded, kept: the cars that have gone as
+   well as the live ones, every price each one asked, the seller's edits and
+   the photos the bot copied. Which searches only archive, and the listings
+   saved by their link, are set here too. */
+function renderArchive() {
+  const host = document.querySelector('[data-view="archive"]');
+  host.innerHTML = '';
+  host.appendChild(subnav('archive'));
+  const all = app.data.listings || [];
+  const gone = all.filter(l => l.status === 'gone').length;
+  const photos = all.reduce((n, l) => n + (l.photos_saved || (l.thumbs || []).length), 0);
+  const head = el('div', 'view__head measure');
+  head.innerHTML = `<h1 id="archive-h">Archive</h1>
+    <p>Every car the bot has recorded stays here, with every price it asked and the
+       photos the bot copied: ${num(all.length)} car${all.length === 1 ? '' : 's'}${
+         gone ? `, ${num(gone)} of them gone from the site` : ''}${
+         photos ? `, ${num(photos)} photo${photos === 1 ? '' : 's'} saved` : ''}.
+       A car that leaves the site keeps its record and its photos.</p>`;
+  host.appendChild(head);
+  host.appendChild(collections());
+  host.appendChild(savedListings());
+  host.appendChild(archiveBrowser(all));
+}
+
+/* The one button that flips a search between alerting and archiving. */
+function modeSwitch(s) {
+  const archive = s.notify === 'archive';
+  return askButton(archive ? 'Alert me again' : 'Archive only, no alerts',
+    archive ? `Alerts for ${s.name}` : `Archive only: ${s.name}`,
+    [{ action: 'set-notify', search: s.id, mode: archive ? 'alert' : 'archive' }]);
+}
+
+function collections() {
+  const sec = el('section', 'section');
+  const searches = app.data.searches || [];
+  const quiet = searches.filter(s => s.notify === 'archive').length;
+  sec.innerHTML = `<div class="section__head"><h2>Collections</h2>
+      <span class="count num">${num(quiet)} of ${num(searches.length)} archive only</span></div>
+    <p class="note" style="margin-top:0">Each search either alerts you or only archives.
+       Switching one to archive only keeps everything it finds and sends nothing, not
+       even for a car it has told you about before; switching it back does not replay
+       what it kept quiet.</p>`;
+  const list = el('ul', 'limits');
+  for (const s of searches) {
+    const archive = s.notify === 'archive';
+    const li = el('li');
+    const c = s.counts || {};
+    li.innerHTML = `<div class="coll">
+      <div class="coll__head"><b>${esc(s.name)}</b>
+        <span class="mode mode--${archive ? 'archive' : 'alert'}">${archive ? 'Archive only' : 'Alerts'}</span></div>
+      <p class="note" style="margin:var(--s1) 0 0">${esc(searchWords(s))} · ${num(c.active ?? 0)} live
+        · ${num(c.gone ?? 0)} gone · ${num(c.total ?? 0)} recorded</p></div>`;
+    const bar = el('div', 'bar');
+    bar.style.marginTop = 'var(--s2)';
+    bar.appendChild(modeSwitch(s));
+    li.querySelector('.coll').appendChild(bar);
+    list.appendChild(li);
+  }
+  if (!searches.length) list.appendChild(el('li', '', 'No search yet. Add one on the Watches tab.'));
+  sec.appendChild(list);
+  return sec;
+}
+
+/* A pasted listing link, read the way the bot reads it: one autotrader.ca
+   listing, or one Marketplace item. Anything else is said back, not sent. */
+function readListingLink(raw) {
+  let u;
+  try { u = new URL(raw); } catch { return { error: 'That is not a web address.' }; }
+  if (u.protocol !== 'https:') return { error: 'The link has to start with https://.' };
+  const host = u.hostname.toLowerCase();
+  if (/(^|\.)autotrader\.ca$/.test(host)) {
+    // As urls.listing_id_from_url reads it: the stable id in /a/.../19_<id>_/,
+    // or the UUID of an /offers/ link.
+    const m = u.pathname.match(/\/a\/(?:[^/]+\/)*?\d+_(\d{5,})_/i)
+      || u.pathname.match(/\/offers?\/[^/?#]*?([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/i);
+    if (!m) {
+      return { error: 'That is an autotrader.ca page, but not one listing. Open the car '
+        + 'itself and copy its address.' };
+    }
+    return { id: m[1], href: u.href, site: 'autotrader',
+             words: `autotrader.ca listing ${m[1]}, read by the bot on each check` };
+  }
+  if (/(^|\.)facebook\.com$/.test(host)) {
+    const m = u.pathname.match(/\/marketplace\/item\/(\d+)/);
+    if (!m) return { error: 'That is a Facebook page, but not one Marketplace item.' };
+    return { id: `fb-${m[1]}`, href: `https://www.facebook.com/marketplace/item/${m[1]}/`,
+             site: 'marketplace',
+             words: `Marketplace item ${m[1]}, filled in when the Mac collector comes across it` };
+  }
+  return { error: 'Only an autotrader.ca listing or a Facebook Marketplace item can be saved.' };
+}
+
+function savedListings() {
+  const sec = el('section', 'section');
+  const pins = app.data.pinned || [];
+  sec.innerHTML = `<div class="section__head"><h2>Saved listings</h2>
+      <span class="count num">${num(pins.length)}</span></div>
+    <p class="note" style="margin-top:0">Paste one listing's link to follow that car on its own:
+       an autotrader.ca listing, or a Marketplace item the Mac collector can see. Its price
+       history and photos are kept here, and it stays quiet unless you ask it to alert.</p>
+    <div class="bar">
+      <label class="field" style="flex:1 1 320px"><span class="sr">Listing link</span>
+        <input type="url" id="pin-url" spellcheck="false" autocomplete="off"
+          placeholder="https://www.autotrader.ca/a/… or facebook.com/marketplace/item/…"></label>
+      <label class="labelled"><span>When it changes</span>
+        <select id="pin-notify"><option value="archive">Archive only</option>
+          <option value="alert">Alert me</option></select></label>
+    </div>
+    <div id="pin-out"></div>`;
+  const out = sec.querySelector('#pin-out');
+  const update = () => {
+    const raw = sec.querySelector('#pin-url').value.trim();
+    out.innerHTML = '';
+    if (!raw) return;
+    const read = readListingLink(raw);
+    if (read.error) { out.innerHTML = `<p class="why err">${esc(read.error)}</p>`; return; }
+    const had = pins.find(p => String(p.id) === read.id);
+    if (had) {
+      out.innerHTML = `<p class="why">Already saved${had.name ? ` as ${esc(had.name)}` : ''}.</p>`;
+      return;
+    }
+    out.innerHTML = `<p class="why"><b>Reads as:</b> ${esc(read.words)}.</p>`;
+    const bar = el('div', 'bar');
+    const notify = sec.querySelector('#pin-notify').value;
+    bar.appendChild(askButton('Save this listing', 'Save a listing',
+      [{ action: 'pin-listing', url: read.href, notify }]));
+    bar.appendChild(el('span', 'note', CHANGE_NOTE));
+    out.appendChild(bar);
+  };
+  sec.addEventListener('input', update);
+  sec.addEventListener('change', update);
+
+  if (pins.length) {
+    const list = el('ul', 'limits');
+    for (const p of pins) {
+      const car = (app.data.listings || []).find(l => String(l.id) === String(p.id));
+      const li = el('li');
+      const state = p.awaiting_mac ? 'waiting for the Mac collector to come across it'
+        : !p.known ? 'not read yet'
+        : p.status === 'gone' ? 'gone from the site'
+        : car && car.price ? `asking ${money(car.price)}` : 'live';
+      const name = p.name || (car && carName(car))
+        || (p.site === 'marketplace' ? 'Marketplace listing' : 'AutoTrader listing');
+      li.innerHTML = `<div class="coll">
+        <div class="coll__head"><b>${esc(name)}</b>
+          <span class="mode mode--${p.notify === 'alert' ? 'alert' : 'archive'}">${
+            p.notify === 'alert' ? 'Alerts' : 'Archive only'}</span></div>
+        <p class="note" style="margin:var(--s1) 0 0">${esc(state)}${
+          p.found_by ? ` · also found by ${esc(p.found_by)}` : ''} ·
+          <a href="${esc(p.url)}" rel="noopener" target="_blank">open the listing</a></p></div>`;
+      const bar = el('div', 'bar');
+      bar.style.marginTop = 'var(--s2)';
+      if (car) {
+        const open = el('button', 'btn', 'Open the record');
+        open.type = 'button';
+        open.addEventListener('click', () => openSheet(String(car.id)));
+        bar.appendChild(open);
+      }
+      bar.appendChild(askButton('Stop following', `Stop following ${name}`,
+        [{ action: 'unpin-listing', listing: p.id }]));
+      li.querySelector('.coll').appendChild(bar);
+      list.appendChild(li);
+    }
+    sec.appendChild(list);
+  }
+  return sec;
+}
+
+const ARCHIVE_PAGE = 48;
+const ARCHIVE_CHIPS = [
+  ['all', 'All', () => true],
+  ['live', 'Live', l => l.status !== 'gone'],
+  ['gone', 'Gone', l => l.status === 'gone'],
+  ['archive', 'Archive only', l => l.archive_only],
+  ['saved', 'Saved', l => l.pinned],
+  ['photos', 'With photos', l => (l.thumbs || []).length > 0],
+];
+
+/* Every car recorded, the gone ones included, newest first. */
+function archiveBrowser(all) {
+  const sec = el('section', 'section');
+  sec.innerHTML = '<div class="section__head"><h2>Every car recorded</h2></div>';
+  const chips = el('div', 'chips');
+  for (const [id, label, test] of ARCHIVE_CHIPS) {
+    const n = all.filter(test).length;
+    if (!n && id !== 'all') continue;
+    const c = el('button', 'chip');
+    c.type = 'button';
+    c.setAttribute('aria-pressed', String(app.archiveChip === id));
+    c.innerHTML = `${label}<span class="n num">${num(n)}</span>`;
+    c.addEventListener('click', () => { app.archiveChip = id; app.archiveLimit = ARCHIVE_PAGE; renderArchive(); });
+    chips.appendChild(c);
+  }
+  sec.appendChild(chips);
+  const [, , test] = ARCHIVE_CHIPS.find(c => c[0] === app.archiveChip) || ARCHIVE_CHIPS[0];
+  const pool = ranked(all.filter(test), SORTS[0]);
+  const rows = pool.has.concat(pool.absent);
+  if (!rows.length) {
+    sec.appendChild(emptyState('Nothing recorded yet',
+      'The first check records everything it finds, and from then on nothing is forgotten.'));
+    return sec;
+  }
+  const limit = app.archiveLimit || ARCHIVE_PAGE;
+  const grid = el('div', 'grid');
+  for (const l of rows.slice(0, limit)) grid.appendChild(card(l));
+  sec.appendChild(grid);
+  if (rows.length > limit) {
+    const more = el('button', 'btn', `Show ${num(Math.min(ARCHIVE_PAGE, rows.length - limit))} more of ${num(rows.length)}`);
+    more.type = 'button';
+    more.style.marginTop = 'var(--s4)';
+    more.addEventListener('click', () => { app.archiveLimit = limit + ARCHIVE_PAGE; renderArchive(); });
+    sec.appendChild(more);
+  }
+  return sec;
+}
+
+/* --------------------------------------------------------------- options
+   The plain settings the bot lets this page change (control.OPTIONS, with
+   its bounds published as bounds.options). Each is a box; the ask carries
+   only the boxes that differ from what the bot holds. */
+const OPTION_BOXES = [
+  ['notifications.digest', 'One message per check', 'bool',
+   'Bundle every change a check finds into one alert rather than one per car.'],
+  ['notifications.quiet_hours.enabled', 'Quiet hours', 'bool',
+   'Hold alerts overnight. They arrive after, not never.'],
+  ['notifications.price_drop_alert_abs', 'A drop worth its own alert, $', 'int',
+   'A drop at least this big is an alert of its own; smaller ones ride along with the '
+   + 'next alert. 0 sends every drop at once.'],
+  ['dashboard.photos_per_car', 'Photos kept per car', 'int',
+   'How many of each car\'s photos the bot copies and keeps, including after it leaves the site.'],
+  ['dashboard.photo_budget_mb', 'Photo store, MB', 'int',
+   'The most all the saved photos may take up. Past it, the newest cars keep theirs first.'],
+  ['dashboard.max_listings', 'Cars this page carries', 'int',
+   'Hidden cars are left out first, then the oldest of the gone. Everything stays in the archive.'],
+  ['archive.keep_days', 'Forget a gone car after, days', 'int',
+   '0 keeps every car forever. A car you marked or saved is never forgotten.'],
+  ['archive.keep_max_listings', 'Most cars kept', 'int', '0 means no limit.'],
+];
+
+const getPath = (obj, path) => path.split('.').reduce((o, k) => (o == null ? undefined : o[k]), obj);
+
+function optionsPanel() {
+  const conf = app.data.config || {};
+  const bounds = app.data.bounds?.options || {};
+  // Only the settings the bot says it takes: an older bot refuses the rest.
+  const boxes = OPTION_BOXES.filter(([k]) => bounds[k]);
+  const sec = el('section', 'section');
+  sec.innerHTML = `<div class="section__head"><h2>Alerts and the archive</h2></div>
+    <div class="bar">${boxes.map(([k, label, type]) => {
+      const id = 'opt-' + k.replace(/\./g, '-');
+      const now = getPath(conf, k);
+      return type === 'bool' ? `
+      <label class="labelled"><span>${label}</span>
+        <select id="${id}" data-option="${k}">
+          <option value="false"${now ? '' : ' selected'}>Off</option>
+          <option value="true"${now ? ' selected' : ''}>On</option>
+        </select></label>` : `
+      <label class="labelled"><span>${label}</span>
+        <span class="field"><input type="number" id="${id}" data-option="${k}" inputmode="numeric"
+          ${wholeNumber(bounds[k].slice(1))} value="${esc(now ?? '')}"></span></label>`;
+    }).join('')}</div>
+    <dl class="kv">${boxes.map(([, label, , why]) =>
+      `<dt>${label}</dt><dd><span class="note" style="margin:0">${why}</span></dd>`).join('')}</dl>`;
+  if (!boxes.length) {
+    sec.appendChild(el('p', 'note', 'The bot publishing this page does not take settings from it yet.'));
+    return sec;
+  }
+  const ask = el('div', 'bar');
+  sec.appendChild(ask);
+  const update = () => {
+    ask.innerHTML = '';
+    const wrong = boxes.find(([k, , type]) => {
+      if (type === 'bool') return false;
+      const box = sec.querySelector(`[data-option="${k}"]`);
+      return box.validity.badInput || !box.validity.valid || box.value.trim() === '';
+    });
+    if (wrong) {
+      const [k, label] = wrong;
+      ask.appendChild(el('p', 'why err', needsWhole(label, bounds[k].slice(1))));
+      return;
+    }
+    const changes = [];
+    for (const [k, , type] of boxes) {
+      const box = sec.querySelector(`[data-option="${k}"]`);
+      const value = type === 'bool' ? box.value === 'true' : Number(box.value);
+      const now = type === 'bool' ? Boolean(getPath(conf, k)) : getPath(conf, k);
+      if (now === value) continue;
+      changes.push({ action: 'set-option', option: k, value });
+    }
+    if (!changes.length) return;
+    ask.appendChild(askButton('Save these settings', 'Change settings', changes));
+    ask.appendChild(el('span', 'note', CHANGE_NOTE));
+  };
+  sec.addEventListener('input', update);
+  sec.addEventListener('change', update);
+  update();
+  return sec;
+}
+
+/* ---------------------------------------------------------- this device
+   A phone can carry a token after all, if its owner chooses: a fine-grained
+   GitHub token for this one repository, Contents read and write and nothing
+   else, kept on this device sealed with the vault key. With it a change is
+   sent straight to the repository on a tap. Without it, the GitHub page. */
+const TOKEN_KEY = 'ghToken';
+const TOKEN_SHAPE = /^(github_pat_[A-Za-z0-9_]{20,}|ghp_[A-Za-z0-9]{30,})$/;
+
+const hasToken = () => Boolean(vault.enc && store.get(TOKEN_KEY, null));
+
+async function saveToken(token) {
+  const sealed = await sealBytes(vault.enc, te.encode(token), 'token');
+  store.set(TOKEN_KEY, toB64(sealed));
+}
+
+async function loadToken() {
+  const saved = store.get(TOKEN_KEY, null);
+  if (!saved || !vault.enc) return null;
+  try {
+    const plain = await unsealBytes(vault.enc, fromB64(saved), 'token');
+    return new TextDecoder().decode(plain);
+  } catch { return null; }
+}
+
+function forgetToken() {
+  for (const area of [localStorage, sessionStorage]) {
+    try { area.removeItem(NS + TOKEN_KEY); } catch { /* storage blocked */ }
+  }
+}
+
+function devicePanel() {
+  const sec = el('section', 'section');
+  sec.id = 'device';
+  if (!vault.lock) {
+    sec.innerHTML = `<div class="section__head"><h2>Changes from this device</h2></div>
+      <p class="note" style="margin-top:0">Changes are sent from the published, locked
+         dashboard, where they can be sealed. This copy is a local, unencrypted view.</p>`;
+    return sec;
+  }
+  const have = hasToken();
+  sec.innerHTML = `<div class="section__head"><h2>Changes from this device</h2>
+      <span class="count">${have ? 'sent directly' : 'through GitHub'}</span></div>
+    <p class="note" style="margin-top:0">${have
+      ? 'A GitHub token is saved on this device, so a change goes straight to the '
+        + 'repository when you tap it, with no GitHub page in between. It is kept only '
+        + 'here, sealed with the vault key, and goes when you lock this page.'
+      : 'By default a change opens GitHub for you to commit. A fine-grained GitHub '
+        + 'token for this one repository — Contents: read and write, nothing else — '
+        + 'lets this device send a change with one tap instead. It is kept only on this '
+        + 'device, sealed with the vault key, and never published.'}</p>`;
+  const bar = el('div', 'bar');
+  const msg = el('p', 'why err');
+  msg.hidden = true;
+  if (!have) {
+    bar.innerHTML = `<label class="field" style="flex:1 1 280px"><span class="sr">GitHub token</span>
+      <input type="password" id="gh-token" autocomplete="off" spellcheck="false"
+        placeholder="github_pat_…"></label>`;
+    const save = el('button', 'btn btn--primary', 'Use it on this device');
+    save.type = 'button';
+    save.id = 'gh-token-save';
+    save.addEventListener('click', async () => {
+      const v = sec.querySelector('#gh-token').value.trim();
+      if (!TOKEN_SHAPE.test(v)) {
+        msg.textContent = 'That does not look like a GitHub token (github_pat_… or ghp_…).';
+        msg.hidden = false;
+        return;
+      }
+      await saveToken(v);
+      renderStatus();
+    });
+    bar.appendChild(save);
+    const how = el('p', 'note');
+    how.innerHTML = `Make one at <a href="https://github.com/settings/personal-access-tokens/new"
+      rel="noopener" target="_blank">github.com/settings/personal-access-tokens/new</a>:
+      only this repository, and under Repository permissions only <b>Contents: Read and
+      write</b>. Give it an expiry; the page says so when it stops working.`;
+    sec.appendChild(bar);
+    sec.appendChild(msg);
+    sec.appendChild(how);
+    return sec;
+  }
+  const forget = el('button', 'btn', 'Forget the token');
+  forget.type = 'button';
+  forget.id = 'gh-token-forget';
+  forget.addEventListener('click', () => { forgetToken(); renderStatus(); });
+  bar.appendChild(forget);
+  sec.appendChild(bar);
+  sec.appendChild(msg);
+  return sec;
+}
+
 /* -------------------------------------------------------------- the ask
    A static page cannot write to the repository, and a phone should not carry
    a token. So a change opens GitHub's web editor with the file already filled
@@ -3483,9 +3947,7 @@ function renderStatus() {
    sealed with the vault key and named by time alone, because the repository
    is public: neither the file nor its commit may say what the change is.
    An unencrypted page has no key to seal with, so it offers no change links. */
-async function askUrl(title, instructions) {
-  const repo = app.data?.repo;
-  if (!repo || !vault.lock) return null;
+async function askFile(instructions) {
   const now = new Date();
   const stamp = now.toISOString().replace(/[-:T]/g, '').slice(0, 14);
   // A one-time id and the time, so the bot can refuse a replayed change,
@@ -3500,10 +3962,37 @@ async function askUrl(title, instructions) {
   body.set(raw);
   const sealed = await sealBytes(vault.enc, body, 'control');
   const nonce = hex(crypto.getRandomValues(new Uint8Array(3)));
+  return { path: `control/${stamp}-${nonce}.enc`, content: toB64(sealed),
+           message: 'Change from the dashboard' };
+}
+
+async function askUrl(title, instructions) {
+  const repo = app.data?.repo;
+  if (!repo || !vault.lock) return null;
+  const file = await askFile(instructions);
   return `https://github.com/${repo}/new/main`
-       + `?filename=${encodeURIComponent(`control/${stamp}-${nonce}.enc`)}`
-       + `&value=${encodeURIComponent(toB64(sealed))}`
-       + `&message=${encodeURIComponent('Change from the dashboard')}`;
+       + `?filename=${encodeURIComponent(file.path)}`
+       + `&value=${encodeURIComponent(file.content)}`
+       + `&message=${encodeURIComponent(file.message)}`;
+}
+
+/* The same file, put straight into the repository with the token this
+   device holds. Throws with a sentence when GitHub says no. */
+async function sendChange(instructions) {
+  const repo = app.data?.repo;
+  const token = await loadToken();
+  if (!repo || !token) throw new Error('no token on this device');
+  const file = await askFile(instructions);
+  const res = await fetch(`https://api.github.com/repos/${repo}/contents/${file.path}`, {
+    method: 'PUT',
+    headers: { Authorization: `Bearer ${token}`, Accept: 'application/vnd.github+json',
+               'Content-Type': 'application/json' },
+    body: JSON.stringify({ message: file.message, content: file.content, branch: 'main' }),
+  });
+  if (res.status === 401 || res.status === 403) {
+    throw new Error('GitHub refused the token: it may have expired, or lack Contents: write on this repository');
+  }
+  if (!res.ok) throw new Error(`GitHub answered ${res.status}`);
 }
 
 const CHANGE_NOTE = 'Opens GitHub with the change filled in. Commit it, and a '
@@ -3534,19 +4023,50 @@ function askButton(label, title, instructions, prose) {
       : 'Changes are sent from the published, locked dashboard.';
     return dead;
   }
+  // What was typed beside it has been sent: from here the page may redraw
+  // it with whatever the bot publishes (see busy()).
+  const settle = from => {
+    askedAt = Date.now();
+    const own = from.closest('section');
+    for (const f of own?.querySelectorAll('input, textarea') || []) f.defaultValue = f.value;
+    for (const o of own?.querySelectorAll('option') || []) o.defaultSelected = o.selected;
+  };
+  if (hasToken()) {
+    const b = el('button', 'btn btn--send', label);
+    b.type = 'button';
+    b.addEventListener('click', async () => {
+      b.disabled = true;
+      b.textContent = 'Sending…';
+      try {
+        await sendChange(instructions);
+        settle(b);
+        b.textContent = 'Sent';
+        b.classList.add('is-sent');
+        b.insertAdjacentElement('afterend', el('span', 'note',
+          'The next check applies it, usually inside a minute.'));
+      } catch (err) {
+        // The GitHub page is the way that always works; it is offered in
+        // place of the button that could not.
+        const link = el('a', 'btn');
+        link.textContent = `${label} on GitHub`;
+        link.target = '_blank'; link.rel = 'noopener';
+        link.style.cssText = 'display:inline-flex;align-items:center;text-decoration:none';
+        link.addEventListener('click', () => settle(link));
+        const url = await askUrl(title, instructions, prose);
+        link.href = url;
+        b.replaceWith(link);
+        link.insertAdjacentElement('afterend', el('span', 'note err',
+          `Could not send it from here — ${err.message}.`));
+      }
+    });
+    return b;
+  }
   const a = el('a', 'btn');
   a.textContent = label;
   a.target = '_blank'; a.rel = 'noopener';
   a.style.cssText = 'display:inline-flex;align-items:center;text-decoration:none';
   a.setAttribute('aria-disabled', 'true');
-  a.addEventListener('click', () => {
-    askedAt = Date.now();
-    // What was typed beside it has been sent: from here the page may redraw
-    // it with whatever the bot publishes (see busy()).
-    const own = a.closest('section');
-    for (const f of own?.querySelectorAll('input, textarea') || []) f.defaultValue = f.value;
-    for (const o of own?.querySelectorAll('option') || []) o.defaultSelected = o.selected;
-  });
+  a.addEventListener('click', () => settle(a));
   askUrl(title, instructions, prose).then(url => {
     a.href = url;
     a.removeAttribute('aria-disabled');
@@ -3717,7 +4237,7 @@ function sheetBody(l) {
   // Only the photos we hold a copy of. The seller's CDN is unreachable
   // offline and drops photos once the car is delisted.
   const imgs = (l.thumbs && l.thumbs.length ? l.thumbs
-                : [l.thumb].filter(Boolean)).slice(0, 8);
+                : [l.thumb].filter(Boolean)).slice(0, 24);
   const published = l.photo_count || 0;
   if (imgs.length) {
     for (const src of imgs) {
@@ -3740,18 +4260,19 @@ function sheetBody(l) {
     if (published > imgs.length) {
       const note = el('p', 'note');
       note.style.margin = '0 0 var(--s4)';
-      note.innerHTML = `${imgs.length} of ${published} photos kept here. `
+      note.innerHTML = `${imgs.length} of ${published} photos saved here${
+          l.status === 'gone' ? ', kept after it left' : ''}. `
         + `<a href="${esc(l.url || '#')}" rel="noopener" target="_blank">See them all on ${siteName(l)}</a>`;
       frag.appendChild(note);
     }
   } else {
     const box = el('div', 'shotbox');
     box.style.cssText = 'width:100%;aspect-ratio:4/3;border-radius:var(--r-sm);margin-bottom:var(--s4)';
-    // The bot drops its copies of a car's photos once the car leaves, so a
-    // car that had photos says so rather than that it never had any.
+    // A car's photos are kept after it leaves; one that had photos and has
+    // none here says why rather than that it never had any.
     const why = l.filtered ? 'photos not kept for hidden cars'
       : !published ? 'no photo published'
-      : l.status === 'gone' ? 'photos not kept after it left'
+      : l.status === 'gone' ? 'photos were not copied before it left'
       : 'photos not copied yet';
     box.innerHTML = `<div class="shot__fallback">${CAR_GLYPH}<b>${esc(carName(l))}</b><span>${why}</span></div>`;
     frag.appendChild(box);
@@ -3804,6 +4325,22 @@ function sheetBody(l) {
     s.innerHTML = `<div class="section__head"><h2>Asking price</h2>
       <span class="count num">${hist.length} observation${hist.length === 1 ? '' : 's'}</span></div>`;
     s.appendChild(sparkline(hist));
+    s.appendChild(priceTable(hist));
+    host_append(s, frag);
+  }
+  const revs = Array.isArray(l.revisions) ? l.revisions : [];
+  if (revs.length) {
+    const s = el('section', 'section');
+    s.innerHTML = `<div class="section__head"><h2>Seller's edits</h2>
+      <span class="count num">${revs.length}</span></div>`;
+    const list = el('ul', 'limits');
+    for (const r of revs.slice().reverse()) {
+      const li = el('li');
+      li.innerHTML = `<b>${esc(REVISION_WORDS[r.field] || String(r.field || '').replace(/_/g, ' '))}</b>
+        ${esc(when(r.at))} — ${esc(revisionValue(r.field, r.from))} → ${esc(revisionValue(r.field, r.to))}`;
+      list.appendChild(li);
+    }
+    s.appendChild(list);
     host_append(s, frag);
   }
 
@@ -3953,6 +4490,35 @@ function host_append(section, frag) { frag.appendChild(section); }
 
 /* A price history needs no chart library: a few points, and the only
    question is which way it went. */
+const REVISION_WORDS = {
+  mileage_km: 'Odometer', title: 'Title', trim: 'Trim', seller_type: 'Seller type',
+  seller: 'Seller', location: 'Location', province: 'Province', color: 'Colour',
+  transmission: 'Transmission', drivetrain: 'Drivetrain', status: 'Status',
+};
+function revisionValue(field, v) {
+  if (v === null || v === undefined || v === '') return '—';
+  if (field === 'mileage_km') return `${km(v)} km`;
+  return String(v);
+}
+
+/* Every price the car asked, newest first, behind a disclosure so the
+   sparkline says it first and the table says it exactly. */
+function priceTable(hist) {
+  const box = el('details', 'pricetab');
+  const rows = hist.slice().reverse();
+  box.innerHTML = `<summary>Every price, ${rows.length} observation${rows.length === 1 ? '' : 's'}</summary>`
+    + '<table><thead><tr><th>When</th><th>Asking</th><th>Change</th></tr></thead><tbody>'
+    + rows.map((p, i) => {
+      const prev = rows[i + 1];
+      const delta = prev ? p.price - prev.price : 0;
+      return `<tr><td>${esc(stamp(p.at))}</td><td class="num">${money(p.price)}</td>
+        <td class="num ${delta < 0 ? 'drop' : delta > 0 ? 'rise' : ''}">${
+          delta ? signed(delta) : (prev ? '—' : 'first seen')}</td></tr>`;
+    }).join('')
+    + '</tbody></table>';
+  return box;
+}
+
 function sparkline(hist) {
   const w = 100, h = 44, pad = 3;
   const prices = hist.map(p => p.price);
@@ -4032,6 +4598,7 @@ function render() {
   if (app.view === 'feed') renderFeed();
   else if (app.view === 'listings') renderListings();
   else if (app.view === 'market') renderMarket();
+  else if (app.view === 'archive') renderArchive();
   else if (app.view === 'searches') renderSearches();
   else if (app.view === 'status') renderStatus();
 }
@@ -4193,9 +4760,9 @@ async function start() {
       (document.activeElement || {}).tagName || '');
     const sheetOpen = sheetUp;
     if (!typing && !sheetOpen && !e.metaKey && !e.ctrlKey && !e.altKey) {
-      if (e.key >= '1' && e.key <= String(VIEWS.length)) {
+      if (e.key >= '1' && e.key <= String(GROUPS.length)) {
         e.preventDefault();
-        go(VIEWS[Number(e.key) - 1].id);
+        go(GROUPS[Number(e.key) - 1].views[0]);
         return;
       }
       if (e.key === '/') {
