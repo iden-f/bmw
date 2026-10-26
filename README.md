@@ -47,7 +47,7 @@ All you need is a GitHub account.
 1. **Fork** this repository. Leave *Copy the main branch only* ticked, and
    keep the fork public: Actions and Pages cost nothing on a public
    repository, and everything personal is encrypted. A private fork spends
-   Actions minutes on each of the 48 firings a day and needs a paid plan for
+   Actions minutes on each of the 288 firings a day and needs a paid plan for
    Pages. If your fork did copy a `vault` or `gh-pages` branch, delete both
    so you start with a vault of your own.
 2. **Choose a passphrase.** Settings → Secrets and variables → Actions → New
@@ -204,8 +204,13 @@ And for alerts, globally:
 
 A check is due every two hours. GitHub runs scheduled workflows on a
 best-effort basis and drops runs, often whole stretches of them, so **Check
-AutoTrader** fires every 30 minutes and a firing that lands within 90 minutes
-of the last check stands down without contacting AutoTrader. A check the site
+AutoTrader** fires every 5 minutes and a firing that lands within the
+deduplication floor (`health.min_interval_minutes`, 90 minutes by default) of
+the last check stands down without contacting AutoTrader. This repository
+keeps a 10-minute interval with a 7-minute floor, written into the config by
+the workflow itself (`CHECK_INTERVAL_MINUTES` and `CHECK_FLOOR_MINUTES`,
+repository variables), because a public repository pays nothing for the
+firings. A check the site
 turned away with an anti-bot page counts as the last check, and the Status
 tab says so. It shows which two-hour windows had a check and what started
 each one.
@@ -233,7 +238,7 @@ With [cron-job.org](https://cron-job.org) (free), create a job with:
 | Field | Value |
 |---|---|
 | URL | `https://api.github.com/repos/<you>/<repo>/actions/workflows/watch.yml/dispatches` |
-| Schedule | fires every 30 minutes |
+| Schedule | fires every 30 minutes, or as often as the check interval |
 | Request method | `POST` |
 | Headers | `Authorization: Bearer <token>`, `Accept: application/vnd.github+json` |
 | Request body | `{"ref":"main","inputs":{"automatic":"true","from":"cron-job"}}` |
