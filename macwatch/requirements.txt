@@ -1,0 +1,4 @@
+# The Mac-hosted service only, on top of requirements.txt and
+# collector/requirements.txt. Installed into the collector's venv on the Mac.
+fastapi>=0.115,<1
+uvicorn>=0.30,<1
