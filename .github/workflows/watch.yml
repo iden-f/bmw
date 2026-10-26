@@ -127,6 +127,9 @@ jobs:
         continue-on-error: true
         env:
           WATCH_PASSPHRASE:    ${{ secrets.WATCH_PASSPHRASE }}
+          # A Marketplace batch too big for its dispatch is read back as a
+          # blob of this repository, with the workflow's own token.
+          GH_TOKEN:            ${{ github.token }}
           REPO_VISIBILITY:     ${{ github.event.repository.visibility }}
           RUN_TRIGGER:         ${{ github.event_name }}
           DISPATCH_TYPE:       ${{ github.event.action }}

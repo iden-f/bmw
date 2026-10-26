@@ -7,6 +7,7 @@ searched here on the next pass with nothing to edit on this computer.
 
 from __future__ import annotations
 
+import base64
 import json
 import logging
 import random
@@ -15,6 +16,8 @@ import time
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Callable
+
+import requests
 
 from autotrader import clock, filters
 from autotrader import marketplace as M
@@ -28,8 +31,23 @@ from .github import GitHub
 
 log = logging.getLogger("collector")
 
-# Kept per car, to send a photo only until the bot has surely had it.
+# Kept per car, to send a photo's address only until the bot has surely
+# had it.
 PHOTO_SENDS = 3
+# Facebook's photo links are signed and die within days, and its CDN turns a
+# GitHub runner away once they have: the bot could only ever save a photo it
+# was handed within minutes of the read. So the collector, which can reach
+# the photo while the link is fresh, fetches the card's photo itself and
+# carries the picture in the batch, once per car. This many per pass, newest
+# cars first; the rest go in the passes after, every five minutes.
+PHOTOS_PER_PASS = 40
+PHOTO_MAX_BYTES = 200_000
+PHOTO_TYPES = ("image/jpeg", "image/webp", "image/png", "image/avif")
+# What a sealed batch may grow to as a blob. Far under GitHub's 100 MB, and
+# room for a first pass of photos on top of a thousand cars.
+BLOB_LIMIT = 8_000_000
+# How a pass reaches the photo CDN; tests put a stand-in here.
+PHOTO_HTTP: Callable[[], Any] = requests.Session
 
 # What a car's own page says that its card does not. Kept per car and sent
 # with it in every later batch: the bot judges each batch as it comes, so a
@@ -340,14 +358,17 @@ def build(settings: S.Settings, parts: list[dict], *, polled: bool, session: str
     return out
 
 
-def fit(key: bytes, batch: dict[str, Any], memory: dict[str, Any]) -> str:
-    """Seal the batch, trimmed until GitHub will carry it.
+def fit(key: bytes, batch: dict[str, Any], memory: dict[str, Any],
+        limit: int = BLOB_LIMIT) -> str:
+    """Seal the batch, trimmed only if GitHub could not carry it at all.
 
-    Photos go first for cars already sent a few times, then the photos of
-    the oldest cars, which a later batch carries. Only if that is not enough
-    do the oldest cars of the biggest search go: the next pass sends them
-    again anyway. A car left out of a first read would come back later as
-    news, so a photo always goes before a car.
+    A dispatch carries 65,535 characters and a blob 100 MB; the send picks
+    whichever the batch needs, so a thousand cars and their photos go whole.
+    Only past ``limit`` is anything left out, and then pictures go first
+    (they are sent again next pass), then the photo addresses of the oldest
+    cars, then the oldest cars of the biggest search. A car left out of a
+    first read would come back later as news, so a photo always goes before
+    a car.
     """
     cars = memory.setdefault("cars", {})
     for part in batch["searches"]:
@@ -356,20 +377,27 @@ def fit(key: bytes, batch: dict[str, Any], memory: dict[str, Any]) -> str:
             if rec.get("photo") and cars.get(rec["id"], {}).get("photos", 0) >= PHOTO_SENDS:
                 rec.pop("photo")
     sealed = M.seal_batch(key, batch)
-    # Every search's newest cars first, so the photos left out are the
-    # oldest cars' of every search, not all of the last one's. They are not
-    # counted as sent.
-    photos = [rec for _, _, rec in sorted(
+    # Every search's newest cars first, so what is left out is the oldest
+    # cars' of every search, not all of the last one's.
+    by_age = [rec for _, _, rec in sorted(
         ((n, i, rec) for i, part in enumerate(batch["searches"])
-         for n, rec in enumerate(part["listings"]) if rec.get("photo")),
-        key=lambda t: t[:2])]
-    while len(sealed) > M.PAYLOAD_LIMIT and photos:
+         for n, rec in enumerate(part["listings"])), key=lambda t: t[:2])]
+    pictures = [rec for rec in by_age if rec.get("photo_data")]
+    while len(sealed) > limit and pictures:
+        cut = max(1, len(pictures) // 5)
+        for rec in pictures[-cut:]:
+            rec.pop("photo_data", None)
+            rec.pop("photo_type", None)
+        del pictures[-cut:]
+        sealed = M.seal_batch(key, batch)
+    photos = [rec for rec in by_age if rec.get("photo")]
+    while len(sealed) > limit and photos:
         cut = max(1, len(photos) // 5)
         for rec in photos[-cut:]:
             rec.pop("photo")
         del photos[-cut:]
         sealed = M.seal_batch(key, batch)
-    while len(sealed) > M.PAYLOAD_LIMIT:
+    while len(sealed) > limit:
         biggest = max(batch["searches"], key=lambda p: len(p["listings"]), default=None)
         if not biggest or not biggest["listings"]:
             raise ValueError("a batch with no cars in it does not fit a dispatch")
@@ -380,7 +408,78 @@ def fit(key: bytes, batch: dict[str, Any], memory: dict[str, Any]) -> str:
             if rec.get("photo"):
                 mine = cars.setdefault(rec["id"], {})
                 mine["photos"] = int(mine.get("photos", 0)) + 1
+            if rec.get("photo_data"):
+                # Carried once: a picture is most of a batch's weight.
+                cars.setdefault(rec["id"], {})["picture"] = clock.stamp()
     return sealed
+
+
+def pictures(cfg: Config, plan: list[dict[str, Any]], parts: list[dict[str, Any]],
+             memory: dict[str, Any], http: Any = None, *,
+             limit: int = PHOTOS_PER_PASS, pause: Callable[[], None] | None = None
+             ) -> int:
+    """Fetch the card photo of the cars the bot will keep, into the batch.
+
+    Newest cars first, once per car, ``limit`` per pass: a first read of a
+    big search spreads its pictures over the passes that follow. Only cars
+    the bot's own rules keep, since it saves no photo of a hidden car. A
+    photo that will not come (gone, too big, not an image) is given up on
+    for the car, not asked for again every pass. Nothing here may fail a
+    pass: a picture is a nicety, and the read is the job.
+    """
+    cars = memory.setdefault("cars", {})
+    by_id = {s.id: s for s in cfg.active_searches}
+    items = {item["search"]: item for item in plan}
+    wanted: list[tuple[int, dict[str, Any]]] = []
+    seen: set[str] = set()
+    for part in parts:
+        search = by_id.get(str(part.get("search") or ""))
+        item = items.get(str(part.get("search") or ""))
+        if search is None or item is None or not part.get("ok"):
+            continue
+        for rec in part.get("listings") or []:
+            if not rec.get("photo") or rec["id"] in seen or rec.get("sold"):
+                continue
+            mine = cars.get(rec["id"]) or {}
+            if mine.get("picture") or mine.get("no_picture"):
+                continue
+            if not _wanted(rec, item, cfg, search):
+                continue
+            seen.add(rec["id"])
+            wanted.append((int(rec.get("created") or 0), rec))
+    wanted.sort(key=lambda t: t[0], reverse=True)
+    http = http if http is not None else PHOTO_HTTP()
+    carried = 0
+    for _, rec in wanted[:max(0, int(limit))]:
+        got = _picture(http, rec["photo"])
+        if got is None:
+            cars.setdefault(rec["id"], {})["no_picture"] = clock.stamp()
+            continue
+        blob, content_type = got
+        rec["photo_data"] = base64.b64encode(blob).decode("ascii")
+        rec["photo_type"] = content_type
+        carried += 1
+        if pause:
+            pause()
+    return carried
+
+
+def _picture(http: Any, url: str) -> tuple[bytes, str] | None:
+    """One photo off the CDN, if it is a small enough image; else None."""
+    try:
+        r = http.get(url, timeout=20,
+                     headers={"Accept": "image/avif,image/webp,image/*,*/*;q=0.8"})
+    except Exception as exc:  # noqa: BLE001 - a photo never fails a pass
+        log.info("photo not fetched: %s", str(exc)[:120])
+        return None
+    kind = str(r.headers.get("Content-Type") or "").split(";")[0].strip().lower()
+    body = r.content or b""
+    if r.status_code != 200 or kind not in PHOTO_TYPES or not body \
+            or len(body) > PHOTO_MAX_BYTES:
+        log.info("photo not kept: HTTP %s, %s, %d bytes", r.status_code, kind or "no type",
+                 len(body))
+        return None
+    return body, kind
 
 
 def once(settings: S.Settings, *, github: GitHub | None = None,
@@ -433,9 +532,16 @@ def once(settings: S.Settings, *, github: GitHub | None = None,
     failure = memory.get("last_error")
     batch = build(settings, parts, polled=polled, session=session, note=note,
                   wait=wait, failure=failure)
+    carried = 0
+    if parts and session == "ok":
+        try:
+            carried = pictures(cfg, plan, parts, memory, PHOTO_HTTP(),
+                               pause=lambda: time.sleep(0.3))
+        except Exception as exc:  # noqa: BLE001 - a picture never fails a pass
+            log.warning("pictures not fetched this pass: %s", exc)
     sealed = fit(key, batch, memory)
     try:
-        github.send(sealed)
+        sent = github.send(sealed)
     except Exception:
         _send_failed()
         raise
@@ -444,7 +550,8 @@ def once(settings: S.Settings, *, github: GitHub | None = None,
     summary = {"at": batch["at"], "polled": polled, "session": session, "note": note,
                "searches": [{"search": p["search"], "ok": p["ok"], "cars": len(p["listings"]),
                              "error": p["error"]} for p in parts],
-               "bytes": len(sealed)}
+               "bytes": len(sealed), "pictures": carried,
+               "blob": (sent or {}).get("blob") if isinstance(sent, dict) else None}
     memory["last"] = summary
     save_memory(memory)
     return summary
@@ -482,4 +589,6 @@ def _line(summary: dict[str, Any]) -> str:
         return f"Facebook: {summary['session']} - run collector/run login"
     reads = summary.get("searches") or []
     return (f"read {sum(1 for r in reads if r['ok'])} of {len(reads)} searches, "
-            f"{sum(r['cars'] for r in reads)} cars, sent {summary.get('bytes', 0)} bytes")
+            f"{sum(r['cars'] for r in reads)} cars, {summary.get('pictures', 0)} pictures, "
+            f"sent {summary.get('bytes', 0)} bytes"
+            + (" as a blob" if summary.get("blob") else ""))

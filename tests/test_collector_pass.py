@@ -100,6 +100,37 @@ def watch_config(tmp_path, *, searches=1, models=("Civic",), **rules) -> Config:
     return cfg
 
 
+def webp(width: int = 250, height: int = 188, pad: int = 900) -> bytes:
+    """A minimal but genuinely parseable VP8X WebP."""
+    import struct
+    body = (b"VP8X" + struct.pack("<I", 10) + b"\x00\x00\x00\x00"
+            + (width - 1).to_bytes(3, "little") + (height - 1).to_bytes(3, "little")
+            + b"\x00" * pad)
+    return b"RIFF" + struct.pack("<I", len(body) + 4) + b"WEBP" + body
+
+
+class FakeCDN:
+    """The photo CDN as the collector reaches it: a picture for every link,
+    or whatever ``mode`` says. ``calls`` is every address asked for."""
+
+    def __init__(self, mode="ok"):
+        self.mode, self.calls = mode, []
+
+    def get(self, url, timeout=None, headers=None):
+        self.calls.append(url)
+        kind, status, body = "image/webp", 200, webp()
+        if self.mode == "403":
+            kind, status, body = "text/plain", 403, b"URL signature expired"
+        elif self.mode == "html":
+            kind, body = "text/html", b"<html>log in</html>"
+        elif self.mode == "big":
+            body = webp(pad=cycle.PHOTO_MAX_BYTES)
+        elif self.mode == "raise":
+            raise ConnectionError("connection reset by peer")
+        return type("R", (), {"status_code": status, "content": body,
+                              "headers": {"Content-Type": kind}})()
+
+
 def settings(**kw) -> S.Settings:
     kw.setdefault("host", "collector-a")
     return S.Settings(repo="someone/watch", quiet_start="00:00", quiet_end="00:00",
@@ -282,29 +313,207 @@ class TestFittingABigFirstRead:
     def key(self):
         return bytes(range(32))
 
-    def test_photos_go_before_any_car(self):
+    def parts(self, n_each=150, pictures=False):
         # A first read of three searches: no photo sent yet, no card dated,
         # and photo addresses as random as Facebook's.
-        parts = [{"search": s, "scope": "x", "ok": True, "error": "", "landed": "",
-                  "listings": [{"id": str(300000000 + 1000 * n + i),
-                                "title": "2018 Honda civic",
-                                "photo": "https://cdn.example/" + secrets.token_hex(150)}
-                               for i in range(150)]}
-                 for n, s in enumerate(("s1", "s2", "s3"))]
+        out = [{"search": s, "scope": "x", "ok": True, "error": "", "landed": "",
+                "listings": [{"id": str(300000000 + 1000 * n + i),
+                              "title": "2018 Honda civic",
+                              "photo": "https://cdn.example/" + secrets.token_hex(150)}
+                             for i in range(n_each)]}
+               for n, s in enumerate(("s1", "s2", "s3"))]
+        if pictures:
+            for part in out:
+                for rec in part["listings"]:
+                    rec["photo_data"] = secrets.token_urlsafe(600)
+                    rec["photo_type"] = "image/webp"
+        return out
+
+    def test_a_read_too_big_for_a_dispatch_goes_whole(self):
+        """Five real searches read a thousand cars, and their photo links
+        did not fit a dispatch: trimmed photos first, most cars' never
+        arrived. A big batch is carried whole now, as a blob."""
         memory: dict = {}
-        sent = cycle.build(settings(), parts, polled=True, session="ok")
+        sent = cycle.build(settings(), self.parts(), polled=True, session="ok")
         sealed = cycle.fit(self.key(), sent, memory)
-        assert len(sealed) <= M.PAYLOAD_LIMIT
+        assert len(sealed) > M.PAYLOAD_LIMIT
+        opened = M.open_batch(self.key(), sealed)["searches"]
+        assert [len(p["listings"]) for p in opened] == [150, 150, 150]
+        assert all(r.get("photo") for p in opened for r in p["listings"])
+        assert all(memory["cars"][r["id"]]["photos"] == 1
+                   for p in opened for r in p["listings"])
+
+    def test_past_what_a_blob_carries_pictures_go_then_photos_then_cars(self):
+        memory: dict = {}
+        sent = cycle.build(settings(), self.parts(pictures=True), polled=True, session="ok")
+        whole = len(cycle.fit(self.key(), sent, {}))
+        # Room for the cars and their photo links, not for every picture.
+        sent = cycle.build(settings(), self.parts(pictures=True), polled=True, session="ok")
+        sealed = cycle.fit(self.key(), sent, memory, limit=whole * 2 // 3)
+        opened = M.open_batch(self.key(), sealed)["searches"]
+        assert [len(p["listings"]) for p in opened] == [150, 150, 150]
+        assert all(r.get("photo") for p in opened for r in p["listings"])
+        with_picture = [[bool(r.get("photo_data")) for r in p["listings"]] for p in opened]
+        # The newest cars of every search keep theirs, not the first search's
+        # cars all of theirs.
+        assert all(flags[0] and not flags[-1] for flags in with_picture)
+        # A picture left out is not counted as carried: a later pass does it.
+        last = opened[2]["listings"][-1]["id"]
+        assert "picture" not in memory["cars"].get(last, {})
+        assert memory["cars"][opened[2]["listings"][0]["id"]]["picture"]
+        # Tighter still, and the oldest cars' photo links go, never a car.
+        sent = cycle.build(settings(), self.parts(), polled=True, session="ok")
+        sealed = cycle.fit(self.key(), sent, {}, limit=M.PAYLOAD_LIMIT)
         opened = M.open_batch(self.key(), sealed)["searches"]
         assert [len(p["listings"]) for p in opened] == [150, 150, 150]
         with_photo = [[bool(r.get("photo")) for r in p["listings"]] for p in opened]
-        # The newest cars of every search keep theirs, not the first search's
-        # cars all of theirs.
         assert all(flags[0] and not flags[-1] for flags in with_photo)
-        # A photo left out is not counted as sent: a later batch carries it.
-        last = opened[2]["listings"][-1]["id"]
-        assert "photos" not in memory["cars"].get(last, {})
-        assert memory["cars"][opened[2]["listings"][0]["id"]]["photos"] == 1
+
+
+class TestPictures:
+    """Facebook's photo links die within days and its CDN turns the bot's
+    runner away once they have, so the collector fetches the card photo
+    while the link is fresh and carries the picture itself."""
+
+    def cars(self, tmp_path, *ids_and_titles, plan=None):
+        cfg = watch_config(tmp_path) if plan is None else None
+        plan = M.plan(cfg) if plan is None else plan
+        [item] = plan
+        recs = [{"id": i, "title": t, "photo": f"https://cdn.example/{i}.jpg",
+                 "created": 1_700_000_000 + n, "price": 24000}
+                for n, (i, t) in enumerate(ids_and_titles)]
+        parts = [{"search": item["search"], "scope": "x", "ok": True, "error": "",
+                  "landed": "", "listings": recs}]
+        return cfg, plan, parts
+
+    def test_the_card_photo_of_every_kept_car_is_carried_newest_first(self, tmp_path):
+        cfg, plan, parts = self.cars(tmp_path, ("300000001", "2019 Honda civic si"),
+                                     ("300000002", "2018 Honda civic lx"),
+                                     ("300000003", "2017 Honda accord ex"),
+                                     ("300000004", "2012 Honda civic dx"))
+        cdn, memory = FakeCDN(), {}
+        assert cycle.pictures(cfg, plan, parts, memory, cdn) == 2
+        by_id = {r["id"]: r for r in parts[0]["listings"]}
+        assert by_id["300000001"]["photo_type"] == "image/webp"
+        assert by_id["300000001"]["photo_data"] and by_id["300000002"]["photo_data"]
+        # Another model, and a car the rules hide: no picture fetched.
+        assert "photo_data" not in by_id["300000003"]
+        assert "photo_data" not in by_id["300000004"]
+        # Newest first: the one listed last was asked for first.
+        assert cdn.calls == ["https://cdn.example/300000002.jpg",
+                             "https://cdn.example/300000001.jpg"]
+        # And the bot takes the picture in as the car's photo.
+        sealed = cycle.fit(bytes(range(32)), cycle.build(settings(), parts, polled=True,
+                                                         session="ok"), memory)
+        assert memory["cars"]["300000001"]["picture"]
+        bot = M.open_batch(bytes(range(32)), sealed)
+        state = State(path=tmp_path / "state.json")
+        with _in(tmp_path):
+            report = M.ingest(cfg, state, bot, env={}, notify=False, fetcher=FakeCDN("403"))
+            from autotrader import thumbs
+            assert report.pictures == {"carried": 2, "kept": 2, "refused": 0}
+            assert thumbs.locals_for("fb-300000001") == ["thumbs/fb-300000001.webp"]
+            assert thumbs.locals_for("fb-300000002")
+            # The bot asks the CDN for nothing it was handed.
+            assert report.photos["fetched"] == 0 and report.photos["kept"] == 2
+
+    def test_once_per_car_and_so_many_per_pass(self, tmp_path):
+        cfg, plan, parts = self.cars(tmp_path, ("300000001", "2019 Honda civic si"),
+                                     ("300000002", "2018 Honda civic lx"))
+        cdn, memory = FakeCDN(), {}
+        assert cycle.pictures(cfg, plan, parts, memory, cdn, limit=1) == 1
+        cycle.fit(bytes(range(32)), cycle.build(settings(), parts, polled=True,
+                                                session="ok"), memory)
+        _, _, again = self.cars(tmp_path, ("300000001", "2019 Honda civic si"),
+                                ("300000002", "2018 Honda civic lx"), plan=plan)
+        assert cycle.pictures(cfg, plan, again, memory, cdn, limit=1) == 1
+        cycle.fit(bytes(range(32)), cycle.build(settings(), again, polled=True,
+                                                session="ok"), memory)
+        _, _, third = self.cars(tmp_path, ("300000001", "2019 Honda civic si"),
+                                ("300000002", "2018 Honda civic lx"), plan=plan)
+        assert cycle.pictures(cfg, plan, third, memory, cdn, limit=1) == 0
+        assert sorted(cdn.calls) == ["https://cdn.example/300000001.jpg",
+                                     "https://cdn.example/300000002.jpg"]
+
+    @pytest.mark.parametrize("mode", ["403", "html", "big", "raise"])
+    def test_a_photo_that_will_not_come_is_given_up_on(self, tmp_path, mode):
+        cfg, plan, parts = self.cars(tmp_path, ("300000001", "2019 Honda civic si"))
+        cdn, memory = FakeCDN(mode), {}
+        assert cycle.pictures(cfg, plan, parts, memory, cdn) == 0
+        assert "photo_data" not in parts[0]["listings"][0]
+        assert memory["cars"]["300000001"]["no_picture"]
+        assert cycle.pictures(cfg, plan, parts, memory, cdn) == 0
+        assert len(cdn.calls) == 1
+
+    def test_a_pass_carries_them_and_says_so(self, home):
+        summary = a_pass(home, FakeBrowser())
+        assert summary["pictures"] == 1 and home.cdn.calls == ["https://cdn.example/200000001.jpg"]
+        [rec] = home.last()["searches"][0]["listings"]
+        assert rec["photo_data"] and rec["photo_type"] == "image/webp"
+        assert "1 pictures" in cycle._line(summary)
+        # The next pass carries no picture for it again.
+        summary = a_pass(home, FakeBrowser())
+        assert summary["pictures"] == 0
+        assert "photo_data" not in home.last()["searches"][0]["listings"][0]
+
+
+class TestTheSend:
+    """A dispatch carries 65,535 characters; a bigger batch goes as a blob."""
+
+    class Session:
+        def __init__(self, blobs_ok=True):
+            self.calls, self.blobs_ok = [], blobs_ok
+            self.headers = {}
+
+        def post(self, url, json=None, timeout=None):
+            self.calls.append((url, json))
+            if url.endswith("/git/blobs"):
+                if not self.blobs_ok:
+                    return type("R", (), {"status_code": 403, "text": "no",
+                                          "json": lambda s: {}})()
+                return type("R", (), {"status_code": 201, "text": "",
+                                      "json": lambda s: {"sha": "a" * 40}})()
+            return type("R", (), {"status_code": 204, "text": ""})()
+
+    def test_a_small_batch_goes_in_the_dispatch(self):
+        from collector.github import GitHub
+        http = self.Session()
+        gh = GitHub("someone/watch", "t", session=http)
+        assert gh.send("x" * 100) == {"blob": None, "bytes": 100}
+        [(url, body)] = http.calls
+        assert url.endswith("/dispatches") and body["client_payload"]["batch"] == "x" * 100
+
+    def test_a_big_one_goes_up_as_a_blob_the_dispatch_names(self):
+        from collector.github import GitHub
+        http = self.Session()
+        gh = GitHub("someone/watch", "t", session=http)
+        big = "x" * (M.PAYLOAD_LIMIT + 1)
+        assert gh.send(big) == {"blob": "a" * 40, "bytes": len(big)}
+        (up, blob), (dispatch, body) = http.calls
+        assert up.endswith("/repos/someone/watch/git/blobs")
+        assert blob == {"content": big, "encoding": "utf-8"}
+        assert dispatch.endswith("/dispatches")
+        assert body["client_payload"] == {"from": "marketplace-collector",
+                                          "blob": "a" * 40, "bytes": len(big)}
+
+    def test_a_refused_upload_is_said_and_nothing_is_dispatched(self):
+        from collector.github import GitHub
+        http = self.Session(blobs_ok=False)
+        gh = GitHub("someone/watch", "t", session=http)
+        with pytest.raises(GitHubError, match="uploading the batch"):
+            gh.send("x" * (M.PAYLOAD_LIMIT + 1))
+        assert len(http.calls) == 1
+
+
+@contextmanager
+def _in(path):
+    import os
+    before = os.getcwd()
+    os.chdir(path)
+    try:
+        yield
+    finally:
+        os.chdir(before)
 
 
 # ============================================================ a whole pass
@@ -351,8 +560,10 @@ def home(tmp_path, monkeypatch):
 
     github = FakeGitHub({p.name: p.read_bytes() for p in (repo / "vault").iterdir()
                          if p.is_file()})
+    cdn = FakeCDN()
+    monkeypatch.setattr(cycle, "PHOTO_HTTP", lambda: cdn)
     h = type("Home", (), {})()
-    h.github, h.key, h.state = github, vault.key, state
+    h.github, h.key, h.state, h.cdn = github, vault.key, state, cdn
     h.last = lambda: M.open_batch(vault.key, github.sent[-1])
     return h
 

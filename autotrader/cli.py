@@ -73,6 +73,10 @@ def cmd_run(args: argparse.Namespace) -> int:
         print(f"   {line}")
     # What the photo CDN returned, with samples: the run log is the one place
     # that shows how photo fetching behaves on the runner's network.
+    if getattr(report, "pictures", None) and report.pictures.get("carried"):
+        held = report.pictures
+        print(f"   pictures: {held['carried']} carried by the collector, "
+              f"{held['kept']} kept, {held['refused']} refused")
     if report.photos:
         shots = report.photos
         print(f"   photos: {shots['kept']} kept ({shots['bytes'] / 1e6:.1f} MB), "
@@ -1055,6 +1059,7 @@ def cmd_marketplace(args: argparse.Namespace) -> int:
         return 0
 
     state = State.load(args.state)
+    blob = ""
     if args.file:
         text = Path(args.file).read_text(encoding="utf-8")
     else:
@@ -1063,11 +1068,17 @@ def cmd_marketplace(args: argparse.Namespace) -> int:
             event = json.loads(Path(event_path).read_text(encoding="utf-8"))
         except (OSError, ValueError):
             event = {}
-        text = str((event.get("client_payload") or {}).get("batch") or "")
-    if not text.strip():
+        payload = event.get("client_payload") or {}
+        text = str(payload.get("batch") or "")
+        blob = str(payload.get("blob") or "")
+    if not text.strip() and not blob.strip():
         print("no Marketplace batch to take in")
         return 0
     try:
+        if blob.strip() and not text.strip():
+            # Too big for the dispatch: the collector put it in the
+            # repository as a blob, and the dispatch names it.
+            text = M.fetch_blob(dict(os.environ), blob)
         key = V.Vault.unlock(Path(".")).key
         batch = M.open_batch(key, text, state)
     except M.AlreadyTakenIn:
@@ -1105,6 +1116,15 @@ def cmd_marketplace(args: argparse.Namespace) -> int:
         print(_warn(warning))
     for line in report.notified:
         print(f"   {line}")
+    if report.pictures.get("carried"):
+        held = report.pictures
+        print(f"   pictures: {held['carried']} carried by the collector, "
+              f"{held['kept']} kept, {held['refused']} refused")
+    if report.photos:
+        shots = report.photos
+        print(f"   photos: {shots['kept']} kept ({shots['bytes'] / 1e6:.1f} MB), "
+              f"{shots['fetched']} new, {shots['failed']} failed, "
+              f"{shots['pruned']} pruned")
     if not args.dry_run:
         state.save()
         dashboard.write(cfg, state, dict(os.environ))

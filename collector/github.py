@@ -1,19 +1,33 @@
-"""The two things the collector asks of GitHub: the vault's files, and a send.
+"""The three things the collector asks of GitHub: the vault's files, a
+send, and room for a batch too big for a send to carry.
 
-Both use a fine-grained token limited to this one repository, with Contents
+All use a fine-grained token limited to this one repository, with Contents
 set to read and write - the least that lets it start a workflow.
+
+A repository_dispatch carries at most 65,535 characters. Five searches of
+Marketplace read a thousand cars, and their photos do not fit: the first
+version trimmed photos, then cars, to fit, and most cars' photos never
+arrived. A big batch now goes up as a git blob (a loose object in the
+repository, reachable by its hash, up to 100 MB) and the dispatch carries
+the hash; the bot reads the blob back with the workflow's own token. The
+blob is sealed like a batch sent inline, so a public repository shows
+nothing. Nothing references it, so git's housekeeping drops it in time.
 """
 
 from __future__ import annotations
 
+import re
 from typing import Any
 
 import requests
+
+from autotrader.marketplace import PAYLOAD_LIMIT
 
 API = "https://api.github.com"
 EVENT = "marketplace"
 # What the bot's Status tab calls this timer.
 CALLER = "marketplace-collector"
+_SHA = re.compile(r"^[0-9a-f]{40}$")
 
 
 class GitHubError(RuntimeError):
@@ -49,14 +63,35 @@ class GitHub:
             raise self._say(r, f"reading {path}")
         return r.content
 
-    def send(self, sealed: str) -> None:
-        """Start the Check workflow with a sealed batch."""
-        body: dict[str, Any] = {"event_type": EVENT,
-                                "client_payload": {"from": CALLER, "batch": sealed}}
+    def upload(self, sealed: str) -> str:
+        """Put a sealed batch in the repository as a blob; its hash."""
+        r = self.http.post(f"{self.api}/repos/{self.repo}/git/blobs",
+                           json={"content": sealed, "encoding": "utf-8"}, timeout=120)
+        if r.status_code != 201:
+            raise self._say(r, "uploading the batch")
+        sha = str((r.json() or {}).get("sha") or "")
+        if not _SHA.match(sha):
+            raise GitHubError("uploading the batch: GitHub gave no hash back")
+        return sha
+
+    def send(self, sealed: str) -> dict[str, Any]:
+        """Start the Check workflow with a sealed batch.
+
+        A batch a dispatch can carry goes in it; a bigger one goes up as a
+        blob first, and the dispatch names it. Says which, for the log.
+        """
+        payload: dict[str, Any] = {"from": CALLER}
+        if len(sealed) > PAYLOAD_LIMIT:
+            payload["blob"] = self.upload(sealed)
+            payload["bytes"] = len(sealed)
+        else:
+            payload["batch"] = sealed
+        body: dict[str, Any] = {"event_type": EVENT, "client_payload": payload}
         r = self.http.post(f"{self.api}/repos/{self.repo}/dispatches", json=body,
                            timeout=30)
         if r.status_code != 204:
             raise self._say(r, "sending the batch")
+        return {"blob": payload.get("blob"), "bytes": len(sealed)}
 
     def check(self) -> str:
         """Whether the token reaches the repository, in words."""

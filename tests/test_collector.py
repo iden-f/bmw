@@ -96,9 +96,10 @@ class FakeFacebook(BaseHTTPRequestHandler):
 
 
 class FakeGitHub(BaseHTTPRequestHandler):
-    """The two calls the collector makes, and the one its check makes."""
+    """The calls the collector makes, and the one its check makes."""
     files: dict[str, bytes] = {}
     sent: list[dict] = []
+    blobs: dict[str, str] = {}
 
     def log_message(self, *a):
         pass
@@ -118,6 +119,16 @@ class FakeGitHub(BaseHTTPRequestHandler):
         if parts.path == "/repos/someone/watch":
             body = json.dumps({"permissions": {"push": True}}).encode()
             self.send_response(200); self.end_headers(); self.wfile.write(body); return
+        if parts.path.startswith("/repos/someone/watch/git/blobs/"):
+            text = type(self).blobs.get(parts.path.rsplit("/", 1)[-1])
+            if text is None or self.headers.get("Accept") != "application/vnd.github.raw":
+                self.send_response(404); self.end_headers(); return
+            body = text.encode()
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
         self.send_response(404); self.end_headers()
 
     def do_POST(self):
@@ -125,6 +136,18 @@ class FakeGitHub(BaseHTTPRequestHandler):
             type(self).sent.append(json.loads(
                 self.rfile.read(int(self.headers["Content-Length"]))))
             self.send_response(204); self.end_headers(); return
+        if self.path == "/repos/someone/watch/git/blobs":
+            import hashlib
+            body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+            text = body["content"]
+            sha = hashlib.sha1(f"blob {len(text)}\0{text}".encode()).hexdigest()
+            type(self).blobs[sha] = text
+            reply = json.dumps({"sha": sha}).encode()
+            self.send_response(201)
+            self.send_header("Content-Length", str(len(reply)))
+            self.end_headers()
+            self.wfile.write(reply)
+            return
         self.send_response(404); self.end_headers()
 
 
@@ -154,8 +177,13 @@ def world(tmp_path, monkeypatch):
     vault.seal_file(repo / "state.json", "state.enc")
     FakeGitHub.files = {p.name: p.read_bytes() for p in (repo / "vault").iterdir()
                         if p.is_file()}
-    FakeGitHub.sent = []
+    FakeGitHub.sent, FakeGitHub.blobs = [], {}
     FakeFacebook.mode, FakeFacebook.visited = "ok", []
+    # The photo CDN, as the collector reaches it for the cars' pictures.
+    from collector import cycle
+    from .test_collector_pass import FakeCDN
+    cdn = FakeCDN()
+    monkeypatch.setattr(cycle, "PHOTO_HTTP", lambda: cdn)
 
     fb, gh = _serve(FakeFacebook), _serve(FakeGitHub)
     monkeypatch.setenv("COLLECTOR_HOME", str(tmp_path / "home"))
@@ -171,6 +199,7 @@ def world(tmp_path, monkeypatch):
     w = type("World", (), {})()
     w.settings, w.github, w.repo, w.cfg, w.key = settings, github, repo, cfg, vault.key
     w.fb = f"http://127.0.0.1:{fb.server_port}"
+    w.cdn, w.api = cdn, f"http://127.0.0.1:{gh.server_port}"
     try:
         yield w
     finally:
@@ -194,7 +223,9 @@ def last_batch(world):
     [body] = FakeGitHub.sent[-1:]
     assert body["event_type"] == "marketplace"
     assert body["client_payload"]["from"] == "marketplace-collector"
-    return M.open_batch(world.key, body["client_payload"]["batch"])
+    payload = body["client_payload"]
+    text = payload.get("batch") or FakeGitHub.blobs[payload["blob"]]
+    return M.open_batch(world.key, text)
 
 
 class TestAPass:
@@ -235,17 +266,65 @@ class TestAPass:
         assert cars["200000001"]["mileage_km"] == 51234
         assert cars["200000001"]["transmission"] == "Manual"
 
-    def test_the_bot_takes_in_what_the_collector_sent(self, world):
+    def test_the_bot_takes_in_what_the_collector_sent(self, world, monkeypatch):
         from collector.cycle import once
+        from autotrader import thumbs
         sign_in(world)
         once(world.settings, github=world.github)
         state = State(path=world.repo / "state.json")
         body = FakeGitHub.sent[-1]["client_payload"]["batch"]
+        monkeypatch.chdir(world.repo)
         report = M.ingest(world.cfg, state, M.open_batch(world.key, body, state),
-                          env={}, notify=False)
+                          env={}, notify=False, fetcher=world.cdn)
         assert report.searches_run == 1
         assert {"fb-200000001", "fb-200000002"} <= set(state.listings)
         assert "fb-200000003" not in state.listings       # another model
+        # The pictures the collector fetched are the cars' photos now, and
+        # the Accord's was never fetched: the bot would not keep it.
+        assert report.pictures == {"carried": 2, "kept": 2, "refused": 0}
+        assert thumbs.locals_for("fb-200000001") == ["thumbs/fb-200000001.webp"]
+        assert sorted(world.cdn.calls) == ["https://cdn.example/200000001.jpg",
+                                           "https://cdn.example/200000002.jpg"]
+
+    def test_a_batch_too_big_for_a_dispatch_goes_as_a_blob_the_bot_reads_back(
+            self, world, monkeypatch):
+        """Five searches read a thousand cars; a dispatch carries 64 KB."""
+        from collector.cycle import once
+        import secrets
+        FakeFacebook.more = [node(str(200000100 + i), "2018 Honda civic lx sedan 4d",
+                                  price="21000.00") for i in range(400)]
+        try:
+            sign_in(world)
+            # Every car's photo link is as random as Facebook's, and far
+            # more than a dispatch holds. (Pictures are limited per pass.)
+            monkeypatch.setattr(M, "_photo", lambda n: "https://cdn.example/"
+                                + secrets.token_hex(150) + ".jpg")
+            summary = once(world.settings, github=world.github)
+        finally:
+            FakeFacebook.more = [node("200000002", "2018 Honda civic lx sedan 4d",
+                                      price="21000.00"),
+                                 node("200000003", "2017 Honda accord ex", price="19000.00")]
+        payload = FakeGitHub.sent[-1]["client_payload"]
+        assert "batch" not in payload and payload["blob"] in FakeGitHub.blobs
+        assert payload["bytes"] == summary["bytes"] > M.PAYLOAD_LIMIT
+        assert summary["blob"] == payload["blob"]
+        batch = last_batch(world)
+        assert len(batch["searches"][0]["listings"]) == 401
+        assert all(r.get("photo") for r in batch["searches"][0]["listings"])
+        # The bot, run as the workflow runs it, reads the blob with its token.
+        from autotrader.cli import main
+        event = world.repo / "event.json"
+        event.write_text(json.dumps({"action": "marketplace", "client_payload": payload}))
+        monkeypatch.chdir(world.repo)
+        monkeypatch.setenv("GITHUB_EVENT_PATH", str(event))
+        monkeypatch.setenv("GITHUB_REPOSITORY", "someone/watch")
+        monkeypatch.setenv("GITHUB_API_URL", world.api)
+        monkeypatch.setenv("GH_TOKEN", "workflow-token")
+        monkeypatch.setenv(V.ENV_KEY, PHRASE)
+        assert main(["--config", str(world.repo / "config.json"),
+                     "--state", str(world.repo / "state.json"),
+                     "marketplace", "ingest", "--no-notify"]) == 0
+        assert len(State.load(world.repo / "state.json").listings) == 401
 
     def test_signed_out_is_sent_as_such(self, world):
         from collector.cycle import once
@@ -331,7 +410,9 @@ class TestStandby:
 
 class TestFitting:
 
-    def test_a_huge_read_is_trimmed_to_fit_newest_first(self, world):
+    def test_a_huge_read_goes_whole_newest_first(self, world):
+        """A dispatch holds 64 KB; a read this size goes up as a blob, so
+        nothing is trimmed. (How it is sent is the GitHub client's call.)"""
         from collector.cycle import build, fit
         import secrets
         # Random text, as a real photo address is: it does not compress.
@@ -343,9 +424,10 @@ class TestFitting:
                                         "error": "", "landed": "", "listings": records}],
                       polled=True, session="ok")
         sealed = fit(world.key, batch, {})
-        assert len(sealed) <= M.PAYLOAD_LIMIT
+        assert len(sealed) > M.PAYLOAD_LIMIT
         kept = M.open_batch(world.key, sealed)["searches"][0]["listings"]
-        assert kept and kept[0]["created"] == max(r["created"] for r in records)
+        assert len(kept) == 900 and all(r.get("photo") for r in kept)
+        assert kept[0]["created"] == max(r["created"] for r in records)
 
     def test_photos_stop_once_sent_enough(self, world):
         from collector.cycle import PHOTO_SENDS, build, fit

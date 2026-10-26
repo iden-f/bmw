@@ -762,6 +762,55 @@ class TestTheCommand:
         assert self.run(repo, "marketplace", "ingest", "--no-notify") == 0
         assert "fb-100000001" in State.load(repo.path / "state.json").listings
 
+    def test_takes_a_big_one_from_the_blob_the_dispatch_names(self, repo, monkeypatch):
+        b = batch(part(repo.cfg.searches[0].id, rec("100000001")))
+        sealed = M.seal_batch(repo.key, b)
+        sha = "0123456789abcdef0123456789abcdef01234567"
+        asked = []
+
+        class Api:
+            @staticmethod
+            def get(url, timeout=None, headers=None):
+                asked.append((url, headers))
+                ok = url == f"https://api.example/repos/someone/watch/git/blobs/{sha}"
+                return type("R", (), {"status_code": 200 if ok else 404,
+                                      "text": sealed if ok else "no"})()
+        real = M.fetch_blob
+        monkeypatch.setattr(M, "fetch_blob", lambda env, sha_: real(env, sha_, http=Api))
+        event = repo.path / "event.json"
+        event.write_text(json.dumps({"action": "marketplace",
+                                     "client_payload": {"blob": sha, "bytes": len(sealed)}}))
+        monkeypatch.setenv("GITHUB_EVENT_PATH", str(event))
+        monkeypatch.setenv("GITHUB_REPOSITORY", "someone/watch")
+        monkeypatch.setenv("GITHUB_API_URL", "https://api.example")
+        monkeypatch.setenv("GH_TOKEN", "workflow-token")
+        assert self.run(repo, "marketplace", "ingest", "--no-notify") == 0
+        assert "fb-100000001" in State.load(repo.path / "state.json").listings
+        [(url, headers)] = asked
+        assert headers["Authorization"] == "Bearer workflow-token"
+        assert headers["Accept"] == "application/vnd.github.raw"
+
+    def test_a_blob_it_cannot_read_is_refused_and_said(self, repo, monkeypatch):
+        sha = "0123456789abcdef0123456789abcdef01234567"
+        event = repo.path / "event.json"
+        event.write_text(json.dumps({"action": "marketplace",
+                                     "client_payload": {"blob": sha}}))
+        monkeypatch.setenv("GITHUB_EVENT_PATH", str(event))
+        monkeypatch.setenv("GITHUB_REPOSITORY", "someone/watch")
+        monkeypatch.delenv("GH_TOKEN", raising=False)
+        monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+        assert self.run(repo, "marketplace", "ingest", "--no-notify") == 1
+        refused = State.load(repo.path / "state.json").data["marketplace"]["refused"]
+        assert "GH_TOKEN" in refused["why"]
+
+    def test_a_blob_hash_is_checked_before_it_is_asked_for(self):
+        env = {"GITHUB_REPOSITORY": "someone/watch", "GH_TOKEN": "t"}
+        for bad in ("../../etc", "0123", "", "g" * 40):
+            with pytest.raises(M.BatchError, match="malformed"):
+                M.fetch_blob(env, bad)
+        with pytest.raises(M.BatchError, match="GITHUB_REPOSITORY"):
+            M.fetch_blob({"GH_TOKEN": "t", "GITHUB_REPOSITORY": "../x"}, "a" * 40)
+
     def test_a_batch_that_does_not_open_is_refused_and_said(self, repo):
         (repo.path / "b.txt").write_text(M.seal_batch(bytes(32), batch()))
         assert self.run(repo, "marketplace", "ingest", "b.txt") == 1
@@ -781,6 +830,13 @@ class TestTheWorkflow:
         assert "types: [check, marketplace]" in text
         assert "marketplace ingest" in text
         assert "client_payload" not in text
+
+    def test_the_check_can_read_a_batch_blob_with_its_own_token(self):
+        import yaml
+        doc = yaml.safe_load((Path(__file__).resolve().parent.parent
+                              / ".github" / "workflows" / "watch.yml").read_text())
+        [step] = [s for s in doc["jobs"]["check"]["steps"] if s.get("id") == "bot"]
+        assert step["env"]["GH_TOKEN"] == "${{ github.token }}"
 
 
 class TestAStandbyTakingOver:
