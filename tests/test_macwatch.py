@@ -41,7 +41,10 @@ def db(home):
 
 @pytest.fixture
 def settings(home):
-    st = S.Settings(ntfy_topic="trial-topic", interval_minutes=10)
+    # No quiet window: a test that measures the next due time against the
+    # wall clock must not depend on the hour it is run at.
+    st = S.Settings(ntfy_topic="trial-topic", interval_minutes=10,
+                    quiet_start="00:00", quiet_end="00:00")
     st.ensure_token()
     st.save()
     return st
@@ -531,7 +534,7 @@ def test_quiet_hours_slow_the_cadence(settings):
     day = datetime(2026, 10, 26, 20, 0, tzinfo=timezone.utc)
     assert in_quiet_hours(settings, night) and not in_quiet_hours(settings, day)
     service = Service(settings, Database(":memory:"), config_provider=lambda: None)
-    assert service.interval_minutes("autotrader", night) == 120
+    assert service.interval_minutes("autotrader", night) == 60
     assert service.interval_minutes("autotrader", day) == 10
 
 

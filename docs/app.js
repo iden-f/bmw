@@ -852,7 +852,7 @@ function collectorTiming(m) {
     const planned = Date.parse(h.next_at || '');
     const s = h.settings || {};
     return Number.isFinite(planned) ? planned
-      : Date.parse(h.received) + ((s.every_minutes || 25) + (s.jitter_minutes ?? 5)) * 60000;
+      : Date.parse(h.received) + ((s.every_minutes || 5) + (s.jitter_minutes ?? 1)) * 60000;
   };
   const heard = [[last.host || '', last], ...Object.entries(m.hosts || {}).filter(([, h]) =>
     h && h.received && Date.now() - Date.parse(h.received) < 2 * 3.6e6)];
@@ -3184,12 +3184,15 @@ function marketplaceSection(m) {
   return s;
 }
 
-/* "every 20–30 minutes", from what the collector said of itself. */
+/* "every 4–6 minutes", from what the collector said of itself. */
 function paceOf(cs) {
-  const every = cs?.every_minutes ?? 25;
-  const jitter = cs?.jitter_minutes ?? 5;
+  const every = cs?.every_minutes ?? 5;
+  const jitter = cs?.jitter_minutes ?? 1;
+  const night = cs?.quiet_start && cs?.quiet_end;
+  const slower = (cs?.quiet_every_minutes || 0) > every;
   return `every ${num(Math.max(1, every - jitter))}–${num(every + jitter)} minutes`
-    + (cs?.quiet_start && cs?.quiet_end ? ', and only a check-in overnight' : '');
+    + (night && cs?.quiet_reads === false ? ', and only a check-in overnight'
+      : night && slower ? `, every ${num(cs.quiet_every_minutes)} overnight` : '');
 }
 
 /* How the collector is set up, as it reported itself. Shown, never
@@ -3203,8 +3206,11 @@ function collectorSettings(cs) {
        <span class="note" style="margin:0">— slow on purpose, and never on the minute: it reads
        the way a person browsing would, which keeps the account clear of Facebook's checks</span></dd>` +
     (cs.quiet_start && cs.quiet_end ? `<dt>Overnight</dt><dd>${esc(cs.quiet_start)}–${esc(cs.quiet_end)} on the Mac's clock
-       <span class="note" style="margin:0">— it only checks in: few cars are listed then, and
-       reading all night is the pattern that looks least like a person</span></dd>` : '') +
+       <span class="note" style="margin:0">— ${cs.quiet_reads === false
+         ? 'it only checks in: few cars are listed then'
+         : (cs.quiet_every_minutes || 0) > (cs.every_minutes || 0)
+           ? `it slows to a pass every ${num(cs.quiet_every_minutes)} minutes: few cars are listed then`
+           : 'it keeps the same pace'}</span></dd>` : '') +
     (cs.details_per_cycle !== undefined ? `<dt>Listing pages</dt><dd>up to ${num(cs.details_per_cycle)} a pass
        <span class="note" style="margin:0">— opened once each, newest first, for cars that pass
        your rules, to read the exact odometer and the title status</span></dd>` : '') +
@@ -3777,7 +3783,10 @@ const OPTION_BOXES = [
    'Hold alerts overnight. They arrive after, not never.'],
   ['notifications.price_drop_alert_abs', 'A drop worth its own alert, $', 'int',
    'A drop at least this big is an alert of its own; smaller ones ride along with the '
-   + 'next alert. 0 sends every drop at once.'],
+   + 'next alert, or stay here. 0 sends every drop at once.'],
+  ['notifications.small_drops_ride_along', 'Smaller drops ride along', 'bool',
+   'Mention a drop under that bar at the end of the next new-car alert. Off, it is only '
+   + 'recorded here.'],
   ['dashboard.photos_per_car', 'Photos kept per car', 'int',
    'How many of each car\'s photos the bot copies and keeps, including after it leaves the site.'],
   ['dashboard.photo_budget_mb', 'Photo store, MB', 'int',

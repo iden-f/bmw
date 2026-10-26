@@ -385,8 +385,13 @@ def _where(listing) -> str:
     return str(getattr(listing, "location", "") or getattr(listing, "province", "") or "")
 
 
+#: The seller, as the dashboard's cards word it.
+_SELLER_WORDS = {"private": "private seller", "dealer": "dealer"}
+
+
 def _push_facts(listing) -> str:
-    """Kilometres, location, colour and a rebuilt title: what the name omits."""
+    """Kilometres, location, colour, seller and a rebuilt title: what the
+    name omits, in the order a buyer weighs them."""
     bits = []
     if getattr(listing, "mileage_km", None) is not None:
         bits.append(listing.mileage_text)
@@ -395,10 +400,30 @@ def _push_facts(listing) -> str:
     colour = str(getattr(listing, "color", "") or "").strip()
     if colour and colour.lower() not in {"n/a", "na", "-", "unknown", "none"}:
         bits.append(colour)
+    seller = _SELLER_WORDS.get(str(getattr(listing, "seller_type", "") or "").lower())
+    if seller:
+        bits.append(seller)
     # The one thing in a dealer's free text worth carrying to the phone.
     blob = " ".join(str(getattr(listing, f, "") or "") for f in ("title", "trim"))
     if _REBUILT.search(blob):
         bits.append("REBUILT TITLE")
+    return " · ".join(bits)
+
+
+def _push_measure(change: Change, *, moved: bool = True) -> str:
+    """The second line: what the price means. The dollars per 1,000 km the
+    dashboard's cards show and, with ``moved``, the old price and the
+    percentage of a move (left out where the line above already said it)."""
+    bits = []
+    if moved and change.kind in (Change.PRICE_DROP, Change.PRICE_RISE, Change.RELISTED) \
+            and change.old_price is not None and change.new_price is not None \
+            and change.delta:
+        pct = abs(change.delta_pct or 0.0)
+        bits.append(f"was ${change.old_price:,}" + (f" ({pct:.1f}% off)"
+                                                    if change.delta < 0 and pct else ""))
+    ratio = the_ratio(change.listing)
+    if ratio:
+        bits.append(ratio)
     return " · ".join(bits)
 
 
@@ -410,11 +435,14 @@ def _dropped(change: Change) -> str:
 
 
 def push_title(changes: list[Change]) -> str:
-    """The heading: the car it is about, its price, where it is, its km.
+    """The heading: what happened, the car it happened to, and its price.
 
     The lead is the first change in render order, so a new car whenever
     there is one. The rest are only counted: the heading is for deciding
     whether to open the notification, and the body says what they are.
+    Kilometres, place and seller are the body's first line, not the
+    heading's tail: a lock screen shows one line of heading, and a heading
+    that runs on is cut just where the price was.
     """
     ordered = in_order(changes)
     if not ordered:
@@ -422,20 +450,17 @@ def push_title(changes: list[Change]) -> str:
     lead = ordered[0]
     car = lead.listing
     name = car_name(car)
-    where, km = _where(car), (car.mileage_text if car.mileage_km is not None else "")
-    tail = [part for part in (where, km) if part]
     if lead.kind == Change.NEW:
         parts = [f"New on Marketplace: {name}" if _on_marketplace(car)
-                 else f"New {name}", car.price_text, *tail]
+                 else f"New {name}", car.price_text]
     elif lead.kind == Change.QUALIFIED:
-        parts = [f"Now in your rules: {name}", car.price_text, *tail]
+        parts = [f"Now in your rules: {name}", car.price_text]
     elif lead.kind == Change.RELISTED:
-        parts = [f"Back on sale: {name}", car.price_text, *tail]
+        parts = [f"Back on sale: {name}", car.price_text]
     elif lead.kind == Change.PRICE_DROP:
-        parts = [f"{name} down ${abs(lead.delta or 0):,}",
-                 f"now {car.price_text}", *tail]
+        parts = [f"{name} down ${abs(lead.delta or 0):,}", f"now {car.price_text}"]
     elif lead.kind == Change.PRICED:
-        parts = [f"{name} priced", car.price_text, *tail]
+        parts = [f"{name} priced", car.price_text]
     else:
         return headline(ordered).split(": ", 1)[-1]
     title = " · ".join(parts)
@@ -469,6 +494,8 @@ def as_push(changes: list[Change], *, limit: int = 12) -> str:
     shown = ordered[:max(1, limit)]
 
     def block(change: Change, *, named: bool = True) -> list[str]:
+        """One car: its name and price (in a digest), then what the name
+        omits, then what the price means, then the ad."""
         car = change.listing
         lines: list[str] = []
         if named:
@@ -482,11 +509,11 @@ def as_push(changes: list[Change], *, limit: int = 12) -> str:
                 head += f" ({note})"
             lines.append(head)
         facts = _push_facts(car)
-        if change.kind == Change.PRICE_DROP and not named and _dropped(change):
-            facts = f"{_dropped(change).capitalize()} · {facts}" if facts \
-                else _dropped(change).capitalize()
         if facts:
             lines.append(facts)
+        measure = _push_measure(change, moved=not named)
+        if measure:
+            lines.append(measure)
         link = short_link(car)
         if link:
             lines.append(link)
@@ -507,7 +534,9 @@ def as_push(changes: list[Change], *, limit: int = 12) -> str:
             continue
         if out:
             out.append("")
-        out.append(heading)
+        # The count in the heading, so a long digest can be weighed from
+        # its first screen.
+        out.append(f"{heading} ({len(members)})" if len(members) > 1 else heading)
         for i, change in enumerate(members):
             if i:
                 out.append("")

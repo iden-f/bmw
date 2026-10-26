@@ -261,9 +261,21 @@ class TestAPass:
         summary = once(world.settings, github=world.github)
         assert summary["session"] == "signed_out"
 
-    def test_overnight_it_only_checks_in(self, world):
+    def test_overnight_it_still_reads(self, world):
+        """The owner wants the night read too, only less often: a car listed
+        at 01:00 is still a car. The slower pace is next_wait's business."""
+        from collector.cycle import once
+        sign_in(world)
+        world.settings.quiet_start, world.settings.quiet_end = "00:00", "23:59"
+        summary = once(world.settings, github=world.github,
+                       now=datetime(2026, 1, 1, 12, 0))
+        assert summary["polled"] and FakeFacebook.visited
+        assert last_batch(world)["polled"] is True
+
+    def test_overnight_it_only_checks_in_when_asked_to(self, world):
         from collector.cycle import once
         world.settings.quiet_start, world.settings.quiet_end = "00:00", "23:59"
+        world.settings.quiet_reads = False
         summary = once(world.settings, github=world.github,
                        now=datetime(2026, 1, 1, 12, 0))
         assert not summary["polled"] and summary["note"] == "overnight pause"
@@ -358,30 +370,30 @@ class TestTheClock:
         assert resting(s, datetime(2026, 1, 1, 3, 0))
         assert not resting(s, datetime(2026, 1, 1, 12, 0))
 
-    def test_waits_twenty_to_thirty_minutes(self):
+    def test_waits_four_to_six_minutes(self):
         from collector.cycle import next_wait
         from collector.settings import Settings
         noon = datetime(2026, 1, 1, 12, 0)
         waits = [next_wait(Settings(), noon) / 60 for _ in range(200)]
-        assert 20 <= min(waits) and max(waits) <= 30
+        assert 4 <= min(waits) and max(waits) <= 6
 
-    def test_overnight_it_checks_in_every_two_hours(self):
+    def test_overnight_it_passes_every_ten_minutes(self):
         from collector.cycle import next_wait
         from collector.settings import Settings
-        assert next_wait(Settings(), datetime(2026, 1, 1, 2, 0)) == 120 * 60
-        assert next_wait(Settings(), datetime(2026, 1, 1, 4, 10)) == 120 * 60
+        assert next_wait(Settings(), datetime(2026, 1, 1, 23, 0)) == 10 * 60
+        assert next_wait(Settings(), datetime(2026, 1, 1, 4, 10)) == 10 * 60
 
-    def test_the_last_overnight_wait_ends_when_the_pause_does(self):
+    def test_the_last_overnight_wait_ends_when_the_window_does(self):
         from collector.cycle import next_wait
         from collector.settings import Settings
-        # 07:00 plus two hours would be 09:00; the pause ends at 08:00.
-        assert next_wait(Settings(), datetime(2026, 1, 1, 7, 0)) == 60 * 60
+        # 07:55 plus ten minutes would be 08:05; the window ends at 08:00.
+        assert next_wait(Settings(), datetime(2026, 1, 1, 7, 55)) == 5 * 60
 
-    def test_the_day_is_unchanged_either_side_of_the_pause(self):
+    def test_the_day_is_unchanged_either_side_of_the_window(self):
         from collector.cycle import next_wait
         from collector.settings import Settings
-        for hour in (1, 8, 9, 23):
-            assert 20 <= next_wait(Settings(), datetime(2026, 1, 1, hour, 5)) / 60 <= 30
+        for hour in (8, 9, 15, 22):
+            assert 4 <= next_wait(Settings(), datetime(2026, 1, 1, hour, 5)) / 60 <= 6
 
 
 class TestTheService:
