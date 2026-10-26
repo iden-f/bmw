@@ -120,9 +120,10 @@ cars it has opened) is in that folder, never in the clone.
 
 | Setting | Default | Meaning |
 |---|---|---|
-| `every_minutes`, `jitter_minutes` | 25, 5 | A pass every 20 to 30 minutes |
-| `quiet_start`, `quiet_end` | `02:00`, `08:00` | Overnight it only checks in, in this Mac's time |
-| `quiet_every_minutes` | 120 | How often it checks in overnight; each check-in starts a billed run |
+| `every_minutes`, `jitter_minutes` | 5, 1 | A pass every 4 to 6 minutes |
+| `quiet_start`, `quiet_end` | `23:00`, `08:00` | Overnight it slows down, in this Mac's time |
+| `quiet_every_minutes` | 10 | How often it passes overnight; each pass starts a run of the bot's check |
+| `quiet_reads` | `true` | Overnight passes read Marketplace. `false` makes them check in only |
 | `details_per_cycle` | 3 | Listing pages opened per pass, for cars that pass your rules |
 | `scrolls` | 2 | Screens of results per search beyond the first |
 | `role` | `primary` | `standby` reads only when the primary has gone quiet or Facebook will not let it in |
@@ -184,8 +185,8 @@ Mac. Delete the folder whenever you like.
 
 ## When something goes wrong
 
-The bot alerts you when the collector has not checked in for two hours, when
-Facebook signs it out, and when it checks in but has read nothing for nine
+The bot alerts you when the collector has not checked in for an hour, when
+Facebook signs it out, and when it checks in but has read nothing for three
 hours. On the Mac, `collector/run status` says which part is missing, and the
 log says why.
 

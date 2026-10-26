@@ -1075,8 +1075,8 @@ def _collector_settings(raw: Any) -> dict[str, Any]:
     if not isinstance(raw, dict):
         return {}
     out: dict[str, Any] = {}
-    for key in ("every_minutes", "jitter_minutes", "details_per_cycle", "scrolls",
-                "takeover_after_minutes"):
+    for key in ("every_minutes", "jitter_minutes", "quiet_every_minutes",
+                "details_per_cycle", "scrolls", "takeover_after_minutes"):
         value = raw.get(key)
         if isinstance(value, (int, float)) and not isinstance(value, bool) \
                 and math.isfinite(value):
@@ -1084,6 +1084,8 @@ def _collector_settings(raw: Any) -> dict[str, Any]:
     for key in ("quiet_start", "quiet_end"):
         if re.fullmatch(r"\d{1,2}:\d{2}", str(raw.get(key) or "")):
             out[key] = str(raw[key])
+    if isinstance(raw.get("quiet_reads"), bool):
+        out["quiet_reads"] = raw["quiet_reads"]
     return out
 
 

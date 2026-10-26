@@ -204,7 +204,7 @@ And for alerts, globally:
 
 | Setting | What it does |
 |---|---|
-| `notifications.price_drop_alert_abs` | The bar: a drop at least this big is an alert of its own, and a smaller one rides along. `0`, the default, alerts every drop over the floor at once. |
+| `notifications.price_drop_alert_abs` | The bar: a drop at least this big is an alert of its own, and a smaller one rides along. `2000`, the default, keeps a cut under $2,000 out of your pocket until the next new car; `0` alerts every drop over the floor at once. |
 | `notifications.price_drop_min_pct`, `notifications.price_drop_min_abs` | The floor: a drop must clear both (1% and $250) to be mentioned at all. |
 | `notifications.small_drops_ride_along` | `false` keeps drops under the bar on the dashboard only. |
 | `notifications.notify_on.*` | Which kinds of change alert: `new`, `price_drop`, `priced`, `qualified` and `errors` are on; `price_rise`, `removed` and `relisted` are off. `unpriced` follows `require_price`. |

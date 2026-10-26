@@ -381,7 +381,12 @@ class TestAnOutsideTimerCannotDoubleScrape:
 
 
 class TestTheOvernightInterval:
-    """Every 30 minutes by day, every 2 hours from 02:00 to 08:00 Vancouver time."""
+    """Every 30 minutes by day, every hour from 23:00 to 08:00 Vancouver time.
+
+    The floor overnight is three quarters of the slower interval, so a
+    firing 45 minutes after the last check goes ahead and one at 40 stands
+    down.
+    """
 
     @pytest.fixture(autouse=True)
     def thirty(self, bench):
@@ -402,11 +407,16 @@ class TestTheOvernightInterval:
 
     def test_overnight_the_same_gap_stands_down(self, bench, monkeypatch):
         # 04:00 Vancouver (PDT)
-        assert self.second_run(bench, monkeypatch, "2026-10-20T11:00:00+00:00", 30).skipped
-        assert self.second_run(bench, monkeypatch, "2026-10-20T11:00:00+00:00", 85).skipped
+        assert self.second_run(bench, monkeypatch, "2026-10-20T11:00:00+00:00", 20).skipped
+        assert self.second_run(bench, monkeypatch, "2026-10-20T11:00:00+00:00", 40).skipped
 
-    def test_overnight_a_firing_after_two_hours_goes_ahead(self, bench, monkeypatch):
-        assert not self.second_run(bench, monkeypatch, "2026-10-20T11:00:00+00:00", 115).skipped
+    def test_overnight_a_firing_after_most_of_an_hour_goes_ahead(self, bench, monkeypatch):
+        assert not self.second_run(bench, monkeypatch, "2026-10-20T11:00:00+00:00", 50).skipped
+
+    def test_the_window_opens_at_eleven_at_night(self, bench, monkeypatch):
+        # 23:30 Vancouver (PDT): already slow. 22:30: still the day's pace.
+        assert self.second_run(bench, monkeypatch, "2026-10-21T06:30:00+00:00", 20).skipped
+        assert not self.second_run(bench, monkeypatch, "2026-10-21T05:30:00+00:00", 20).skipped
 
     def test_the_window_follows_the_local_clock_all_year(self):
         from datetime import datetime
@@ -418,10 +428,11 @@ class TestTheOvernightInterval:
         # each season (British Columbia is dropping the seasonal change).
         for month in (1, 7, 12):
             at = lambda h, m: datetime(2026, month, 15, h, m, tzinfo=local)
-            assert night(cfg, at(2, 0)) == 120
-            assert night(cfg, at(7, 59)) == 120
+            assert night(cfg, at(23, 0)) == 60
+            assert night(cfg, at(2, 0)) == 60
+            assert night(cfg, at(7, 59)) == 60
             assert night(cfg, at(8, 0)) == 0
-            assert night(cfg, at(1, 59)) == 0
+            assert night(cfg, at(22, 59)) == 0
 
     def test_a_bad_window_means_no_window(self):
         from datetime import datetime, timezone

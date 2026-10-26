@@ -628,17 +628,18 @@ class TestTheWatchdog:
     def test_silent_until_a_collector_has_ever_reported(self, watch):
         assert events.marketplace_silence(watch.cfg, watch.state, {}) is None
 
-    def test_a_failed_first_read_after_the_night_is_not_an_alarm(self, watch):
-        # The last read of the night, six and a half hours before the first
-        # of the morning, which failed.
+    def test_a_few_failed_reads_in_a_row_are_not_yet_an_alarm(self, watch):
+        # The collector reads every few minutes, overnight too, so a good
+        # read two and a half hours old is many failed passes - but Facebook
+        # has slow spells, and the alarm waits for unread_after_hours.
         watch.send(part(watch.sid, rec("100000001")))
-        clock.freeze(clock.now() + timedelta(hours=6.5))
+        clock.freeze(clock.now() + timedelta(hours=2.5))
         try:
             watch.send(part(watch.sid, ok=False, error="the page did not load"))
             assert events.marketplace_silence(watch.cfg, watch.state, {}) is None
         finally:
             clock.freeze(None)
-        clock.freeze(clock.now() + timedelta(hours=9.5))
+        clock.freeze(clock.now() + timedelta(hours=3.5))
         try:
             watch.send(part(watch.sid, ok=False, error="the page did not load"))
             said = events.marketplace_silence(watch.cfg, watch.state, {})

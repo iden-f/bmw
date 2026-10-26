@@ -46,6 +46,7 @@ OPTIONS: dict[str, tuple[type, float, float]] = {
     "notifications.digest": (bool, 0, 1),
     "notifications.quiet_hours.enabled": (bool, 0, 1),
     "notifications.price_drop_alert_abs": (int, 0, 1_000_000),
+    "notifications.small_drops_ride_along": (bool, 0, 1),
     "archive.keep_days": (int, 0, 36500),
     "archive.keep_max_listings": (int, 0, 1_000_000),
 }

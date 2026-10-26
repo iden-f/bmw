@@ -15,7 +15,7 @@ import pytest
 from autotrader import clock, control, insight, invariants
 from autotrader import marketplace as M
 from autotrader import runner as runner_mod
-from autotrader.config import PINNED_SEARCH_ID, Config
+from autotrader.config import PINNED_SEARCH_ID, Config, CONFIG_VERSION
 from autotrader.dashboard import build_payload
 from autotrader.http import FetchError
 from autotrader.runner import run
@@ -272,10 +272,44 @@ class TestAnOlderConfigIsBroughtUpToDate:
             "archive": {"mode": "metadata", "images": 0, "keep_last": 400, "keep_days": 730},
             "dashboard": {"enabled": True, "max_listings": 500}}))
         cfg = Config.load(path)
-        assert cfg.data["version"] == 3
+        assert cfg.data["version"] == CONFIG_VERSION
         assert cfg.get("archive.keep_last") == 0 and cfg.get("archive.keep_days") == 0
         assert cfg.get("dashboard.max_listings") == 2000
         assert cfg.get("dashboard.photos_per_car") == 12
+
+    def test_version_three_gets_the_higher_drop_bar_and_the_later_night(self, tmp_path):
+        """Config.save writes every default in full, so a changed default
+        reaches a live watch only through the upgrade."""
+        path = tmp_path / "config.json"
+        path.write_text(json.dumps({
+            "version": 3, "searches": [{"url": SEARCH}],
+            "notifications": {"price_drop_alert_abs": 0},
+            "health": {"overnight": {"enabled": True, "start": "02:00", "end": "08:00",
+                                     "interval_minutes": 120, "timezone": "America/Vancouver"}},
+            "marketplace": {"silent_after_hours": 2, "unread_after_hours": 9}}))
+        cfg = Config.load(path)
+        assert cfg.data["version"] == 4
+        assert cfg.get("notifications.price_drop_alert_abs") == 2000
+        assert cfg.get("health.overnight") == {
+            "enabled": True, "start": "23:00", "end": "08:00",
+            "interval_minutes": 60, "timezone": "America/Vancouver"}
+        assert cfg.get("marketplace.silent_after_hours") == 1
+        assert cfg.get("marketplace.unread_after_hours") == 3
+
+    def test_a_bar_and_a_night_the_owner_chose_are_kept(self, tmp_path):
+        path = tmp_path / "config.json"
+        path.write_text(json.dumps({
+            "version": 3, "searches": [{"url": SEARCH}],
+            "notifications": {"price_drop_alert_abs": 500},
+            "health": {"overnight": {"enabled": True, "start": "01:00", "end": "06:00",
+                                     "interval_minutes": 120, "timezone": "America/Vancouver"}},
+            "marketplace": {"silent_after_hours": 4, "unread_after_hours": 12}}))
+        cfg = Config.load(path)
+        assert cfg.get("notifications.price_drop_alert_abs") == 500
+        assert cfg.get("health.overnight.start") == "01:00"
+        assert cfg.get("health.overnight.interval_minutes") == 120
+        assert cfg.get("marketplace.silent_after_hours") == 4
+        assert cfg.get("marketplace.unread_after_hours") == 12
 
     def test_a_limit_the_owner_chose_is_kept(self, tmp_path):
         path = tmp_path / "config.json"

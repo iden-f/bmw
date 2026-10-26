@@ -122,7 +122,11 @@ def _minutes(text: str) -> int:
 
 
 def resting(cfg: S.Settings, now: datetime | None = None) -> bool:
-    """Inside the overnight pause, in this computer's own time."""
+    """Inside the overnight window, in this computer's own time.
+
+    Resting means the slower overnight pace. Whether a resting pass reads
+    or only checks in is `quiet_reads`.
+    """
     now = now or datetime.now()
     start, end, at = _minutes(cfg.quiet_start), _minutes(cfg.quiet_end), \
         now.hour * 60 + now.minute
@@ -135,7 +139,7 @@ def next_wait(cfg: S.Settings, now: datetime | None = None) -> float:
     """Seconds until the next pass: the interval, give or take the jitter.
 
     While resting the interval is quiet_every_minutes, cut short so the first
-    pass after the pause is on time rather than up to that long late.
+    pass after the window is on time rather than up to that long late.
     """
     now = now or datetime.now()
     if cfg.quiet_every_minutes > cfg.every_minutes and resting(cfg, now):
@@ -322,6 +326,8 @@ def build(settings: S.Settings, parts: list[dict], *, polled: bool, session: str
                         "jitter_minutes": settings.jitter_minutes,
                         "quiet_start": settings.quiet_start,
                         "quiet_end": settings.quiet_end,
+                        "quiet_every_minutes": settings.quiet_every_minutes,
+                        "quiet_reads": settings.quiet_reads,
                         "details_per_cycle": settings.details_per_cycle,
                         "scrolls": settings.scrolls,
                         "takeover_after_minutes": settings.takeover_after_minutes},
@@ -398,7 +404,7 @@ def once(settings: S.Settings, *, github: GitHub | None = None,
         # Still said, so the bot keeps the alarm and a standby covers.
         session = asked
         note = f"held after {HELD_BECAUSE.get(asked, asked)}: run collector/run login"
-    elif resting(settings, now) and not force:
+    elif resting(settings, now) and not settings.quiet_reads and not force:
         note = "overnight pause"
     elif int(memory.get("send_failures") or 0) >= SEND_TRIES and not force:
         note = "waiting for GitHub to accept a batch"

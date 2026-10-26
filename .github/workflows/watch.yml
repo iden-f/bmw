@@ -101,16 +101,23 @@ jobs:
       # The cadence the schedule above keeps, written into the vault's
       # config so the bot's stand-down floor, coverage tile and watchdog
       # agree with it. Set as repository variables to change them without a
-      # commit; the fallbacks are this repository's own. Overnight
-      # (health.overnight) stays as the config has it.
+      # commit; the fallbacks are this repository's own: a check every 15
+      # minutes by day and every hour from 23:00 to 08:00 Pacific
+      # (health.overnight, which only ever slows the watch down).
       - name: Keep the check interval in step with the schedule
         if: ${{ !steps.guard.outputs.stop }}
         env:
-          INTERVAL: ${{ vars.CHECK_INTERVAL_MINUTES || '10' }}
-          FLOOR:    ${{ vars.CHECK_FLOOR_MINUTES || '7' }}
+          INTERVAL:       ${{ vars.CHECK_INTERVAL_MINUTES || '15' }}
+          FLOOR:          ${{ vars.CHECK_FLOOR_MINUTES || '11' }}
+          NIGHT_START:    ${{ vars.CHECK_NIGHT_START || '23:00' }}
+          NIGHT_END:      ${{ vars.CHECK_NIGHT_END || '08:00' }}
+          NIGHT_INTERVAL: ${{ vars.CHECK_NIGHT_INTERVAL_MINUTES || '60' }}
         run: |
           python -m autotrader --no-colour set health.expected_interval_minutes "$INTERVAL" > /dev/null 2>&1
           python -m autotrader --no-colour set health.min_interval_minutes "$FLOOR" > /dev/null 2>&1
+          python -m autotrader --no-colour set health.overnight.start "$NIGHT_START" > /dev/null 2>&1
+          python -m autotrader --no-colour set health.overnight.end "$NIGHT_END" > /dev/null 2>&1
+          python -m autotrader --no-colour set health.overnight.interval_minutes "$NIGHT_INTERVAL" > /dev/null 2>&1
 
       - name: Check
         id: bot

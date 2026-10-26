@@ -531,7 +531,7 @@ def test_quiet_hours_slow_the_cadence(settings):
     day = datetime(2026, 10, 26, 20, 0, tzinfo=timezone.utc)
     assert in_quiet_hours(settings, night) and not in_quiet_hours(settings, day)
     service = Service(settings, Database(":memory:"), config_provider=lambda: None)
-    assert service.interval_minutes("autotrader", night) == 120
+    assert service.interval_minutes("autotrader", night) == 60
     assert service.interval_minutes("autotrader", day) == 10
 
 

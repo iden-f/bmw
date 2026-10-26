@@ -275,15 +275,16 @@ the bot stays the only writer of the watch's data.
    what it read is taken in, its error is kept and shown on the Status tab,
    and no car is taken for gone on its word.
 5. **Health.** Every batch says whether it read, and whether Facebook still
-   lets the collector in. A collector not heard from for two hours, or heard
-   but not reading for nine (the overnight pause alone is six), raises the
-   watchdog; a signed-out session, once for each computer, and a standby
+   lets the collector in. A collector not heard from for an hour, or heard
+   but not reading for three (it passes every few minutes, and overnight
+   every ten), raises the watchdog; a signed-out session, once for each computer, and a standby
    taking over, are each said once. Only a batch that opened the browser
    says anything about the session.
 
-Overnight, and on a standby while the primary is heard from, the collector
-still sends an empty batch every half hour. That keeps the watchdog quiet and
-serves as the check's outside timer. A standby reads when the primary has
+Overnight the collector slows to a pass every ten minutes but still reads,
+unless `quiet_reads` is off, in which case it only checks in. On a standby
+while the primary is heard from, it sends an empty batch each pass. Either
+keeps the watchdog quiet and serves as the check's outside timer. A standby reads when the primary has
 gone quiet or says Facebook will not let it in, and only while the bot is
 taking in the standby's own batches: when the bot takes in nothing, the
 primary's silence says nothing about the primary.
@@ -385,7 +386,7 @@ Besides the alerts about cars, these are all of them.
 | **AutoTrader: your last N days** | The weekly digest. | Read it, or not. |
 | **Marketplace needs you to sign in again** | Facebook signed the collector out, asked the account to confirm who it is, or refused its searches. Marketplace is not being read; AutoTrader is. | `collector/run login` on the Mac named in the message. |
 | **Marketplace is being watched again** | The collector is signed in and reading after the message above. | Nothing. |
-| **Marketplace collector has gone quiet** | Nothing from the collector for two hours, though it checks in every half hour even overnight. | `collector/run status` on that Mac: asleep, off, offline or an expired token. |
+| **Marketplace collector has gone quiet** | Nothing from the collector for an hour, though it passes every few minutes, overnight included. | `collector/run status` on that Mac: asleep, off, offline or an expired token. |
 | **Marketplace is not being read** | The collector checks in, but no search has read for nine hours. It quotes the error. | `collector/run once --now` on the Mac, then its log. |
 | **Marketplace: the standby computer has taken over** | The primary collector went quiet, or Facebook stopped letting it in, and the standby is reading instead. Nothing is missed. | Look at the primary when convenient. |
 
