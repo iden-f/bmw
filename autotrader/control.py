@@ -30,7 +30,25 @@ ACTIONS = ("set-rule", "add-search", "remove-search", "mute-listing",
            "unmute-listing", "shortlist", "unshortlist", "dismiss",
            # undismiss is the only undo for dismiss: unshortlist leaves a
            # dismissal in place.
-           "undismiss", "set-channel", "note", "set-marketplace")
+           "undismiss", "set-channel", "note", "set-marketplace",
+           # Whether a search alerts or only archives; a single listing
+           # followed by its link; and the handful of plain settings the
+           # Settings tab offers.
+           "set-notify", "pin-listing", "unpin-listing", "set-option")
+
+# Settings the dashboard may change by name, with their type and bounds.
+# Anything else is refused by name. Kept small on purpose: a setting here is
+# one a phone should be able to change, not one that needs the README.
+OPTIONS: dict[str, tuple[type, float, float]] = {
+    "dashboard.photos_per_car": (int, 1, 24),
+    "dashboard.photo_budget_mb": (int, 10, 5000),
+    "dashboard.max_listings": (int, 100, 10000),
+    "notifications.digest": (bool, 0, 1),
+    "notifications.quiet_hours.enabled": (bool, 0, 1),
+    "notifications.price_drop_alert_abs": (int, 0, 1_000_000),
+    "archive.keep_days": (int, 0, 36500),
+    "archive.keep_max_listings": (int, 0, 1_000_000),
+}
 
 # Rules the dashboard may change, and the type of each value. Anything else is
 # refused by name rather than ignored: a silent no-op hides a failed change.
@@ -246,6 +264,8 @@ def _find_search(cfg, wanted: str):
 
 @dataclass
 class _Batch:
+    # Listings this change pins, so one is not pinned twice in it.
+    pinned: set[str] = field(default_factory=set)
     """What the instructions planned so far will have done.
 
     Each instruction is checked against the config as it is, and these, so
@@ -497,6 +517,90 @@ def _plan(cfg, state, item: dict[str, Any], batch: _Batch | None = None):
 
     if action == "set-marketplace":
         return _plan_marketplace(cfg, item, batch)
+
+    if action == "set-notify":
+        from .config import NOTIFY_MODES
+        search = _find_search(cfg, item.get("search"))
+        if not search:
+            raise Rejected(f"there is no search called {item.get('search')!r}.")
+        if search.id in batch.removed:
+            raise Rejected(f"{search.name!r} is removed by this same change.")
+        mode = str(item.get("mode") or "").strip().lower()
+        if mode not in NOTIFY_MODES:
+            raise Rejected(f"mode has to be one of {', '.join(NOTIFY_MODES)}; "
+                           f"got {mode[:20] or 'nothing'}.")
+
+        def do():
+            for row in cfg.data.setdefault("searches", []):
+                if row.get("id") == search.id:
+                    if mode == "alert":
+                        row.pop("notify", None)
+                    else:
+                        row["notify"] = mode
+            return (f"{search.name!r} now alerts you" if mode == "alert"
+                    else f"{search.name!r} is archive only: recorded, never announced")
+        return do
+
+    if action == "pin-listing":
+        from .config import NOTIFY_MODES, Pinned
+        url = str(item.get("url") or "").strip()
+        if not url.lower().startswith("https://") or len(url) > 2000:
+            raise Rejected("a listing link has to be an https:// address; got "
+                           + (url[:80] or "nothing") + ".")
+        mode = str(item.get("notify") or "archive").strip().lower()
+        if mode not in NOTIFY_MODES:
+            raise Rejected(f"notify has to be one of {', '.join(NOTIFY_MODES)}.")
+        pin = Pinned.from_dict({"url": url, "name": str(item.get("name") or "")[:80],
+                                "notify": mode})
+        if pin is None:
+            raise Rejected("that is not a listing link I can follow: paste the "
+                           "address of one car's page on autotrader.ca or "
+                           "Facebook Marketplace.")
+        if any(p.id == pin.id for p in cfg.pinned):
+            raise Rejected("that listing is already saved.")
+        if pin.id in batch.pinned:
+            raise Rejected("that listing is saved twice in this change.")
+        batch.pinned.add(pin.id)
+
+        def do():
+            saved = cfg.pin_listing(url, pin.name, mode)
+            return (f"saved the listing {saved.name or saved.id!r}"
+                    + (" - alerts on" if mode == "alert" else " - archive only"))
+        return do
+
+    if action == "unpin-listing":
+        listing_id = str(item.get("listing") or "").strip()
+        if not LISTING_ID.match(listing_id):
+            raise Rejected(f"{listing_id[:40]!r} is not a listing id.")
+        if not any(p.id == listing_id for p in cfg.pinned):
+            raise Rejected(f"no saved listing has the id {listing_id[:12]}…")
+
+        def do():
+            cfg.unpin_listing(listing_id)
+            return (f"stopped following the listing {listing_id[:12]}… - its "
+                    f"record is kept")
+        return do
+
+    if action == "set-option":
+        name = str(item.get("option") or "")
+        if name not in OPTIONS:
+            raise Rejected(f"{name or '(none)'} is not a setting I can change from "
+                           f"the dashboard. I can change: {', '.join(sorted(OPTIONS))}.")
+        kind, low, high = OPTIONS[name]
+        value = item.get("value")
+        if kind is bool:
+            if not isinstance(value, bool):
+                raise Rejected(f"{name} has to be true or false.")
+        else:
+            value = _number(value, name, kind)
+            if not low <= value <= high:
+                raise Rejected(f"{name} has to be between {low:g} and {high:g}.")
+
+        def do():
+            cfg.set(name, value)
+            return f"{name} = {value!r}"
+        do.__doc__ = name
+        return do
 
     raise Rejected("I do not know how to do that.")   # unreachable via parse()
 

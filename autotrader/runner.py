@@ -20,16 +20,17 @@ from typing import Any
 
 from . import clock, words
 from . import archive as archive_mod
+from . import pinned as pinned_mod
 from . import thumbs as thumbs_mod
 from . import dashboard, diagnose, filters, invariants, notifiers
 from . import provision, render, shape, validate
-from .config import CHANNEL_SECRETS, Config, secrets_present
+from .config import CHANNEL_SECRETS, PINNED_SEARCH_ID, Config, secrets_present
 from .enrich import detail_from_html, enrich, page_identifies
 from .http import BlockedError, BudgetExhausted, FetchError, Fetcher, looks_blocked
 from .listing import Listing, on_marketplace
 from .parser import looks_like_no_results, parse_search_page
 from .state import (BASELINE_REASON, HIDDEN_REASON_PREFIX, RULES_CHANGED_REASON,
-                    Change, State, utcnow)
+                    Change, State, archive_reason, utcnow)
 from .urls import listing_id_from_url, normalise_search_url, page_url
 
 log = logging.getLogger(__name__)
@@ -83,6 +84,11 @@ class RunReport:
     budget: dict[str, Any] = field(default_factory=dict)
     # Changes held back because you said you did not want them.
     your_call: int = 0
+    # Changes recorded without an alert because their search only archives.
+    archived: int = 0
+    # Pinned listings: pages read this run, and records begun.
+    pinned_checked: int = 0
+    pinned_recorded: int = 0
     # Searches that read the site fine and kept nothing after your rules.
     shut_out: list[str] = field(default_factory=list)
     # Changes on cars your rules hide: real, deliberately unannounced, counted.
@@ -141,6 +147,9 @@ class RunReport:
             "warnings": self.warnings[:10], "strategies": self.strategies,
             "quiet": self.quiet, "dry_run": self.dry_run,
             "photos": self.photos, "your_call": self.your_call,
+            "archived": self.archived,
+            "pinned_checked": self.pinned_checked,
+            "pinned_recorded": self.pinned_recorded,
             "trigger": self.trigger,
             # This run's minutes. Not keyed "charged": the ledger uses that
             # word for whether minutes draw on the allowance.
@@ -175,6 +184,10 @@ class RunReport:
                 bits.append(many(count, one, more))
         if self.baselines:
             bits.append(f"{len(self.baselines)} baselined")
+        if self.archived:
+            bits.append(f"{self.archived} archived quietly")
+        if self.pinned_checked:
+            bits.append(f"{many(self.pinned_checked, 'saved listing')} read")
         for kind, count in sorted(self.hidden_events.items()):
             bits.append(f"{count} {kind.replace('_', ' ')} on "
                         + ("a hidden car" if count == 1 else "hidden cars"))
@@ -588,6 +601,18 @@ def _take(kept: list[Listing], unpriced: list[Listing], *, state: State,
     nothing else.
     """
     on_new = on_new or (lambda listing: None)
+    hold = state.hold_for_ride_along
+    if rules.get("archive_only"):
+        # Everything is recorded and nothing is sent: each change is kept
+        # quiet with what it was, so the page can still show it. The counters
+        # above still count it, since it happened.
+        def queue(change: Change, _silence=silence) -> None:  # noqa: F811
+            report.archived += 1
+            _silence(change.listing.id, archive_reason(change.describe()))
+
+        def hold(listing_id: str, reason: str) -> None:  # noqa: F811
+            report.archived += 1
+            silence(listing_id, archive_reason("small price move"))
     for listing in kept:
         # A car the rules hid and now admit is news, though it has been
         # stored all along. Otherwise it would change state silently and
@@ -651,7 +676,7 @@ def _take(kept: list[Listing], unpriced: list[Listing], *, state: State,
                 queue(Change(Change.PRICE_DROP, listing,
                              old_price=was, new_price=now))
             elif rules.get("small_drops_ride_along", True):
-                state.hold_for_ride_along(listing.id, (
+                hold(listing.id, (
                     f"${was - now:,} off since you last heard, under the "
                     f"${alert_abs:,} that sends an alert on its own - it "
                     f"goes out with the next new car"))
@@ -806,14 +831,17 @@ def _hide(rejected: dict[str, tuple[Listing, filters.Verdict]], owned: set[str],
         silence(lid, f"{HIDDEN_REASON_PREFIX}{why}")
 
 
-def _drop_what_is_no_longer_owed(state: State, report: "RunReport") -> set[str]:
+def _drop_what_is_no_longer_owed(state: State, report: "RunReport",
+                                 archive_ids: set[str] | frozenset[str] = frozenset()
+                                 ) -> set[str]:
     """Cancel held alerts and small drops that should no longer go out.
 
     A mute or a dismiss from the dashboard says no more alerts about a car,
     and that includes one already waiting on quiet hours, an outage or the
     digest cap. So does a car that went while its alert waited: "new
     listing" about a car that has gone is not news. Each is recorded quiet,
-    with why, rather than just dropped.
+    with why, rather than just dropped. So does a search switched to archive
+    only (``archive_ids``) while an alert from it waited.
     """
     dropped: set[str] = set()
     for lid, entry in state.listings.items():
@@ -824,6 +852,12 @@ def _drop_what_is_no_longer_owed(state: State, report: "RunReport") -> set[str]:
         if yours.get("muted") or yours.get("dismissed"):
             why = f"you {'muted' if yours.get('muted') else 'dismissed'} this car"
             report.your_call += 1
+        elif str(entry.get("search_id") or "") in archive_ids or (
+                entry.get("search_id") == PINNED_SEARCH_ID
+                and entry.get("pinned_notify", "archive") == "archive"):
+            why = archive_reason("its search was switched to archive only "
+                                 "while this alert waited")
+            report.archived += 1
         elif str(entry.get("status") or "") != "active" and owed != Change.REMOVED:
             why = "it was gone before the alert could be sent"
         else:
@@ -842,7 +876,7 @@ def _deliver(cfg: Config, state: State, report: "RunReport",
     """Send what is owed, or hold it, and return what was in the message."""
     settings = cfg.get("notifications", {}) or {}
     if not dry_run:
-        dropped = _drop_what_is_no_longer_owed(state, report)
+        dropped = _drop_what_is_no_longer_owed(state, report, cfg.archive_only_ids)
         changes = [c for c in changes if c.listing.id not in dropped]
     # Anything an earlier run detected but could not deliver (quiet hours,
     # a channel outage) is picked back up here rather than being lost.
@@ -1603,11 +1637,19 @@ def run(cfg: Config | None = None, state: State | None = None, *,
                             report.hidden_events.get(Change.REMOVED, 0) + 1)
                         continue
                     report.removed += 1
-                    if search_notify.get("removed", False):
+                    if search.archive_only:
+                        report.archived += 1
+                    elif search_notify.get("removed", False):
                         queue(change)
             # Otherwise nothing happens at all - not even a miss. The grace
             # period exists to absorb a car dropping off one page, not to be
             # spent on a page we could not read.
+
+        # ---- listings you follow by their link ----------------------
+        # After the searches, so a car one of them found stays theirs and is
+        # only marked as pinned here.
+        pinned_mod.check(cfg, state, fetcher, report, queue=queue, silence=silence,
+                         dry_run=dry_run)
 
         # ---- notify -------------------------------------------------
         changes = _deliver(cfg, state, report, changes, env=env, notify=notify,
@@ -1674,14 +1716,23 @@ def run(cfg: Config | None = None, state: State | None = None, *,
 
         # ---- housekeeping -------------------------------------------
         if not dry_run:
-            forgotten = state.forget_searches({s.id for s in cfg.searches})
+            forgotten = state.forget_searches(
+                {s.id for s in cfg.searches} | {PINNED_SEARCH_ID})
             if forgotten:
                 report.warnings.append(
                     f"forgot {len(forgotten)} search(es) no longer configured")
             pruned = archive_mod.prune(archive_conf)
             if pruned:
                 report.warnings.append(f"pruned {_many(len(pruned), 'old archive folder')}")
-            state.prune()
+            # Nothing is pruned unless the owner set a limit, and never a
+            # car on an archive-only search or one followed by its link.
+            archive_ids = cfg.archive_only_ids
+            protected = {lid for lid, e in state.listings.items()
+                         if str(e.get("search_id") or "") in archive_ids
+                         or e.get("pinned")}
+            state.prune(keep_days=int(archive_conf.get("keep_days") or 0),
+                        keep_max=int(archive_conf.get("keep_max_listings") or 0),
+                        protect=protected)
 
             # Our own copy of the photos, so the page works offline. Only for
             # live cars: a car's copies are dropped once it leaves or a rule
@@ -1691,7 +1742,8 @@ def run(cfg: Config | None = None, state: State | None = None, *,
             # check is the job.
             if cfg.get("dashboard.photos", True):
                 try:
-                    shots = thumbs_mod.sync(state.listings.values(), fetcher)
+                    shots = thumbs_mod.sync(state.listings.values(), fetcher,
+                                            **thumbs_mod.settings(cfg))
                     report.photos = {
                         "kept": shots.kept, "fetched": shots.fetched,
                         "failed": shots.failed, "pruned": shots.pruned,

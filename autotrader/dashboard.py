@@ -19,7 +19,7 @@ from . import clock
 from .archive import size_report
 from . import geo, insight, qr, thumbs
 from . import budget, control
-from .config import CHANNEL_SECRETS, Config
+from .config import CHANNEL_SECRETS, PINNED_SEARCH_ID, PINNED_SEARCH_NAME, Config
 from .listing import name_of, on_marketplace
 from .parser import STRATEGIES
 from .state import State
@@ -53,6 +53,10 @@ LISTING_FIELDS = (
     "you",
     # Marketplace says itself when a car sells or has a sale pending.
     "gone_reason", "sale_pending",
+    # The archive: what the seller changed about the car, a listing followed
+    # by its link and how it alerts, and a Marketplace pin waiting on the Mac.
+    "revisions", "pinned", "pinned_notify", "pinned_checked_at", "awaiting_mac",
+    "vin",
 )
 
 
@@ -138,6 +142,7 @@ def build_payload(cfg: Config, state: State, env: dict[str, str] | None = None
             reference_names[search.id] = near
 
     photo_index = thumbs._load_index()
+    archive_ids = cfg.archive_only_ids
 
     listings: list[dict[str, Any]] = []
     for entry in state.listings.values():
@@ -149,7 +154,9 @@ def build_payload(cfg: Config, state: State, env: dict[str, str] | None = None
         item["title"] = name_of(entry)
         item["filtered"] = bool(entry.get("filtered"))
         item["unpriced"] = entry.get("price") is None
-        item["price_history"] = (entry.get("price_history") or [])[-20:]
+        # The whole history: the archive's point. A hidden car's is cut to
+        # its ends below.
+        item["price_history"] = list(entry.get("price_history") or [])
         item["is_new"] = False
         item["site"] = "marketplace" if on_marketplace(entry.get("id")) else "autotrader"
         if item["filtered"]:
@@ -175,6 +182,14 @@ def build_payload(cfg: Config, state: State, env: dict[str, str] | None = None
             item["thumb"] = kept[0]
             # Only locally held photos, so the gallery never hotlinks the CDN.
             item["thumbs"] = kept
+        # How many of the seller's photos are held here, so the page can say
+        # "8 of 12 saved" rather than imply a complete gallery.
+        item["photos_saved"] = len(kept)
+        # Whether its search only archives: the page files it accordingly.
+        item["archive_only"] = (
+            entry.get("search_id") in archive_ids
+            or (entry.get("search_id") == PINNED_SEARCH_ID
+                and entry.get("pinned_notify", "archive") == "archive"))
         item["per_1000km"] = insight.per_1000km(entry.get("price"),
                                                 entry.get("mileage_km"))
         # When the ratio is withheld, the reason why; an unknown mileage is
@@ -232,6 +247,10 @@ def build_payload(cfg: Config, state: State, env: dict[str, str] | None = None
             "enabled": search.enabled, "notes": search.notes,
             # Whether the Marketplace collector reads it too.
             "marketplace": search.marketplace,
+            # "alert" or "archive": whether it announces what it finds.
+            "notify": search.notify,
+            # When it first read anything: "tracking since".
+            "since": health.get("first_ok"),
             "summary": summary.to_dict(),
             "health": {
                 "last_ok": health.get("last_ok"),
@@ -359,6 +378,8 @@ def build_payload(cfg: Config, state: State, env: dict[str, str] | None = None
         "stats": state.stats(),
         "listings": listings,
         "searches": searches,
+        # Listings followed by their link, with what state knows of each.
+        "pinned": _pinned(cfg, state),
         "channels": channels,
         "channel_catalog": {k: {"label": v["label"], "free": v["free"],
                                 "required": v["required"], "help": v["help"]}
@@ -407,8 +428,33 @@ def build_payload(cfg: Config, state: State, env: dict[str, str] | None = None
             "marketplace": {name: [low, high] for name, (_, low, high)
                             in control.MARKETPLACE_SETTINGS.items()},
             "aliases": {"most": control.MAX_ALIASES, "pattern": control._ALIAS.pattern},
+            "options": {name: [kind.__name__, low, high] for name, (kind, low, high)
+                        in control.OPTIONS.items()},
         },
     }
+
+
+def _pinned(cfg: Config, state: State) -> list[dict[str, Any]]:
+    """The saved listings, each with what is known about it so far."""
+    out = []
+    for pin in cfg.pinned:
+        entry = state.listings.get(pin.id) or {}
+        out.append({
+            "id": pin.id, "url": pin.url, "name": pin.name, "notify": pin.notify,
+            "added_at": pin.added_at, "site": pin.site,
+            "search_name": PINNED_SEARCH_NAME,
+            # Whether a search found it too (then that search owns it).
+            "found_by": (entry.get("search_name")
+                         if entry.get("search_id") not in (None, "", PINNED_SEARCH_ID)
+                         else None),
+            "status": entry.get("status"),
+            "checked_at": entry.get("pinned_checked_at"),
+            "awaiting_mac": bool(entry.get("awaiting_mac")),
+            "known": bool(entry) and not entry.get("awaiting_mac")
+                     and bool(entry.get("price") or entry.get("enriched")
+                              or entry.get("mileage_km")),
+        })
+    return out
 
 
 # Keys whose *value* would be a credential. Key names are matched, not the

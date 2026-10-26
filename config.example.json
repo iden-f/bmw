@@ -1,11 +1,12 @@
 {
-  "version": 2,
+  "version": 3,
   "searches": [
     {
       "id": "example-civic",
       "name": "Honda Civic, 2017 onwards",
       "url": "https://www.autotrader.ca/cars/honda/civic/reg_on/cit_toronto/?modelyearfrom=2017",
       "enabled": true,
+      "notify": "alert",
       "notes": "An example: replace it with your own. Run the search you want on autotrader.ca and paste the address bar. The 2026 platform drops the model, the year range and the radius out of a pasted link, so set those again under `filters` and the bot will enforce them itself.",
       "filters": {
         "models": [
@@ -101,9 +102,11 @@
   "archive": {
     "mode": "metadata",
     "images": 0,
-    "keep_last": 400,
-    "keep_days": 730
+    "keep_last": 0,
+    "keep_days": 0,
+    "keep_max_listings": 0
   },
+  "pinned": [],
   "budget": {
     "enabled": true,
     "included_minutes": 3000,
@@ -138,6 +141,8 @@
   },
   "dashboard": {
     "enabled": true,
-    "max_listings": 500
+    "max_listings": 2000,
+    "photos_per_car": 12,
+    "photo_budget_mb": 600
   }
 }
