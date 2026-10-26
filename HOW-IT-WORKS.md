@@ -343,6 +343,16 @@ manifest and icons. No build step, no framework.
   as when served by `python -m autotrader ui`.
 - **Updates.** `sw.js` carries a build stamp written on every publish, so a
   changed page installs a new worker and an installed app offers a reload.
+- **Four tabs.** `GROUPS` in `app.js` maps each tab to its views (Discover:
+  feed, listings; Watches: searches; Archive: archive, market; Settings:
+  status). A tab lands on its first view; the others sit behind a switch at
+  the top of the view. Every view keeps its own `#/<view>` address.
+- **From a phone.** A change normally opens GitHub's editor with the sealed
+  file filled in. The owner may instead save a fine-grained GitHub token
+  (Contents: read and write on this one repository) on a device: it is kept
+  in the browser sealed with the vault key, goes when the page is locked, and
+  the same sealed file is then put straight into `control/` through GitHub's
+  contents API. If GitHub refuses, the editor link is offered in its place.
 - **Words.** One word per idea, in the page and in the alerts alike. A
   **check** is one run. A **listing** is one car. **Hidden** means a rule of
   yours excludes it, and it is still kept, counted and explained.

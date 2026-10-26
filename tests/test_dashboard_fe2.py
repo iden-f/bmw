@@ -389,6 +389,8 @@ class TestTheChips:
             self, browser, site, payload):
         ctx, page, _, _ = _open(browser, site, payload, "#/feed")
         try:
+            page.click('[data-view-link="archive"]')
+            page.wait_for_timeout(150)
             page.focus('[data-view-link="market"]')
             page.keyboard.press("?")
             page.wait_for_timeout(100)
@@ -554,6 +556,7 @@ class TestARefreshWaitsForAnEdit:
     def test_a_rule_being_typed_survives_new_data(self, browser, site, payload):
         ctx, page, _, served = _open(browser, site, payload, "#/searches")
         try:
+            before = int(page.text_content('[data-view-link="archive"] .tab__n'))
             _type_into(page, 'input[id^="mx-"]', "45000")
             page.fill("#paste", "https://www.autotrader.ca/cars/honda/civic/")
             served.publish(_newer(payload))
@@ -566,7 +569,7 @@ class TestARefreshWaitsForAnEdit:
             assert page.input_value("#paste") == "https://www.autotrader.ca/cars/honda/civic/"
             assert _asks(page, "Apply this to") == 1
             # The tab counts took the new car at once.
-            assert page.text_content('[data-view-link="listings"] .tab__n') == "5"
+            assert int(page.text_content('[data-view-link="archive"] .tab__n')) == before + 1
         finally:
             ctx.close()
 

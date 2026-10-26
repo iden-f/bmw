@@ -95,7 +95,7 @@ class TestAGoneCarsPhoto:
             _chip(page, "Gone").click()
             page.wait_for_selector(".card--gone .shot__fallback")
             assert _said(page.text_content(".card--gone .shot__fallback")) \
-                == "photo not kept after it left"
+                == "photo not copied before it left"
             assert not errors, errors
         finally:
             ctx.close()
@@ -106,7 +106,7 @@ class TestAGoneCarsPhoto:
             page.evaluate("openSheet('6')")
             page.wait_for_selector("#sheet[data-open='1']")
             said = _said(page.text_content("#sheet-body .shot__fallback"))
-            assert said.endswith("photos not kept after it left"), said
+            assert said.endswith("photos were not copied before it left"), said
             assert "no photo published" not in said
             assert not errors, errors
         finally:
