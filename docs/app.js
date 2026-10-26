@@ -1504,7 +1504,7 @@ function renderListings() {
        that quietly omits.</p>`;
   host.appendChild(head);
 
-  const bar = el('div', 'bar');
+  const bar = el('div', 'bar bar--filters');
   bar.innerHTML = `
     <label class="field">
       <span class="sr">Filter listings</span>
@@ -2537,17 +2537,25 @@ function download(name, text) {
 function renderSearches() {
   const host = document.querySelector('[data-view="searches"]');
   host.innerHTML = '';
-  const head = el('div', 'view__head');
-  head.innerHTML = `<h1 id="searches-h">Watches</h1>
+  const head = el('div', 'view__head view__head--row');
+  head.innerHTML = `<div><h1 id="searches-h">Watches</h1>
     <p>What the bot is looking at, and the rules applied to what it finds. Editing a
        rule shows what it would keep before you commit to it. A search set to
-       <b>archive only</b> keeps everything it finds and never sends an alert.</p>`;
+       <b>archive only</b> keeps everything it finds and never sends an alert.</p></div>
+    <button type="button" class="btn" id="add-search-go">Add a search</button>`;
   host.appendChild(head);
+  // The paste box is at the foot, under the searches; this takes you there.
+  head.querySelector('#add-search-go').addEventListener('click', () => {
+    const box = document.getElementById('paste');
+    if (!box) return;
+    box.scrollIntoView({ block: 'center', behavior: 'smooth' });
+    box.focus({ preventScroll: true });
+  });
 
   host.appendChild(recentChanges());
 
   for (const s of (app.data.searches || [])) {
-    const sec = el('section', 'section');
+    const sec = el('section', 'section section--card');
     const h = s.health || {};
     const bad = h.consecutive_failures > 0;
     const shutOut = h.shut_out;
@@ -2991,7 +2999,7 @@ function readSearchLink(raw) {
    page is static and cannot write to the repository, so it reads the link
    back and offers the change as a GitHub link (see "the ask" below). */
 function pasteALink() {
-  const sec = el('section', 'section');
+  const sec = el('section', 'section section--card');
   sec.innerHTML = `<div class="section__head"><h2>Add a search</h2></div>
     <p class="note" style="margin-top:0">Set up the search you want on autotrader.ca, then
        paste the address of the results page here.</p>
@@ -3111,7 +3119,7 @@ function marketplaceSection(m) {
     <span class="count num">${num(m.cars ?? 0)} watched</span></div>`;
   const stats = el('dl', 'stats');
   const timing = collectorTiming(m);
-  const session = timing.says;
+  const session = timing?.says || '';
   // The latest thing that went wrong: a pass that failed before it could
   // send, a search that did not read, or one read only in part. Only within
   // the last day.
@@ -3829,22 +3837,24 @@ function optionsPanel() {
   // Only the settings the bot says it takes: an older bot refuses the rest.
   const boxes = OPTION_BOXES.filter(([k]) => bounds[k]);
   const sec = el('section', 'section');
+  // One row per setting: its name and what it does on the left, the control
+  // on the right. The explanation sits with the box it explains, rather than
+  // in a glossary under a grid of boxes that repeated every name.
   sec.innerHTML = `<div class="section__head"><h2>Alerts and the archive</h2></div>
-    <div class="bar">${boxes.map(([k, label, type]) => {
+    <ul class="opts">${boxes.map(([k, label, type, why]) => {
       const id = 'opt-' + k.replace(/\./g, '-');
       const now = getPath(conf, k);
-      return type === 'bool' ? `
-      <label class="labelled"><span>${label}</span>
+      const control = type === 'bool' ? `
         <select id="${id}" data-option="${k}">
           <option value="false"${now ? '' : ' selected'}>Off</option>
           <option value="true"${now ? ' selected' : ''}>On</option>
-        </select></label>` : `
-      <label class="labelled"><span>${label}</span>
+        </select>` : `
         <span class="field"><input type="number" id="${id}" data-option="${k}" inputmode="numeric"
-          ${wholeNumber(bounds[k].slice(1))} value="${esc(now ?? '')}"></span></label>`;
-    }).join('')}</div>
-    <dl class="kv">${boxes.map(([, label, , why]) =>
-      `<dt>${label}</dt><dd><span class="note" style="margin:0">${why}</span></dd>`).join('')}</dl>`;
+          ${wholeNumber(bounds[k].slice(1))} value="${esc(now ?? '')}"></span>`;
+      return `<li class="opt">
+        <label class="opt__text" for="${id}"><b>${label}</b><span>${why}</span></label>
+        <div class="opt__ctl">${control}</div></li>`;
+    }).join('')}</ul>`;
   if (!boxes.length) {
     sec.appendChild(el('p', 'note', 'The bot publishing this page does not take settings from it yet.'));
     return sec;
@@ -4188,6 +4198,9 @@ let sheetUp = false;
 // has slid out. Each cancels the other, so a quick close and reopen cannot
 // leave the sheet hidden with the page locked behind it.
 let sheetFrame = 0, sheetTimer = 0;
+// Whether opening the car added a history entry, so that closing it takes
+// that entry back rather than leaving a second copy of the view behind.
+let sheetPushed = false;
 
 function openSheet(id, title) {
   const l = byId(id);
@@ -4216,8 +4229,16 @@ function openSheet(id, title) {
   document.body.style.overflow = 'hidden';
   document.getElementById('sheet-close').focus();
   // Unless this device is kept unlocked, a car's id stays out of the
-  // browser's history: nothing about your cars may outlive the tab.
-  if (l && store.persist) history.replaceState(null, '', `#/listing/${encodeURIComponent(l.id)}`);
+  // browser's history: nothing about your cars may outlive the tab. Kept
+  // unlocked, the car is a history entry of its own, so Back (the button, or
+  // a phone's swipe) closes the car and lands on the view it was opened
+  // from, rather than leaving the page. A car opened from a link, or in
+  // place of another, replaces the entry it is already in.
+  if (l && store.persist) {
+    const to = `#/listing/${encodeURIComponent(l.id)}`;
+    if (location.hash.startsWith('#/listing/')) history.replaceState(null, '', to);
+    else { history.pushState(null, '', to); sheetPushed = true; }
+  }
 }
 
 function closeSheet() {
@@ -4231,7 +4252,13 @@ function closeSheet() {
   clearTimeout(sheetTimer);
   if (matchMedia('(prefers-reduced-motion: reduce)').matches) done();
   else sheetTimer = setTimeout(done, 180);
-  history.replaceState(null, '', `#/${app.view}`);
+  // The entry openSheet added goes with the car. Back itself has already
+  // taken it (the address is the view's again), and then there is nothing
+  // to take back.
+  const pushed = sheetPushed;
+  sheetPushed = false;
+  if (pushed && location.hash.startsWith('#/listing/')) history.back();
+  else history.replaceState(null, '', `#/${app.view}`);
   // What changed while the sheet was open - new data, or a mark you set - is
   // drawn now, and focus goes back to the same car in the new drawing.
   const was = lastFocus;
@@ -4819,6 +4846,17 @@ async function start() {
   window.addEventListener('hashchange', route);
   document.getElementById('sheet-close').addEventListener('click', closeSheet);
   document.getElementById('scrim').addEventListener('click', closeSheet);
+  // A tap on the pill looks for new data now, rather than at the next tick:
+  // an installed app has no reload button, and a check may have just landed.
+  const pill = document.getElementById('trust');
+  pill.dataset.canRefresh = '1';
+  pill.title = 'Tap to look for new data now';
+  pill.addEventListener('click', async () => {
+    if (pill.dataset.busy) return;
+    pill.dataset.busy = '1';
+    lastFetchAt = 0;
+    try { await refreshData(); } finally { delete pill.dataset.busy; }
+  });
   document.addEventListener('keydown', e => {
     // Four shortcuts, deliberately few: a view, find a car, the list, and
     // Escape. Never while typing: a "/" inside the search box is a slash.
@@ -4871,11 +4909,15 @@ async function start() {
   sheet.addEventListener('touchmove', e => {
     if (startY === null) return;
     const dy = e.touches[0].clientY - startY;
-    if (dy > 0 && innerWidth < 700) sheet.style.transform = `translateY(${dy}px)`;
+    if (dy > 0 && innerWidth < 700) {
+      sheet.style.transition = 'none';
+      sheet.style.transform = `translateY(${dy}px)`;
+    }
   }, { passive: true });
   sheet.addEventListener('touchend', e => {
     if (startY === null) return;
     const dy = (e.changedTouches[0].clientY - startY);
+    sheet.style.transition = '';
     sheet.style.transform = '';
     startY = null;
     if (dy > 110 && innerWidth < 700) closeSheet();

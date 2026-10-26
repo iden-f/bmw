@@ -435,9 +435,24 @@ class TestTheSheet:
             page.wait_for_selector("#sheet[data-open='1']")
             page.go_back()
             page.wait_for_timeout(400)
-            assert page.evaluate("app.view") == "feed"
+            # Back closes the car and lands on the view it was opened over,
+            # not on the view before that: the car is a history entry of its
+            # own. (It used to replace the view's entry, so Back left
+            # Listings as well as the car.)
+            assert page.evaluate("app.view") == "listings"
+            assert page.evaluate("location.hash") == "#/listings"
             assert page.get_attribute("#sheet", "data-open") != "1"
             assert page.evaluate("document.body.style.overflow") == ""
+            # And closing it with its own button takes that entry back too,
+            # so Back from the view is not a second copy of the view.
+            page.locator(".card").first.click()
+            page.wait_for_selector("#sheet[data-open='1']")
+            page.click("#sheet-close")
+            page.wait_for_timeout(400)
+            assert page.evaluate("location.hash") == "#/listings"
+            page.go_back()
+            page.wait_for_timeout(400)
+            assert page.evaluate("app.view") == "feed"
         finally:
             ctx.close()
 
