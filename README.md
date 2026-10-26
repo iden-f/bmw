@@ -158,15 +158,25 @@ could not be delivered is held and sent on the next check.
 
 ## The dashboard
 
+Four tabs: **Discover** (Feed and Listings), **Watches** (Searches),
+**Archive** (Archive and Market) and **Settings** (Status). Keys 1 to 4 on a
+keyboard.
+
 - **Feed**: what changed, newest first, and which of it reached your phone.
-- **Listings**: every car, with its photos, price history and your marks.
+- **Listings**: every live car, with its photos, price history and your marks.
+- **Searches**: what is being watched and how each search is reading. Add a
+  search, remove one, change its rules, or set it to archive only here.
+- **Archive**: every car the bot has ever recorded, the gone ones included,
+  with every price it asked, the seller's edits and the photos the bot kept.
+  Which searches only archive, and the listings you saved by pasting their
+  link, are set here.
 - **Market**: what the cars say together: median asking prices, how long cars
   stay listed, how often prices move, and a deal score with its own track
   record.
-- **Searches**: what is being watched and how each search is reading. Add a
-  search, remove one or change its rules here.
-- **Status**: when it checked, how well the schedule is keeping time, the
-  alert channels, and the QR code for your phone.
+- **Status**: the settings the page can change (alerts, photos, retention),
+  sending changes straight from your phone with a GitHub token kept only on
+  the device, and then when it checked, how well the schedule is keeping
+  time, the alert channels, and the QR code for your phone.
 
 A car one of your rules hides is kept, counted and explained rather than
 dropped: click the count to see it and the rule.
@@ -188,6 +198,7 @@ falls through to the global value.
 | `aliases` | Other spellings that also count as the model, e.g. `["Civik"]`, for a seller who writes it some way the matching does not catch. Set it on the Searches tab under **Also counts as**. |
 | `include_keywords`, `exclude_keywords`, `exclude_sellers` | Words and sellers. |
 | `require_price` | Do not alert on call-for-price cars. They are still tracked. |
+| `notify` | `alert` (the default) or `archive`. An archive search keeps the full record of every car it finds, with its price history and photos, and never sends an alert about it. Change it on the dashboard or with `set searches.<id>.notify archive`. |
 
 And for alerts, globally:
 
@@ -198,6 +209,9 @@ And for alerts, globally:
 | `notifications.small_drops_ride_along` | `false` keeps drops under the bar on the dashboard only. |
 | `notifications.notify_on.*` | Which kinds of change alert: `new`, `price_drop`, `priced`, `qualified` and `errors` are on; `price_rise`, `removed` and `relisted` are off. `unpriced` follows `require_price`. |
 | `notifications.quiet_hours` | Hold alerts overnight. They arrive after, not never. |
+| `pinned` | Listings you saved by pasting their link (an autotrader.ca listing or a Marketplace item), each with its own `notify` mode, `archive` by default. The bot reads the AutoTrader ones itself; the Mac collector fills in the Marketplace ones when a search it runs carries the car. |
+| `archive.keep_days`, `archive.keep_max_listings` | `0`, the default, keeps every car it ever saw. A car you marked or saved is never pruned. |
+| `dashboard.photos_per_car`, `dashboard.photo_budget_mb` | How many photos are kept per car (12) and the store's ceiling (600 MB). A car's photos stay after it goes. |
 | `notifications.channels.ntfy.priority_new` | The ntfy priority of an alert with a new car in it, `high` by default. |
 
 ## Schedule

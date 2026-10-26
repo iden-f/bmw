@@ -108,11 +108,19 @@ All in `autotrader/`, in the order the data moves.
   at all.
 - **`dashboard`**: builds `docs/data.json`, and refuses to write anything
   shaped like a credential.
-- **`thumbs`**: small copies of listing photos, at most 24 new photos per
-  check, the newest cars' first photos first, pruned when a car goes. A photo
-  that fails twice running is left alone for a week.
-- **`archive`**: a per-car archive (metadata only by default), with
-  retention.
+- **`thumbs`**: small copies of listing photos, at most 40 new photos per
+  check and up to `dashboard.photos_per_car` (12) per car, the newest cars'
+  first photos first. A car that goes keeps its photos; only a car you forget
+  or a rule hides loses them, and the whole store stays under
+  `dashboard.photo_budget_mb` (600). A photo that fails twice running is left
+  alone for a week.
+- **`archive`**: a per-car archive (metadata only by default). Nothing is
+  pruned unless `archive.keep_days` or `archive.keep_max_listings` says so;
+  a car you marked or saved by its link is never pruned.
+- **`pinned`**: the listings you saved by pasting a link. Each check reads up
+  to 20 of them, least recently read first, under the synthetic search
+  `pinned`, and announces only what the pin asks for. A Marketplace link waits
+  for the collector's next batch to carry the car.
 
 **Plumbing**: **`cli`** (every command), **`runner`** (one check),
 **`config`** (settings in `config.json`, secrets only from the environment),
@@ -306,7 +314,19 @@ token. So a change is a file:
 
 Valid actions: `set-rule`, `add-search`, `remove-search`, `mute-listing`,
 `unmute-listing`, `shortlist`, `unshortlist`, `dismiss`, `undismiss`,
-`set-channel`, `note`, `set-marketplace`.
+`set-channel`, `note`, `set-marketplace`, `set-notify`, `pin-listing`,
+`unpin-listing`, `set-option`. `set-option` changes only the plain settings
+in `control.OPTIONS`, each within its bounds; a credential, a channel or a
+search link is never one of them.
+
+**Alert or archive.** Each search has a `notify` mode, `alert` (the default)
+or `archive`. An archive search records every car, price, edit and photo it
+finds and announces none of it: each change ends in a quiet reason starting
+`archive only:` that names it, so the bookkeeping invariants still hold and
+the Archive tab can show why nothing was sent. An alert still owed when a
+search is switched to archive is dropped before delivery. The service alarms
+(a blocked check, a parser gone quiet) are about the bot, not a search, and
+go out either way. The weekly digest leaves archive-only cars out.
 
 ## The dashboard
 
@@ -327,6 +347,16 @@ manifest and icons. No build step, no framework.
   as when served by `python -m autotrader ui`.
 - **Updates.** `sw.js` carries a build stamp written on every publish, so a
   changed page installs a new worker and an installed app offers a reload.
+- **Four tabs.** `GROUPS` in `app.js` maps each tab to its views (Discover:
+  feed, listings; Watches: searches; Archive: archive, market; Settings:
+  status). A tab lands on its first view; the others sit behind a switch at
+  the top of the view. Every view keeps its own `#/<view>` address.
+- **From a phone.** A change normally opens GitHub's editor with the sealed
+  file filled in. The owner may instead save a fine-grained GitHub token
+  (Contents: read and write on this one repository) on a device: it is kept
+  in the browser sealed with the vault key, goes when the page is locked, and
+  the same sealed file is then put straight into `control/` through GitHub's
+  contents API. If GitHub refuses, the editor link is offered in its place.
 - **Words.** One word per idea, in the page and in the alerts alike. A
   **check** is one run. A **listing** is one car. **Hidden** means a rule of
   yours excludes it, and it is still kept, counted and explained.

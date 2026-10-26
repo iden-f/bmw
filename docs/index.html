@@ -16,7 +16,7 @@
 <meta name="referrer" content="no-referrer">
 <!-- The page holds a decryption key once unlocked, so nothing but its own
      script may run, and data may only be fetched from its own origin. -->
-<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' blob: data: https:; connect-src 'self'; worker-src 'self'; manifest-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' blob: data: https:; connect-src 'self' https://api.github.com; worker-src 'self'; manifest-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'">
 <style>
 /* ------------------------------------------------------------------ tokens
    Every colour, radius, duration and spacing step the page uses is named
@@ -242,6 +242,47 @@ a{ color:var(--ev-new); text-underline-offset:2px; }
   .tab__n:empty, .tab[aria-current="page"] .tab__n:empty{ display:inline-block; background:none; }
 }
 @media (min-width:700px){ .tabs{ padding-block:var(--s2) var(--s3); } }
+
+/* The switch between a tab's views, at the top of each of them. */
+.seg{
+  display:inline-flex; gap:2px; padding:3px; margin:0 0 var(--s5);
+  background:var(--surface-2); border-radius:999px;
+}
+.seg__btn{
+  appearance:none; border:0; cursor:pointer; margin:0;
+  display:inline-flex; align-items:center; gap:var(--s2);
+  padding:var(--s1) var(--s4); min-height:32px;
+  font-size:var(--t-small); font-weight:520; color:var(--text-2);
+  background:none; border-radius:999px;
+  transition:color var(--m-state) var(--ease), background var(--m-state) var(--ease);
+}
+.seg__btn:hover{ color:var(--text); }
+.seg__btn[aria-current="page"]{ color:var(--text); background:var(--surface); box-shadow:var(--shadow-card); }
+.seg__btn .tab__n{ background:var(--surface-3); color:var(--text-2); }
+.seg__btn[aria-current="page"] .tab__n{ background:var(--surface-2); }
+.seg__btn .tab__n[data-unread="1"]{ background:var(--ev-new); color:var(--on-accent); }
+
+/* Alerts or archive only, said beside a search or a saved listing. */
+.mode{
+  display:inline-block; font-size:var(--t-micro); font-weight:600; letter-spacing:.02em;
+  padding:1px 8px; border-radius:999px; vertical-align:middle;
+  background:var(--surface-2); color:var(--text-2);
+}
+.mode--alert{ background:var(--ev-new); color:var(--on-accent); }
+.coll__head{ display:flex; align-items:center; gap:var(--s2); flex-wrap:wrap; }
+.coll .bar{ margin-bottom:0; }
+
+/* Every price a car asked, behind the sparkline. */
+.pricetab{ margin-top:var(--s3); font-size:var(--t-small); }
+.pricetab summary{ cursor:pointer; color:var(--text-2); padding:var(--s1) 0; }
+.pricetab table{ width:100%; border-collapse:collapse; margin-top:var(--s2); }
+.pricetab th{ text-align:left; font-weight:520; color:var(--text-3); padding:var(--s1) var(--s2); font-size:var(--t-micro); }
+.pricetab td{ padding:var(--s1) var(--s2); box-shadow:inset 0 1px 0 var(--line); }
+.pricetab td.num{ text-align:right; font-variant-numeric:tabular-nums; }
+.pricetab th + th, .pricetab th:last-child{ text-align:right; }
+.pricetab .drop{ color:var(--ev-drop, var(--text)); }
+.pricetab .rise{ color:var(--ev-rise, var(--text)); }
+.btn.is-sent{ color:var(--text-2); }
 
 /* ------------------------------------------------------------------ views */
 .view{ padding-block:var(--s6) var(--s9); }
@@ -1062,6 +1103,7 @@ body[data-locked] .clock, body[data-locked] .tabs, body[data-locked] .trust{ dis
   </form>
   <section class="view" data-view="feed" aria-labelledby="feed-h" hidden></section>
   <section class="view" data-view="listings" aria-labelledby="listings-h" hidden></section>
+  <section class="view" data-view="archive" aria-labelledby="archive-h" hidden></section>
   <section class="view" data-view="market" aria-labelledby="market-h" hidden></section>
   <section class="view" data-view="searches" aria-labelledby="searches-h" hidden></section>
   <section class="view" data-view="status" aria-labelledby="status-h" hidden></section>

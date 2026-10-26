@@ -191,7 +191,7 @@ class TestStayingSmall:
         assert report.total_bytes <= budget
         assert any("budget" in n for n in report.notes), report.notes
 
-    def test_a_car_that_leaves_takes_its_photo_with_it(self, here):
+    def test_a_car_that_is_forgotten_takes_its_photo_with_it(self, here):
         thumbs.sync([car(1), car(2)], CDN())
         assert len((here / "docs/thumbs").glob("*.webp") and
                    list((here / "docs/thumbs").glob("*.webp"))) == 2
@@ -201,8 +201,34 @@ class TestStayingSmall:
         assert len(list((here / "docs/thumbs").glob("*.webp"))) == 1
         assert report.kept == 1
 
+    def test_a_car_that_leaves_the_market_keeps_its_photos(self, here):
+        """The archive's point: the pictures of a car that has gone."""
+        thumbs.sync([car(1), car(2)], CDN())
+        cdn = CDN()
+        report = thumbs.sync([car(1, status="gone"), car(2)], cdn)
+        assert report.pruned == 0
+        assert report.kept == 2
+        assert thumbs.locals_for(car(1)["id"]), "the gone car's copy went"
+        # And nothing more is asked for it: its links expire with the listing.
+        assert not any("/1.webp" in u for u in cdn.calls)
+
+    def test_a_gone_car_with_no_copy_is_not_fetched_for(self, here):
+        cdn = CDN()
+        report = thumbs.sync([car(1, status="gone")], cdn)
+        assert report.fetched == 0 and cdn.calls == []
+
+    def test_the_old_behaviour_is_still_there_for_a_small_store(self, here):
+        thumbs.sync([car(1)], CDN())
+        report = thumbs.sync([car(1, status="gone")], CDN(), keep_gone=False)
+        assert report.pruned == 1 and thumbs.locals_for(car(1)["id"]) == []
+
+    def test_a_hidden_car_still_loses_its_photo(self, here):
+        thumbs.sync([car(1)], CDN())
+        report = thumbs.sync([car(1, filtered=True)], CDN())
+        assert report.pruned == 1
+
     def test_pruning_frees_room_for_a_live_car(self, here):
-        """The budget is for cars you are watching, not cars you watched."""
+        """The budget is for cars still in state, not cars forgotten."""
         thumbs.sync([car(i) for i in range(4)], CDN())
         before = thumbs.Report(total_bytes=0)
         report = thumbs.sync([car(9)], CDN())
@@ -362,11 +388,29 @@ class TestKeepingMoreThanOne:
                 "images": [f"https://cdn.test/{i}.webp/1920x1080.webp"
                            for i in range(n)]}
 
-    def test_three_are_kept_by_default(self, here):
+    def test_twelve_are_kept_by_default(self, here):
         cdn = CDN()
-        report = thumbs.sync([self.car_with(8)], cdn)
-        assert report.fetched == 3, report.notes
-        assert len(thumbs.locals_for(self.car_with(8)["id"])) == 3
+        report = thumbs.sync([self.car_with(14)], cdn)
+        assert report.fetched == 12, report.notes
+        assert len(thumbs.locals_for(self.car_with(14)["id"])) == 12
+
+    def test_the_config_sets_how_many(self, here):
+        from autotrader.config import Config
+        cfg = Config.defaults()
+        cfg.set("dashboard.photos_per_car", 3)
+        cfg.set("dashboard.photo_budget_mb", 2)
+        chosen = thumbs.settings(cfg)
+        assert chosen == {"per_car": 3, "budget": 2_000_000}
+        report = thumbs.sync([self.car_with(8)], CDN(), **chosen)
+        assert report.fetched == 3
+
+    def test_a_nonsense_setting_falls_back(self, here):
+        from autotrader.config import Config
+        cfg = Config.defaults()
+        cfg.set("dashboard.photos_per_car", "lots")
+        cfg.set("dashboard.photo_budget_mb", None)
+        assert thumbs.settings(cfg) == {"per_car": thumbs.KEEP_PER_CAR,
+                                        "budget": thumbs.MAX_TOTAL_BYTES}
 
     def test_a_car_with_one_photo_keeps_one(self, here):
         report = thumbs.sync([self.car_with(1)], CDN())
@@ -465,7 +509,7 @@ class TestWhenTheBudgetRunsShort:
         report = thumbs.sync(cars, CDN(), budget=0)
         budget_notes = [n for n in report.notes if "budget" in n]
         assert len(budget_notes) == 1, report.notes
-        assert "20 of 20 cars have no photo" in budget_notes[0]
+        assert "20 of 20 live cars have no photo" in budget_notes[0]
 
 
 class TestAPhotoThatNeverComesIsLeftAlone:

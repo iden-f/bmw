@@ -119,7 +119,7 @@ class TestADrawingDoesItsWorkOnce:
             assert page.evaluate("window.__drawn") == {"renderListings": 1, "renderTabs": 1}
             assert page.evaluate("location.hash") == "#/listings"
             page.evaluate("window.__drawn = {}")
-            page.keyboard.press("5")
+            page.keyboard.press("4")
             page.wait_for_timeout(300)
             assert page.evaluate("window.__drawn") == {"renderStatus": 1, "renderTabs": 1}
             assert not errors, errors

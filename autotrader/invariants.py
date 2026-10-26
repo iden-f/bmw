@@ -63,7 +63,11 @@ def check(cfg, state, report=None, payload: dict[str, Any] | None = None,
     """
     out: list[Violation] = []
     listings = state.listings
-    configured = {s.id for s in cfg.searches}
+    # Pinned listings belong to a search of their own that is always there,
+    # and is never "read" as a search is, so the count checks leave it out.
+    from .config import PINNED_SEARCH_ID
+    read_as_searches = {s.id for s in cfg.searches}
+    configured = read_as_searches | {PINNED_SEARCH_ID}
     active = {lid: e for lid, e in listings.items()
               if e.get("status") == "active"}
 
@@ -193,7 +197,7 @@ def check(cfg, state, report=None, payload: dict[str, Any] | None = None,
         pool = active if seen is None else {
             lid: e for lid, e in active.items() if lid in seen}
         hidden = sum(1 for e in pool.values() if e.get("filtered"))
-        if (report.searches_run and report.searches_run == len(configured)
+        if (report.searches_run and report.searches_run == len(read_as_searches)
                 and not report.searches_failed and not report.empty_parses
                 and report.filtered_out != hidden):
             out.append(Violation(
