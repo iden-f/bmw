@@ -41,7 +41,10 @@ def db(home):
 
 @pytest.fixture
 def settings(home):
-    st = S.Settings(ntfy_topic="trial-topic", interval_minutes=10)
+    # No quiet window: a test that measures the next due time against the
+    # wall clock must not depend on the hour it is run at.
+    st = S.Settings(ntfy_topic="trial-topic", interval_minutes=10,
+                    quiet_start="00:00", quiet_end="00:00")
     st.ensure_token()
     st.save()
     return st
