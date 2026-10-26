@@ -238,6 +238,17 @@ def test_a_car_outside_the_rules_is_kept_hidden_then_announced_when_it_qualifies
     assert db.one("SELECT kind FROM outbox WHERE status='pending'")["kind"] == "qualified"
 
 
+def test_pinned_listings_become_a_silent_collection(db, cfg):
+    cfg.data["pinned"] = [{"id": "p1", "url": "https://www.autotrader.ca/a/bmw/m4/x/19_12345678_/",
+                           "name": "That M4", "notify": "archive"},
+                          "https://www.autotrader.ca/a/bmw/m3/x/19_87654321_/"]
+    cols = {c.id: c for c in ingest.sync_collections(db, cfg)}
+    assert cols["pinned"].notify_mode == "archive"
+    assert cols["pinned"].rules["urls"] == [
+        "https://www.autotrader.ca/a/bmw/m4/x/19_12345678_/",
+        "https://www.autotrader.ca/a/bmw/m3/x/19_87654321_/"]
+
+
 def test_wrong_model_is_not_stored(db, settings, cfg):
     cfg.data["searches"][0]["filters"] = {"models": ["Civic"]}
     col = collection(db, cfg)

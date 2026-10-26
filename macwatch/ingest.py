@@ -98,7 +98,13 @@ def sync_collections(db: Database, cfg) -> list[Collection]:
                        updated_at=excluded.updated_at""",
                 (search.id, search.name, site, mode, int(enabled), json.dumps(rules),
                  search.url, stamp, stamp))
-        pinned = [str(u).strip() for u in (cfg.get("pinned") or []) if str(u).strip()]
+        # The watch keeps pinned listings as {"url", "name", "notify", ...}
+        # (autotrader/pinned.py); a bare URL is accepted too.
+        pinned = []
+        for item in (cfg.get("pinned") or []):
+            url = str(item.get("url") if isinstance(item, dict) else item or "").strip()
+            if url:
+                pinned.append(url)
         if pinned:
             conn.execute(
                 """INSERT INTO collections(id, name, site, notify_mode, enabled, rules_json,
