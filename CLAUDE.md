@@ -29,15 +29,24 @@ check timer plus the Pages builds it triggers used well over half the month.
 - The dashboard is published at most every `PAGE_MIN_GAP_MINUTES` (default 0:
   every check whose data changed) and at least every `PAGE_MAX_AGE_MINUTES`
   (default 360), set as repository variables.
-- The owner wants a check every 10 minutes by day and every 2 hours from 02:00
-  to 08:00 Pacific time. The cron in `watch.yml` fires every 5 minutes, and a
-  workflow step writes `CHECK_INTERVAL_MINUTES` (10) and `CHECK_FLOOR_MINUTES`
-  (7) into the vault's config (`health.expected_interval_minutes`,
-  `health.min_interval_minutes`) on every run; overnight is `health.overnight`
-  in `config.py`. The Marketplace collector on the owner's Mac (`collector/`,
-  `repository_dispatch` type `marketplace`) also starts a run each pass
-  (every 10 minutes by day, every 2 hours overnight: `every_minutes`,
-  `quiet_start`, `quiet_end`, `quiet_every_minutes` in its settings.json).
+- The owner wants AutoTrader checked every 15 minutes by day and every hour
+  from 23:00 to 08:00 Pacific time, and Marketplace read every 5 minutes by
+  day and every 10 overnight. The cron in `watch.yml` fires every 5 minutes,
+  and a workflow step writes `CHECK_INTERVAL_MINUTES` (15),
+  `CHECK_FLOOR_MINUTES` (11) and the overnight window (`CHECK_NIGHT_START`
+  23:00, `CHECK_NIGHT_END` 08:00, `CHECK_NIGHT_INTERVAL_MINUTES` 60) into the
+  vault's config (`health.expected_interval_minutes`,
+  `health.min_interval_minutes`, `health.overnight`) on every run. The
+  Marketplace collector on the owner's Mac (`collector/`, `repository_dispatch`
+  type `marketplace`) also starts a run each pass; its own pace is
+  `every_minutes` 5, `jitter_minutes` 1, and overnight (`quiet_start` 23:00
+  to `quiet_end` 08:00) `quiet_every_minutes` 10 with `quiet_reads` on, in
+  its settings.json. The AutoTrader floor turns those extra runs away; the
+  Marketplace batch is still taken in and alerted on.
+- A price drop earns an alert of its own only from $2,000
+  (`notifications.price_drop_alert_abs`); smaller ones ride along with the
+  next new-car alert unless `small_drops_ride_along` is off (both on the
+  dashboard's Settings tab).
 
 ## Standing permission: merge to main
 
