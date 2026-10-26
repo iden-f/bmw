@@ -16,6 +16,7 @@ from typing import Any
 
 from bs4 import BeautifulSoup
 
+from .carfax import report_link
 from .listing import Listing
 from .parser import _clean, _titlecase_place, _to_int, _types_of
 from .urls import listing_id_from_url, location_from_url
@@ -139,6 +140,8 @@ def detail_from_html(html: str, listing_id: str = "", url: str = "") -> Listing 
         fuel=_real(_clean(engine.get("fuelType") or "")),
         engine=_real(_clean(engine.get("engineType") or "")),
         vin=vin,
+        # The seller's own history report, when the page links one.
+        carfax_url=report_link(html),
         images=images[:12],
         enriched=True,
     )
@@ -197,7 +200,7 @@ def enrich(listing: Listing, html: str) -> Listing:
     # badly (price and odometer especially - see _mileage_from_text).
     for name in ("price", "price_source", "mileage_km", "year", "make", "model",
                  "trim", "body", "color", "transmission", "drivetrain", "fuel",
-                 "engine", "vin", "currency"):
+                 "engine", "vin", "currency", "carfax_url"):
         value = getattr(detail, name)
         if value not in (None, "", []):
             setattr(listing, name, value)

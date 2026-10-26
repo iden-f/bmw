@@ -212,6 +212,7 @@ And for alerts, globally:
 | `pinned` | Listings you saved by pasting their link (an autotrader.ca listing or a Marketplace item), each with its own `notify` mode, `archive` by default. The bot reads the AutoTrader ones itself; the Mac collector fills in the Marketplace ones when a search it runs carries the car. |
 | `archive.keep_days`, `archive.keep_max_listings` | `0`, the default, keeps every car it ever saw. A car you marked or saved is never pruned. |
 | `dashboard.photos_per_car`, `dashboard.photo_budget_mb` | How many photos are kept per car (12) and the store's ceiling (600 MB). A car's photos stay after it goes. |
+| `dashboard.reports_per_run`, `dashboard.report_budget_mb` | When a listing links a Carfax report the seller published, the bot saves the link and a copy of the report (a PDF where it can). How many to fetch per check (5) and the store's ceiling (300 MB). |
 | `notifications.channels.ntfy.priority_new` | The ntfy priority of an alert with a new car in it, `high` by default. |
 
 ## Schedule
@@ -348,6 +349,18 @@ python -m autotrader vault push --lease  # refused if a check saved in the meant
 
 If the push is refused, pull and open again and redo the change. `--lease`
 also stops a vault made on this machine from replacing the real one.
+
+A change can also go through the same door the dashboard uses, with no
+vault push and no race with a running check: write the instructions as JSON
+(the actions `control.ACTIONS` lists, as the page writes them), seal them
+and commit the file to `main`. The next check applies it whole or refuses it
+whole, and says which on the dashboard:
+
+```sh
+python -m autotrader vault pull
+python -m autotrader seal-change my-change.json   # writes control/<stamp>-<nonce>.enc
+git add control && git commit -m "Change from the dashboard" && git push
+```
 
 ## Tests
 

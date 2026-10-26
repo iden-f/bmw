@@ -36,7 +36,7 @@ PHOTO_SENDS = 3
 # card alone would let back in a car the page showed a rule should hide, and
 # a batch GitHub drops would lose the page for good.
 FACTS = ("mileage_km", "title_status", "transmission", "fuel", "color", "vin",
-         "trim", "make", "model", "seller_type", "created")
+         "trim", "make", "model", "seller_type", "created", "carfax_url")
 
 # After Facebook signs the collector out or asks the account to confirm who
 # it is, passes only check in for this long, or until collector/run login:

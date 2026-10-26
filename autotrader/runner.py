@@ -21,6 +21,7 @@ from typing import Any
 from . import clock, words
 from . import archive as archive_mod
 from . import pinned as pinned_mod
+from . import carfax as carfax_mod
 from . import thumbs as thumbs_mod
 from . import dashboard, diagnose, filters, invariants, notifiers
 from . import provision, render, shape, validate
@@ -80,6 +81,8 @@ class RunReport:
     invariants: list[str] = field(default_factory=list)
     # What the run did about photographs. Nothing here can fail a check.
     photos: dict[str, Any] = field(default_factory=dict)
+    # Our copies of the Carfax reports sellers published: see carfax.py.
+    reports: dict[str, Any] = field(default_factory=dict)
     # What this run cost and where the month stands - see budget.py.
     budget: dict[str, Any] = field(default_factory=dict)
     # Changes held back because you said you did not want them.
@@ -146,7 +149,8 @@ class RunReport:
             "notified": self.notified, "errors": self.errors[:10],
             "warnings": self.warnings[:10], "strategies": self.strategies,
             "quiet": self.quiet, "dry_run": self.dry_run,
-            "photos": self.photos, "your_call": self.your_call,
+            "photos": self.photos, "reports": self.reports,
+            "your_call": self.your_call,
             "archived": self.archived,
             "pinned_checked": self.pinned_checked,
             "pinned_recorded": self.pinned_recorded,
@@ -1753,6 +1757,9 @@ def run(cfg: Config | None = None, state: State | None = None, *,
                         report.warnings.append(note)
                 except Exception as exc:  # noqa: BLE001
                     log.warning("photo sync failed: %s", exc)
+            # The Carfax reports sellers published, kept the same way and for
+            # the same reason: the link dies with the listing.
+            _save_reports(cfg, state, report, fetcher)
 
         # ---- does the bookkeeping still make sense? ------------------
         # The dangerous failures are silently wrong state rather than crashes,
@@ -1801,6 +1808,20 @@ def run(cfg: Config | None = None, state: State | None = None, *,
             _write_the_run_down(cfg, state, report, env, notify)
 
     return report
+
+
+def _save_reports(cfg: Config, state: State, report: "RunReport", fetcher: Any) -> None:
+    """Fetch the history reports we lack. Never fails a check."""
+    if not cfg.get("dashboard.reports", True) or fetcher is None:
+        return
+    try:
+        held = carfax_mod.sync(state.listings.values(), fetcher,
+                               **carfax_mod.settings(cfg))
+        report.reports = held.to_dict()
+        for note in held.notes:
+            report.warnings.append(note)
+    except Exception as exc:  # noqa: BLE001 - a report is a nicety
+        log.warning("report sync failed: %s", exc)
 
 
 def _write_the_run_down(cfg: Config, state: State, report: "RunReport",

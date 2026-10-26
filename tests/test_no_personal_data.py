@@ -56,6 +56,7 @@ NOT_SCANNED = {
     "docs/data.json": "the bot's own data; it belongs in the vault",
     "docs/events.json": "the bot's own data; it belongs in the vault",
     "docs/thumbs/*": "the bot's own photos; they belong in the vault",
+    "docs/reports/*": "the bot's own copies of history reports; they belong in the vault",
     "EVENTS.md": "the bot's own ledger; it belongs in the vault",
     "NOTIFY.md": "the bot's own record; it belongs in the vault",
     "SOAK.md": "the bot's own record; it belongs in the vault",
@@ -486,7 +487,7 @@ class TestThePublishedSiteNamesNothing:
             top = name.split("/")[0]
             assert (top in V.SITE_FILES or top.startswith("icon")
                     or top in {"data.enc", "lock.json"}
-                    or (top == "thumbs" and name.endswith(".bin"))), name
+                    or (top in {"thumbs", "reports"} and name.endswith(".bin"))), name
 
     def test_the_patterns_find_all_four_in_the_plaintext_they_protect(self, site):
         """The fixture's data.json, before sealing, has every kind of thing

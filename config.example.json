@@ -143,6 +143,8 @@
     "enabled": true,
     "max_listings": 2000,
     "photos_per_car": 12,
-    "photo_budget_mb": 600
+    "photo_budget_mb": 600,
+    "reports_per_run": 5,
+    "report_budget_mb": 300
   }
 }

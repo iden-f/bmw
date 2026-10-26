@@ -335,6 +335,23 @@ function photoUrl(src) {
   return vault.photos.get(src);
 }
 
+/* A saved history report's address: reports/<hmac of the name>.bin,
+   decrypted into a blob: URL the browser can open as a PDF or a page. */
+function reportUrl(held) {
+  const src = String(held?.file || '');
+  if (!vault.lock || !src.startsWith('reports/')) return Promise.resolve(src);
+  return (async () => {
+    const file = src.slice('reports/'.length);
+    const sig = await crypto.subtle.sign('HMAC', vault.name, te.encode(`report/${file}`));
+    const stored = `reports/${hex(sig).slice(0, 32)}.bin`;
+    const res = await fetch(stored);
+    if (!res.ok) throw new Error(`${res.status}`);
+    const plain = await unsealBytes(vault.enc, await res.arrayBuffer(), stored);
+    const type = held.type === 'html' ? 'text/html' : 'application/pdf';
+    return URL.createObjectURL(new Blob([plain], { type }));
+  })();
+}
+
 /* Each decrypted photo is a copy of it held in memory until its blob: URL is
    revoked, so a tab left open for days would hold every photo it ever drew.
    Past PHOTOS_KEPT, the oldest that no image on the page names are let go;
@@ -2056,6 +2073,8 @@ function card(l) {
   if (l.days_listed !== undefined) foot.push(`<span class="num">${daysListed(l.days_listed)}</span>`);
   if (l.photo_count) foot.push(`<span class="num">${l.photo_count} photo${
     l.photo_count === 1 ? '' : 's'}</span>`);
+  // A seller who published the car's history report says so on the card.
+  if (l.carfax_url) foot.push(`<span>Carfax${l.carfax ? ' saved' : ''}</span>`);
   // Dealer or private goes on this line, not among the facts, which would
   // overflow the card's width.
   if (l.seller_type) foot.push(`<span>${esc(sellerWord(l.seller_type))}</span>`);
@@ -3782,6 +3801,10 @@ const OPTION_BOXES = [
    'How many of each car\'s photos the bot copies and keeps, including after it leaves the site.'],
   ['dashboard.photo_budget_mb', 'Photo store, MB', 'int',
    'The most all the saved photos may take up. Past it, the newest cars keep theirs first.'],
+  ['dashboard.reports_per_run', 'Carfax reports fetched per check', 'int',
+   'When a seller publishes the car\'s Carfax report, the bot saves a copy. How many to fetch each check; 0 pauses it.'],
+  ['dashboard.report_budget_mb', 'Report store, MB', 'int',
+   'The most all the saved reports may take up.'],
   ['dashboard.max_listings', 'Cars this page carries', 'int',
    'Hidden cars are left out first, then the oldest of the gone. Everything stays in the archive.'],
   ['archive.keep_days', 'Forget a gone car after, days', 'int',
@@ -4341,6 +4364,40 @@ function sheetBody(l) {
       list.appendChild(li);
     }
     s.appendChild(list);
+    host_append(s, frag);
+  }
+
+  if (l.carfax_url) {
+    // The seller's history report: the link they published, and the copy
+    // the bot keeps, which outlives the listing and opens offline.
+    const s = el('section', 'section');
+    s.innerHTML = `<div class="section__head"><h2>History report</h2></div>`;
+    const docs = el('div', 'docs');
+    docs.style.cssText = 'display:flex;flex-wrap:wrap;gap:var(--s2);align-items:center';
+    const link = el('a', 'chip', 'Carfax report on carfax.ca');
+    link.href = l.carfax_url; link.rel = 'noopener'; link.target = '_blank';
+    docs.appendChild(link);
+    if (l.carfax?.file) {
+      const kind = l.carfax.type === 'html' ? 'page' : 'PDF';
+      const saved = el('a', 'chip', `Saved copy (${kind})`);
+      saved.href = '#'; saved.rel = 'noopener'; saved.target = '_blank';
+      saved.title = l.carfax.at ? `saved ${when(l.carfax.at)}` : 'saved by the bot';
+      saved.addEventListener('click', ev => {
+        if (saved.dataset.ready) return;
+        ev.preventDefault();
+        saved.textContent = 'Opening…';
+        reportUrl(l.carfax).then(url => {
+          saved.href = url; saved.dataset.ready = '1';
+          saved.textContent = `Saved copy (${kind})`;
+          window.open(url, '_blank', 'noopener');
+        }, () => { saved.textContent = 'Saved copy could not be opened'; });
+      });
+      docs.appendChild(saved);
+    } else {
+      docs.appendChild(el('span', 'note', l.status === 'gone'
+        ? 'No copy was saved before it left.' : 'Copy not saved yet.'));
+    }
+    s.appendChild(docs);
     host_append(s, frag);
   }
 

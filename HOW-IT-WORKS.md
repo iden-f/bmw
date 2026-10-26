@@ -14,7 +14,7 @@ reliable, private, and easy to read. Setup and everyday use are in the
    anything.
 2. **Open the vault.** `vault pull` fetches the `vault` branch into `vault/`;
    `vault open` decrypts it into the working tree (`config.json`,
-   `state.json`, `EVENTS.md`, `docs/events.json`, `docs/thumbs/`,
+   `state.json`, `EVENTS.md`, `docs/events.json`, `docs/thumbs/`, `docs/reports/`,
    `diagnostics/`, `archives/`), or creates a new vault on a first run. All of
    these are in `.gitignore`.
 3. **Set up.** `setup --non-interactive` makes sure something can reach you (a
@@ -114,6 +114,14 @@ All in `autotrader/`, in the order the data moves.
   or a rule hides loses them, and the whole store stays under
   `dashboard.photo_budget_mb` (600). A photo that fails twice running is left
   alone for a week.
+- **`carfax`**: the Carfax report a seller published with the listing. The
+  link is read off AutoTrader's page data or a Marketplace description, kept
+  on the car's record, and the report itself is fetched into `docs/reports/`
+  (a PDF, printed through the runner's headless Chrome when the viewer serves
+  a page; the page's HTML when it cannot), at most `dashboard.reports_per_run`
+  (5) per check and `dashboard.report_budget_mb` (300) in all. Sealed and
+  published like the photos, so a report opens from the dashboard after the
+  car has gone. A link to a report that must be bought is not followed.
 - **`archive`**: a per-car archive (metadata only by default). Nothing is
   pruned unless `archive.keep_days` or `archive.keep_max_listings` says so;
   a car you marked or saved by its link is never pruned.
@@ -172,7 +180,7 @@ whole search over a parser fault.
 - **`meta.json`** is public by design: the salt, the iteration count, and a
   check value that confirms a passphrase without decrypting anything else. The
   site carries the same as `lock.json`.
-- **Directories** (`docs/thumbs/`, `diagnostics/`, `archives/`) are sealed
+- **Directories** (`docs/thumbs/`, `docs/reports/`, `diagnostics/`, `archives/`) are sealed
   file by file under keyed hashes, with an encrypted index to map them back.
 - **Unchanged files stay unchanged.** AES-GCM output differs every time, so
   sealing compares plaintexts first; otherwise every check would rewrite

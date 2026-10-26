@@ -24,7 +24,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Iterable, Iterator
 from urllib.parse import urlencode
 
-from . import clock, filters, geo
+from . import carfax, clock, filters, geo
 from .listing import MARKETPLACE_PREFIX, Listing, on_marketplace
 from .state import STARTING_POINT, SWITCHED_OFF, Change, State, utcnow
 from .urls import describe_search
@@ -336,6 +336,11 @@ def record_of(node: dict[str, Any]) -> dict[str, Any]:
                       ("vehicle_title_status", "title_status")):
         if node.get(key):
             rec[name] = _word(node[key])
+    # A seller who pastes a Carfax link into the description has published
+    # the report; the link is kept, the description is not.
+    links = carfax.links_in(_text(node.get("redacted_description")))
+    if links:
+        rec["carfax_url"] = links[0]
     seller = str(node.get("vehicle_seller_type") or "").upper()
     if "DEALER" in seller:
         rec["seller_type"] = "dealer"
@@ -554,6 +559,8 @@ def to_listing(rec: dict[str, Any], search, *, make: str = "",
         transmission=str(rec.get("transmission") or ""),
         fuel=str(rec.get("fuel") or ""),
         vin=str(rec.get("vin") or ""),
+        carfax_url=(str(rec.get("carfax_url") or "")
+                    if carfax.is_report_link(str(rec.get("carfax_url") or "")) else ""),
         images=[rec["photo"]] if rec.get("photo") else [],
         search_id=search.id,
         search_name=search.name,
@@ -708,16 +715,20 @@ def plan(cfg) -> list[dict[str, Any]]:
             "aliases": [str(a).strip() for a in filters._as_list(rules.get("aliases"))
                         if str(a).strip()] if models else [],
         }
-        # Each model is asked twice: newest first, and in Marketplace's own
+        # What to type into Marketplace's search box: the make and model,
+        # unless the search says otherwise. A trim sold under its own name
+        # (watched as an alias of its model) is found by its own name there.
+        asked = [str(q).strip() for q in filters._as_list(rules.get("marketplace_queries"))
+                 if str(q).strip()] or [" ".join(p for p in (make, model) if p)
+                                        for model in (models or [""])]
+        # Each query is asked twice: newest first, and in Marketplace's own
         # order. Marketplace's "newest first" leaves some listings out
         # altogether (a dealer's post for days, in October 2026) that its
         # default order shows on the first screen, so the two are read
         # together and the cars of both are one list.
-        item["queries"] = [{"query": " ".join(p for p in (make, model) if p),
-                            "url": search_url(item, " ".join(p for p in (make, model) if p),
-                                              order=order),
+        item["queries"] = [{"query": q, "url": search_url(item, q, order=order),
                             "order": order}
-                           for model in (models or [""]) for order in ORDERS]
+                           for q in asked for order in ORDERS]
         # The scope is what Marketplace is asked, and the second order asks
         # the same thing another way: it is not a new starting point.
         scoped = dict(item, queries=[{"query": q["query"], "url": q["url"]}
@@ -1031,6 +1042,12 @@ def ingest(cfg, state: State, batch: dict[str, Any], *,
                              "bytes": shots.total_bytes, "samples": shots.samples[:6]}
         except Exception as exc:  # noqa: BLE001 - a photo never fails a batch
             log.warning("photo sync failed: %s", exc)
+        if cfg.get("dashboard.reports", True):
+            try:
+                held = carfax.sync(state.listings.values(), fetcher, **carfax.settings(cfg))
+                report.reports = held.to_dict()
+            except Exception as exc:  # noqa: BLE001 - nor does a report
+                log.warning("report sync failed: %s", exc)
 
     if not dry_run:
         runs = section.setdefault("batches", [])

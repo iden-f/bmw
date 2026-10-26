@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import base64
 import json
+import re
 import os
 import subprocess
 from pathlib import Path
@@ -472,3 +473,49 @@ def test_a_person_at_the_button_is_not_a_timer(tmp_path):
     event.write_text(json.dumps({"inputs": {"from": "laptop"}}))
     env = {"RUN_TRIGGER": "repository_dispatch", "GITHUB_EVENT_PATH": str(event)}
     assert _trigger_of(env) == "repository_dispatch"
+
+
+class TestSealingAChangeFromATerminal:
+    """`seal-change` writes what the dashboard writes, so a change made where
+    the passphrase is at hand goes through the same door as one from the
+    page: applied whole or refused whole, once, and never replayed."""
+
+    def test_the_sealed_file_is_applied_by_the_next_check(self, repo, monkeypatch):
+        work = repo["work"]
+        monkeypatch.setenv(V.ENV_KEY, PHRASE)
+        vault, control = TestChangesFromThePage._setup(
+            TestChangesFromThePage(), work)
+        (work / "wanted.json").write_text(json.dumps([
+            {"action": "add-search", "name": "Corollas",
+             "url": "https://www.autotrader.ca/cars/toyota/corolla/reg_on/?modelyearfrom=2019",
+             "notify": "archive", "filters": {"models": ["Corolla"], "min_year": 2019}}]))
+        assert cli.main(["seal-change", "wanted.json"]) == 0
+        files = list(control.glob("*.enc"))
+        assert len(files) == 1
+        # Named by time alone, and a whole number of kilobytes once opened.
+        assert re.fullmatch(r"\d{14}-[0-9a-f]{6}\.enc", files[0].name)
+        opened = V.unseal(vault.key, base64.b64decode(files[0].read_text()), "control")
+        assert len(opened) % 1024 == 0
+        assert cli.main(["control", "control"]) == 0
+        cfg = Config.load(work / "config.json")
+        added = next(s for s in cfg.searches if s.name == "Corollas")
+        assert added.archive_only and added.filters["models"] == ["Corolla"]
+        # Read once: the same file again is skipped, not applied twice.
+        assert cli.main(["control", "control"]) == 0
+        assert sum(1 for s in Config.load(work / "config.json").searches
+                   if s.name == "Corollas") == 1
+
+    def test_bad_instructions_seal_nothing(self, repo, monkeypatch):
+        work = repo["work"]
+        monkeypatch.setenv(V.ENV_KEY, PHRASE)
+        TestChangesFromThePage._setup(TestChangesFromThePage(), work)
+        (work / "wanted.json").write_text('[{"action": "dance"}]')
+        assert cli.main(["seal-change", "wanted.json"]) == 2
+        assert list((work / "control").glob("*.enc")) == []
+
+    def test_without_the_vault_it_says_what_to_do(self, repo, monkeypatch, capsys):
+        work = repo["work"]
+        monkeypatch.setenv(V.ENV_KEY, PHRASE)
+        (work / "wanted.json").write_text('[{"action": "set-rule", "rule": "min_year", "value": 2015}]')
+        assert cli.main(["seal-change", "wanted.json"]) == 2
+        assert "vault pull" in capsys.readouterr().out
