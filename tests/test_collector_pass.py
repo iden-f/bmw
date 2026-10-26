@@ -182,15 +182,37 @@ class TestWhichPagesAPassOpens:
         cfg = watch_config(tmp_path, models=("Civic", "Accord"))
         browser = FakeBrowser()
         cycle.read(cfg, M.plan(cfg), browser, settings(), {}, details=False)
-        first, second = browser.searches()
-        assert "query=Honda+Civic" in first and "query=Honda+Accord" in second
-        assert browser.log == [first, REST, second]
+        # Each model in both orders, and the pause a person takes between
+        # every two pages.
+        civic_new, civic_best, accord_new, accord_best = browser.searches()
+        assert "query=Honda+Civic" in civic_new and "query=Honda+Civic" in civic_best
+        assert "sortBy=" in civic_new and "sortBy=" not in civic_best
+        assert "query=Honda+Accord" in accord_new and "query=Honda+Accord" in accord_best
+        assert browser.log == [civic_new, REST, civic_best, REST,
+                               accord_new, REST, accord_best]
 
     def test_and_between_searches_and_before_a_listing(self, tmp_path):
         cfg = watch_config(tmp_path, searches=2)
         browser = FakeBrowser()
         cycle.read(cfg, M.plan(cfg), browser, settings(), {})
-        assert [v == REST for v in browser.log] == [False, True, False, True, False]
+        assert [v == REST for v in browser.log] == [
+            False, True, False, True, False, True, False, True, False]
+
+    def test_a_car_only_one_order_shows_is_read(self, tmp_path):
+        # What this is for: a listing Marketplace's newest-first page leaves
+        # out, shown by its default order, reaches the batch all the same.
+        cfg = watch_config(tmp_path)
+        only_in_best = node("200000002", "2019 Honda civic touring", price="26000.00")
+
+        class Browser(FakeBrowser):
+            def visit(self, url, *, scrolls=0):
+                page = super().visit(url, scrolls=scrolls)
+                if "/search/" in url and "sortBy=" not in url:
+                    page.texts = [search_page(only_in_best)]
+                return page
+
+        [part], _ = cycle.read(cfg, M.plan(cfg), Browser(), settings(), {}, details=False)
+        assert sorted(r["id"] for r in part["listings"]) == ["200000001", "200000002"]
 
     def test_a_car_new_this_pass_goes_first_though_another_search_saw_it_first(
             self, tmp_path):
@@ -234,7 +256,9 @@ class TestACheckpoint:
 
         class SecondSearch(FakeBrowser):
             def visit(self, url, *, scrolls=0):
-                if len(self.searches()) == 1 and "/search/" in url:
+                # The first search's two pages have been read; the second
+                # search's first page meets the checkpoint.
+                if len(self.searches()) == 2 and "/search/" in url:
                     self.session = {"search": "checkpoint"}
                 return super().visit(url, scrolls=scrolls)
 

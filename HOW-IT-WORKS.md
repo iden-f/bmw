@@ -219,7 +219,11 @@ the bot stays the only writer of the watch's data.
    the Keychain. `marketplace.plan` turns each active search into a query:
    make and model from its link and `models` rule, years and prices from its
    rules, and the place and radius (at most 500 km) from `near` and
-   `max_distance_km`, newest first. A search switched off for Marketplace
+   `max_distance_km`. Each model is asked twice, newest first and in
+   Marketplace's own order: the newest-first results leave some listings
+   out altogether (a dealer's post sat unseen for three days in October
+   2026) that the default order shows on its first screen, and the cars of
+   both pages are one list. A search switched off for Marketplace
    (`"marketplace": false` on it) is left out, and `aliases` join `models`
    in deciding which car is which. A car found by an alias is stored under
    the search's model when it has only one, so it is priced with the rest.
