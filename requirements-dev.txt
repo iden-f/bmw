@@ -13,3 +13,9 @@ PyYAML>=6,<7
 # anywhere; CI installs a browser on one leg and sets REQUIRE_BROWSER there,
 # so on that leg they fail rather than skip.
 playwright>=1.40
+# tests/test_macwatch_*.py exercise the Mac-hosted service's API in-process
+# (macwatch/requirements.txt lists what the Mac itself installs). The tests
+# skip themselves when these are missing, so the suite still runs anywhere.
+fastapi>=0.115,<1
+httpx>=0.27,<1
+uvicorn>=0.30,<1
