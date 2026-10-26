@@ -30,9 +30,10 @@ TIMEOUT = 30
 MAX_ATTEMPTS = 5
 # Where listing photos come from. Anything else is refused: a listing is
 # untrusted content and must not make this Mac fetch arbitrary addresses.
+# autotrader.ca serves its listing photos from autoscout24.net (same group).
 ALLOWED_HOST_SUFFIXES = ("autotrader.ca", "autotradercdn.ca", "autotrader-cdn.ca",
-                         "trader.ca", "fbcdn.net", "facebook.com", "fbsbx.com",
-                         "cloudfront.net")
+                         "trader.ca", "autoscout24.net", "fbcdn.net", "facebook.com",
+                         "fbsbx.com", "cloudfront.net")
 
 _MAGIC = (
     (b"\xff\xd8\xff", "image/jpeg", ".jpg"),
@@ -166,6 +167,7 @@ def capture(db: Database, settings, fetch: Callable[[str, str], bytes] | None = 
         db.set("media_paused", {"at": now(), "why": "media budget reached"})
         return counts
     db.set("media_paused", None)
+    requeue_refused(db)
     stamp = now()
     rows = db.q("""SELECT m.*, l.url AS listing_url FROM listing_media m
                    JOIN listings l ON l.id=m.listing_id
@@ -208,6 +210,17 @@ def capture(db: Database, settings, fetch: Callable[[str, str], bytes] | None = 
                          (asset_id, attempts, row["listing_id"], url))
         counts["saved"] += 1
     return counts
+
+
+def requeue_refused(db: Database) -> int:
+    """A host added to the allowlist later lets its refused photos be tried."""
+    rows = db.q("SELECT listing_id, source_url FROM listing_media WHERE status='refused'")
+    again = [(r["listing_id"], r["source_url"]) for r in rows if allowed(r["source_url"])]
+    if again:
+        with db.tx() as conn:
+            conn.executemany("UPDATE listing_media SET status='pending', error='', next_try_at=NULL "
+                             "WHERE listing_id=? AND source_url=?", again)
+    return len(again)
 
 
 def asset_path(db: Database, asset_id: str, root: Path | None = None) -> tuple[Path, str] | None:

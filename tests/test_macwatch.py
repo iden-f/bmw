@@ -344,6 +344,14 @@ def test_photos_are_verified_deduplicated_and_kept(db, settings, cfg, home):
     assert (home / "media" / assets[0]["path"]).read_bytes() == photo
     states = {r["source_url"].rsplit("/", 1)[1]: r["status"] for r in db.q("SELECT * FROM listing_media")}
     assert states == {"1.jpg": "saved", "2.jpg": "saved", "3.jpg": "refused", "bad.jpg": "failed"}
+    # A refused host stays refused until the allowlist changes; then it is tried.
+    assert media.requeue_refused(db) == 0
+    media.ALLOWED_HOST_SUFFIXES += ("evil.example.com",)
+    try:
+        assert media.requeue_refused(db) == 1
+        assert media.capture(db, settings, fetch=fetch, root=home / "media")["saved"] == 1
+    finally:
+        media.ALLOWED_HOST_SUFFIXES = media.ALLOWED_HOST_SUFFIXES[:-1]
     # The listing goes; the photo stays.
     take(db, settings, col, [])
     take(db, settings, col, [])
@@ -369,6 +377,7 @@ def test_sniff_and_dimensions():
     assert media.sniff(b"\x89PNG\r\n\x1a\n" + b"\0" * 20) == ("image/png", ".png")
     assert media.sniff(b"hello") is None
     assert media.allowed("https://scontent.xx.fbcdn.net/v/t.jpg")
+    assert media.allowed("https://prod.pictures.autoscout24.net/listing-images/x.jpg")
     assert not media.allowed("http://mkt-vehicleimages-prd.autotradercdn.ca/x.jpg")
     assert not media.allowed("https://169.254.169.254/latest")
 
