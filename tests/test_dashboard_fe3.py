@@ -703,9 +703,11 @@ def test_the_worker_keeps_only_the_newest_photos(browser, few_photos_site):
             const cache = await caches.open('atw-photos');
             for (let i = 0; i < 40 && (await cache.keys()).length > 3; i++)
               await new Promise(r => setTimeout(r, 50));
+            // Read before the re-fetch: the worker stores a photo after it
+            // has answered, so reading after would race its put.
+            const kept = (await cache.keys()).map(r => new URL(r.url).pathname);
             const again = await fetch('thumbs/p1.bin');
-            return { kept: (await cache.keys()).map(r => new URL(r.url).pathname),
-                     again: again.status };
+            return { kept, again: again.status };
         }""")
         assert kept != "no worker"
         assert kept["kept"] == ["/thumbs/p3.bin", "/thumbs/p4.bin", "/thumbs/p5.bin"], kept

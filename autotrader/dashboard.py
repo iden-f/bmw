@@ -17,7 +17,7 @@ from typing import Any
 
 from . import clock
 from .archive import size_report
-from . import geo, insight, qr, thumbs
+from . import carfax, geo, insight, qr, thumbs
 from . import budget, control
 from .config import CHANNEL_SECRETS, PINNED_SEARCH_ID, PINNED_SEARCH_NAME, Config
 from .listing import name_of, on_marketplace
@@ -57,6 +57,8 @@ LISTING_FIELDS = (
     # by its link and how it alerts, and a Marketplace pin waiting on the Mac.
     "revisions", "pinned", "pinned_notify", "pinned_checked_at", "awaiting_mac",
     "vin",
+    # The seller's Carfax link; the copy the bot holds is added as `carfax`.
+    "carfax_url",
 )
 
 
@@ -142,6 +144,7 @@ def build_payload(cfg: Config, state: State, env: dict[str, str] | None = None
             reference_names[search.id] = near
 
     photo_index = thumbs._load_index()
+    report_index = carfax._load_index()
     archive_ids = cfg.archive_only_ids
 
     listings: list[dict[str, Any]] = []
@@ -178,6 +181,10 @@ def build_payload(cfg: Config, state: State, env: dict[str, str] | None = None
         # Local photo copies, when held. The page tries these first so it
         # works offline; the remote URLs remain as a fallback.
         kept = thumbs.locals_for(entry.get("id"), photo_index)
+        # The seller's history report, when the bot holds a copy of it.
+        held = carfax.local_for(entry.get("id"), report_index)
+        if held and not item["filtered"]:
+            item["carfax"] = held
         if kept:
             item["thumb"] = kept[0]
             # Only locally held photos, so the gallery never hotlinks the CDN.

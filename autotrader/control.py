@@ -43,6 +43,8 @@ OPTIONS: dict[str, tuple[type, float, float]] = {
     "dashboard.photos_per_car": (int, 1, 24),
     "dashboard.photo_budget_mb": (int, 10, 5000),
     "dashboard.max_listings": (int, 100, 10000),
+    "dashboard.reports_per_run": (int, 0, 50),
+    "dashboard.report_budget_mb": (int, 10, 5000),
     "notifications.digest": (bool, 0, 1),
     "notifications.quiet_hours.enabled": (bool, 0, 1),
     "notifications.price_drop_alert_abs": (int, 0, 1_000_000),
@@ -62,6 +64,12 @@ RULE_TYPES: dict[str, type] = {
     # Other spellings of the watched model, for a car whose seller wrote it
     # some way the matching does not catch.
     "aliases": list,
+    # The model the search is for, and words a car must or must not carry.
+    "models": list, "include_keywords": list, "exclude_keywords": list,
+    # The provinces a car may be in, for a Marketplace radius that crosses one.
+    "provinces": list,
+    # What to type into Marketplace's search box instead of the make and model.
+    "marketplace_queries": list,
 }
 RULE_BOUNDS: dict[str, tuple[float, float]] = {
     "max_price": (1, 10_000_000), "min_price": (0, 10_000_000),
@@ -215,7 +223,8 @@ def _rule_value(name: str, value: Any) -> Any:
             raise Rejected(f"{name} takes at most {MAX_ALIASES}; got {len(names)}.")
         for alias in names:
             if not _ALIAS.match(alias):
-                raise Rejected(f"{alias[:40]!r} is not a model name: letters, digits, "
+                what = "a keyword" if name.endswith("_keywords") else "a model name"
+                raise Rejected(f"{alias[:40]!r} is not {what}: letters, digits, "
                                f"spaces and - . + / only, up to 40 characters.")
         return names or None
     if kind is bool:
@@ -433,10 +442,45 @@ def _plan(cfg, state, item: dict[str, Any], batch: _Batch | None = None):
             raise Rejected("that search is added twice in this change.")
         batch.added.add(wanted)
         name = str(item.get("name") or "").strip()[:80]
+        # Rules and the alerting mode can come with the search, so a new
+        # watch is right from its first check rather than after a second
+        # change: a search without its model rule would record every car
+        # the link returns, and an archive-only one would alert once.
+        from .config import NOTIFY_MODES
+        mode = str(item.get("notify") or "alert").strip().lower()
+        if mode not in NOTIFY_MODES:
+            raise Rejected(f"notify has to be one of {', '.join(NOTIFY_MODES)}; "
+                           f"got {mode[:20] or 'nothing'}.")
+        given = item.get("filters")
+        if given is not None and not isinstance(given, dict):
+            raise Rejected("filters has to be an object of rule names and values.")
+        rules: dict[str, Any] = {}
+        for rule, value in (given or {}).items():
+            rule = str(rule)
+            if rule in _DROP_FLOORS:
+                raise Rejected(f"{rule} is set with set-rule once the search exists.")
+            parsed = _rule_value(rule, value)
+            if parsed is not None:
+                rules[rule] = parsed
+        if rules.get("max_distance_km") and not rules.get("near") \
+                and not cfg.get("filters.near"):
+            raise Rejected("max_distance_km needs a place to measure from: give "
+                           f"near as well, {_PLACES_THAT_WORK}.")
 
         def do():
             search = cfg.add_search(url, name)
-            return f"added the search {search.name!r}"
+            for row in cfg.data.get("searches", []):
+                if row.get("id") == search.id:
+                    if rules:
+                        row.setdefault("filters", {}).update(rules)
+                    if mode != "alert":
+                        row["notify"] = mode
+            said = f"added the search {search.name!r}"
+            if rules:
+                said += " with " + ", ".join(f"{k} = {v!r}" for k, v in rules.items())
+            if mode == "archive":
+                said += "; archive only: recorded, never announced"
+            return said
         return do
 
     if action == "remove-search":

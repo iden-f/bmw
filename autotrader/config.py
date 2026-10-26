@@ -273,6 +273,10 @@ DEFAULTS: dict[str, Any] = {
         # market: how many per car, and how much room they may take in all.
         "photos_per_car": 12,
         "photo_budget_mb": 600,
+        # Our own copies of the Carfax reports sellers publish: how many to
+        # fetch per check, and how much room they may take in all.
+        "reports_per_run": 5,
+        "report_budget_mb": 300,
     },
 }
 
@@ -284,7 +288,7 @@ FILTER_RULES = ("min_price", "max_price", "min_year", "max_year", "max_mileage_k
                 "include_keywords", "exclude_keywords", "exclude_sellers",
                 "require_price")
 # Settings read with a fallback of their own and not written into DEFAULTS.
-OPTIONAL_SETTINGS = ("dashboard.photos", "health.coverage_floor_pct")
+OPTIONAL_SETTINGS = ("dashboard.photos", "dashboard.reports", "health.coverage_floor_pct")
 
 # The id and name of the search that owns pinned listings in state. Not a
 # real search: nothing is read for it as a whole, each pinned car is read on

@@ -86,6 +86,19 @@ def cmd_run(args: argparse.Namespace) -> int:
                 print(f"   {DIM}  {detail} - {sample['error']}{RESET}")
             else:
                 print(f"   {DIM}  {detail}{RESET}")
+    if report.reports:
+        held = report.reports
+        print(f"   reports: {held['kept']} kept ({held['bytes'] / 1e6:.1f} MB), "
+              f"{held['fetched']} new, {held['failed']} failed, "
+              f"{held['pruned']} pruned")
+        for sample in held.get("samples", []):
+            detail = (f"{sample.get('status')} {sample.get('type') or '?'} "
+                      f"{sample.get('bytes', 0)}B"
+                      + (" printed" if sample.get("printed") else ""))
+            if sample.get("error"):
+                print(f"   {DIM}  {detail} - {sample['error']}{RESET}")
+            else:
+                print(f"   {DIM}  {detail}{RESET}")
     if not args.dry_run:
         # The channel secrets are in this environment; without them the page
         # would say that no channel is on.
@@ -913,6 +926,50 @@ def cmd_events(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_control_seal(args: argparse.Namespace) -> int:
+    """Write a sealed change file, the way the dashboard does.
+
+    For a terminal that holds the passphrase (the vault must be pulled, for
+    its salt): the instructions in a JSON file become ``control/<stamp>-
+    <nonce>.enc``, to commit to main. The next check applies them whole or
+    refuses them whole, as it would a change from the page. The file is
+    padded to a whole kilobyte so its size does not say what it changes.
+    """
+    import secrets as _secrets
+    from datetime import timezone
+    from . import clock, control
+    from . import vault as V
+
+    try:
+        text = Path(args.instructions).read_text(encoding="utf-8")
+        items = control.parse(text)
+    except OSError as exc:
+        print(_bad(f"could not read {args.instructions}: {exc}"))
+        return 2
+    except control.Rejected as exc:
+        print(_bad(str(exc)))
+        return 2
+    try:
+        key = V.Vault.unlock(Path(".")).key
+    except V.VaultError as exc:
+        print(_bad(f"{exc} - run `vault pull` first, with WATCH_PASSPHRASE set"))
+        return 2
+    now = clock.now().astimezone(timezone.utc)
+    raw = json.dumps({"id": _secrets.token_hex(16),
+                      "at": now.isoformat(timespec="milliseconds").replace("+00:00", "Z"),
+                      "changes": items}).encode("utf-8")
+    body = raw + b" " * (-(len(raw) + 1) // 1024 * -1024 - len(raw))
+    sealed = V.seal(key, body, "control", compress=False, pad=0)
+    out_dir = Path(args.out)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    stamp = now.strftime("%Y%m%d%H%M%S")
+    target = out_dir / f"{stamp}-{_secrets.token_hex(3)}.enc"
+    target.write_text(base64.b64encode(sealed).decode("ascii") + "\n", encoding="utf-8")
+    # Only the file's name: this may run where the log is public.
+    print(f"sealed {len(items)} instruction{'s' if len(items) != 1 else ''} into {target}")
+    return 0
+
+
 def cmd_control(args: argparse.Namespace) -> int:
     """Apply changes sent from the dashboard.
 
@@ -1442,6 +1499,12 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--dry-run", action="store_true",
                    help="say what would change without writing anything")
     p.set_defaults(func=cmd_control)
+
+    p = sub.add_parser("seal-change", help="seal a JSON instruction file into control/, "
+                       "as the dashboard would (needs the vault pulled and WATCH_PASSPHRASE)")
+    p.add_argument("instructions", help="a JSON file of instructions, as the dashboard writes")
+    p.add_argument("--out", default="control", help="where to write it (default control/)")
+    p.set_defaults(func=cmd_control_seal)
 
     p = sub.add_parser("marketplace",
                        help="Facebook Marketplace: take in what the collector read")

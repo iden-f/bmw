@@ -58,6 +58,7 @@ ENV_PREVIOUS = "WATCH_PASSPHRASE_PREVIOUS"
 VAULT_DIR = Path("vault")
 META_FILE = "meta.json"
 THUMBS_DIR = "thumbs"
+REPORTS_DIR = "reports"
 PAGE_DIGEST = "page.enc"
 
 #: Where the vault and the published site live: single-commit branches,
@@ -79,6 +80,7 @@ PRIVATE_FILES = {
 #: Working-tree directories sealed file by file under hashed names.
 PRIVATE_DIRS = {
     "docs/thumbs": "thumbs",
+    "docs/reports": "reports",
     "diagnostics": "diagnostics",
     "archives": "archives",
 }
@@ -473,8 +475,9 @@ class Vault:
 
         ``docs/`` holds the page and, after a run, the plaintext it is built
         from. Only the page's own files are copied; data.json goes out as
-        data.enc and each photo as thumbs/<hashed>.bin. Everything else in
-        ``docs/`` is left behind.
+        data.enc, each photo as thumbs/<hashed>.bin and each saved history
+        report as reports/<hashed>.bin. Everything else in ``docs/`` is left
+        behind.
         """
         if out.exists():
             shutil.rmtree(out)
@@ -503,12 +506,27 @@ class Vault:
                     seal(self.key, path.read_bytes(), f"thumbs/{hashed}.bin",
                          compress=False))
                 photos += 1
+        reports = 0
+        held = docs / REPORTS_DIR
+        if held.is_dir():
+            (out / REPORTS_DIR).mkdir()
+            for path in sorted(p for p in held.iterdir() if p.is_file()):
+                if path.name == "index.json":
+                    continue
+                hashed = self.report_name(path.name)
+                (out / REPORTS_DIR / f"{hashed}.bin").write_bytes(
+                    seal(self.key, path.read_bytes(), f"{REPORTS_DIR}/{hashed}.bin",
+                         compress=False))
+                reports += 1
         lock = {k: self.meta[k] for k in ("format", "version", "kdf", "check")}
         (out / "lock.json").write_text(json.dumps(lock, indent=2) + "\n", encoding="utf-8")
-        return {"copied": copied, "sealed": sealed, "photos": photos}
+        return {"copied": copied, "sealed": sealed, "photos": photos, "reports": reports}
 
     def photo_name(self, filename: str) -> str:
         return hashed_name(self.name_key, f"photo/{filename}")
+
+    def report_name(self, filename: str) -> str:
+        return hashed_name(self.name_key, f"report/{filename}")
 
 
 # ------------------------------------------------------------------ the site
@@ -548,14 +566,14 @@ def unpublishable(out: Path | str) -> str:
         return "`vault site` did not build it (it has no lock.json)"
     for path in out.rglob("*"):
         parts = path.relative_to(out).parts
-        if parts == (THUMBS_DIR,) and path.is_dir():
+        if parts in ((THUMBS_DIR,), (REPORTS_DIR,)) and path.is_dir():
             continue
         if len(parts) == 1 and path.is_file() and (
                 parts[0] in SITE_FILES or parts[0] in SITE_EXTRAS
                 or parts[0].startswith("icon")):
             continue
-        if (len(parts) == 2 and parts[0] == THUMBS_DIR and path.is_file()
-                and parts[1].endswith(".bin")):
+        if (len(parts) == 2 and parts[0] in (THUMBS_DIR, REPORTS_DIR)
+                and path.is_file() and parts[1].endswith(".bin")):
             continue
         # Not named: this is printed in a public log, and a photo is named
         # for its listing.

@@ -72,6 +72,9 @@ class Listing:
     fuel: str = ""
     engine: str = ""
     vin: str = ""
+    # The Carfax report the seller published with the listing, when there is
+    # one: a link that opens the report, never one that sells it.
+    carfax_url: str = ""
     images: list[str] = field(default_factory=list)
     # Your mark on this car, carried onto the Listing so the notifier can see
     # it without reaching back into state.

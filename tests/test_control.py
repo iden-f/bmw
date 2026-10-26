@@ -714,3 +714,61 @@ class TestWhyAChannelIsOff:
         control.apply(cfg, state_with(), [{"action": "set-channel", "channel": "ntfy",
                                            "enabled": True}])
         assert "disabled_reason" not in cfg.get("notifications.channels.ntfy")
+
+
+class TestAddingASearchWithItsRules:
+    URL = "https://www.autotrader.ca/cars/honda/civic/reg_on/?modelyearfrom=2017&modelyearto=2020"
+
+    def test_rules_and_the_mode_arrive_with_the_search(self):
+        cfg = cfg_with()
+        out = control.apply(cfg, state_with(), [{
+            "action": "add-search", "url": self.URL, "name": "Civics",
+            "notify": "archive",
+            "filters": {"models": ["Civic"], "aliases": ["Civic Si"],
+                        "include_keywords": ["Type R", "Si"], "min_year": 2017,
+                        "max_year": 2020}}])
+        assert not out.rejected, out.rejected
+        added = next(s for s in cfg.searches if s.name == "Civics")
+        assert added.archive_only
+        assert added.filters == {"models": ["Civic"], "aliases": ["Civic Si"],
+                                 "include_keywords": ["Type R", "Si"],
+                                 "min_year": 2017, "max_year": 2020}
+        assert "archive only" in out.applied[0] and "models" in out.applied[0]
+
+    def test_without_them_the_search_alerts_and_has_no_rules(self):
+        cfg = cfg_with()
+        out = control.apply(cfg, state_with(), [{"action": "add-search", "url": self.URL}])
+        assert not out.rejected
+        added = cfg.searches[-1]
+        assert not added.archive_only and added.filters == {}
+
+    def test_a_bad_rule_refuses_the_whole_search(self):
+        cfg = cfg_with()
+        before = len(cfg.searches)
+        out = control.apply(cfg, state_with(), [{
+            "action": "add-search", "url": self.URL,
+            "filters": {"min_year": "soon", "models": ["Civic"]}}])
+        assert out.rejected and "min_year" in out.rejected[0]
+        assert len(cfg.searches) == before
+
+    def test_an_unknown_rule_and_mode_are_refused_by_name(self):
+        cfg = cfg_with()
+        out = control.apply(cfg, state_with(), [{
+            "action": "add-search", "url": self.URL, "filters": {"colour": "blue"}}])
+        assert out.rejected and "colour" in out.rejected[0]
+        out = control.apply(cfg, state_with(), [{
+            "action": "add-search", "url": self.URL, "notify": "loudly"}])
+        assert out.rejected and "notify" in out.rejected[0]
+
+    def test_a_distance_needs_a_place(self):
+        cfg = cfg_with()
+        out = control.apply(cfg, state_with(), [{
+            "action": "add-search", "url": self.URL, "filters": {"max_distance_km": 50}}])
+        assert out.rejected and "near" in out.rejected[0]
+
+    def test_a_keyword_that_is_not_a_word_is_refused(self):
+        cfg = cfg_with()
+        out = control.apply(cfg, state_with(), [{
+            "action": "add-search", "url": self.URL,
+            "filters": {"include_keywords": ["<script>"]}}])
+        assert out.rejected and "keyword" in out.rejected[0]

@@ -938,3 +938,23 @@ class TestACarTwoSearchesSee:
         assert settled["hidden"] == 0 and settled["elsewhere"] == 1
         assert settled["read"] == settled["other_models"] + settled["hidden"] \
             + settled["kept"] + settled["elsewhere"]
+
+
+class TestAskingMarketplaceByAnotherName:
+
+    def test_a_search_can_say_what_to_type(self):
+        from autotrader.config import Config
+        cfg = Config.defaults("/nonexistent/config.json")
+        s = cfg.add_search("https://www.autotrader.ca/cars/honda/civic/reg_on/", "Civics")
+        plan = M.plan(cfg)[0]
+        assert [q["query"] for q in plan["queries"]] == ["Honda Civic"] * len(M.ORDERS)
+        for row in cfg.data["searches"]:
+            if row["id"] == s.id:
+                row["filters"] = {"models": ["Civic"], "aliases": ["Civic Type R"],
+                                  "marketplace_queries": ["Honda Civic Type R", "Honda Civic"]}
+        changed = M.plan(cfg)[0]
+        assert [q["query"] for q in changed["queries"]] == [
+            q for q in ("Honda Civic Type R", "Honda Civic") for _ in M.ORDERS]
+        assert "query=Honda+Civic+Type+R" in changed["queries"][0]["url"]
+        # What is asked changed, so it is a new starting point.
+        assert changed["scope"] != plan["scope"]
