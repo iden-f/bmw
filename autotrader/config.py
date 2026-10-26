@@ -83,9 +83,21 @@ def secrets_present(env: dict[str, str]) -> list[str]:
                    for name in spec["required"] if (env.get(name) or "").strip()})
 
 
+# How a search treats what it finds. "alert" announces changes the way the
+# notify_on switches ask; "archive" records every car, price and photo and
+# announces nothing about them. Service alarms (a search that cannot be read,
+# a channel that died) are separate and still go out.
+NOTIFY_MODES = ("alert", "archive")
+# The settings version this code writes. Loading an older file upgrades it
+# (see Config.upgrade): 2 -> 3 made the archive permanent.
+CONFIG_VERSION = 3
+
 DEFAULTS: dict[str, Any] = {
-    "version": 2,
+    "version": CONFIG_VERSION,
     "searches": [],
+    # Single listings you asked to follow by pasting their link (see
+    # pinned.py). Each is {"id", "url", "name", "notify", "added_at"}.
+    "pinned": [],
     "filters": {
         "min_price": None,
         "max_price": None,
@@ -169,8 +181,14 @@ DEFAULTS: dict[str, Any] = {
         # car; "full" also stores the raw HTML, which grows quickly.
         "mode": "metadata",
         "images": 0,
-        "keep_last": 400,
-        "keep_days": 730,
+        # Retention. Zero means keep forever: the archive is a record of the
+        # market, and a car that left it is the record's point. Set either
+        # to prune the archive folders and the gone cars in state.
+        "keep_last": 0,
+        "keep_days": 0,
+        # Cars kept in state at most; zero for no limit. Live cars, cars you
+        # marked, pinned listings and archive-only searches are never pruned.
+        "keep_max_listings": 0,
     },
     # What the bot may cost. budget.py counts wall-clock runner minutes as
     # billable, projects the month, and writes BUDGET-STOP at the ceiling.
@@ -247,7 +265,14 @@ DEFAULTS: dict[str, Any] = {
         # 2.5 intervals.
         "silent_after_hours": 6,
     },
-    "dashboard": {"enabled": True, "max_listings": 500},
+    "dashboard": {
+        "enabled": True,
+        "max_listings": 2000,
+        # Our own copies of the photos, kept for a car after it leaves the
+        # market: how many per car, and how much room they may take in all.
+        "photos_per_car": 12,
+        "photo_budget_mb": 600,
+    },
 }
 
 
@@ -259,6 +284,12 @@ FILTER_RULES = ("min_price", "max_price", "min_year", "max_year", "max_mileage_k
                 "require_price")
 # Settings read with a fallback of their own and not written into DEFAULTS.
 OPTIONAL_SETTINGS = ("dashboard.photos", "health.coverage_floor_pct")
+
+# The id and name of the search that owns pinned listings in state. Not a
+# real search: nothing is read for it as a whole, each pinned car is read on
+# its own page.
+PINNED_SEARCH_ID = "pinned"
+PINNED_SEARCH_NAME = "Saved listings"
 
 
 def _setting_paths(node: Any = DEFAULTS, prefix: str = "") -> list[str]:
@@ -343,6 +374,13 @@ class Search:
     # Whether the Marketplace collector also reads this search. On unless
     # switched off, so a new search is read on both sites.
     marketplace: bool = True
+    # "alert" or "archive": see NOTIFY_MODES.
+    notify: str = "alert"
+
+    @property
+    def archive_only(self) -> bool:
+        """Records everything it finds and announces none of it."""
+        return self.notify == "archive"
 
     @classmethod
     def from_dict(cls, raw: dict[str, Any], index: int = 0) -> "Search":
@@ -366,6 +404,9 @@ class Search:
             price_drop_min_pct=float(drop_pct) if drop_pct is not None else None,
             price_drop_min_abs=int(drop_abs) if drop_abs is not None else None,
             marketplace=raw.get("marketplace", True) is not False,
+            notify=(str(raw.get("notify") or "alert").strip().lower()
+                    if str(raw.get("notify") or "alert").strip().lower() in NOTIFY_MODES
+                    else "alert"),
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -386,7 +427,74 @@ class Search:
             out["price_drop_min_abs"] = self.price_drop_min_abs
         if not self.marketplace:
             out["marketplace"] = False
+        if self.notify != "alert":
+            out["notify"] = self.notify
         return out
+
+
+# A Facebook Marketplace item link: facebook.com/marketplace/item/<id>/...
+_MARKETPLACE_ITEM = re.compile(
+    r"^https?://(?:www\.|m\.|web\.)?facebook\.com/marketplace/item/(\d{5,20})\b", re.I)
+
+
+@dataclass
+class Pinned:
+    """One listing followed by its link rather than found by a search."""
+    id: str
+    url: str
+    name: str = ""
+    notify: str = "archive"
+    added_at: str = ""
+
+    @property
+    def archive_only(self) -> bool:
+        return self.notify == "archive"
+
+    @property
+    def site(self) -> str:
+        return "marketplace" if self.id.startswith("fb-") else "autotrader"
+
+    @classmethod
+    def from_dict(cls, raw: dict[str, Any]) -> "Pinned | None":
+        from .listing import MARKETPLACE_PREFIX
+        from .urls import canonical_listing_url, is_listing_url, listing_id_from_url
+        from . import clock
+        url = str(raw.get("url") or "").strip()
+        if not url:
+            return None
+        listing_id = str(raw.get("id") or "").strip()
+        fb = _MARKETPLACE_ITEM.match(url)
+        if fb:
+            listing_id = f"{MARKETPLACE_PREFIX}{fb.group(1)}"
+            url = f"https://www.facebook.com/marketplace/item/{fb.group(1)}/"
+        elif is_listing_url(url) and _autotrader_host(url):
+            listing_id = listing_id_from_url(url) or listing_id
+            url = canonical_listing_url(url) or url
+        if not listing_id:
+            return None
+        notify = str(raw.get("notify") or "archive").strip().lower()
+        return cls(
+            id=listing_id, url=url,
+            name=str(raw.get("name") or "").strip()[:80],
+            notify=notify if notify in NOTIFY_MODES else "archive",
+            added_at=str(raw.get("added_at") or "").strip() or clock.stamp(),
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        out: dict[str, Any] = {"id": self.id, "url": self.url, "notify": self.notify,
+                               "added_at": self.added_at}
+        if self.name:
+            out["name"] = self.name
+        return out
+
+
+def _autotrader_host(url: str) -> bool:
+    from urllib.parse import urlparse
+    from .urls import KNOWN_HOSTS
+    try:
+        return urlparse(url).netloc.lower() in KNOWN_HOSTS
+    except ValueError:
+        return False
 
 
 @dataclass
@@ -437,7 +545,38 @@ class Config:
             seen.add(search.id)
             searches.append(search.to_dict())
         self.data["searches"] = searches
-        self.data["version"] = 2
+        self.data["pinned"] = [p.to_dict() for p in self.pinned]
+        self.upgrade()
+        self.data["version"] = CONFIG_VERSION
+
+    def upgrade(self) -> list[str]:
+        """Bring a file written by an older version up to date. Idempotent.
+
+        Returns what it changed, in words. Config.save writes every default
+        out in full, so a changed default alone never reaches a file that
+        already exists: the change has to be made here, once, by version.
+        """
+        done: list[str] = []
+        try:
+            version = int(self.data.get("version") or 0)
+        except (TypeError, ValueError):
+            version = 0
+        if 0 < version < 3:
+            # Version 3: the archive is permanent. The old retention limits
+            # (400 folders, 730 days; 20 published price points) made the
+            # archive disposable, which is the opposite of what it is for.
+            archive = self.data.setdefault("archive", {})
+            if int(archive.get("keep_last") or 0) == 400:
+                archive["keep_last"] = 0
+                done.append("archive.keep_last 400 -> 0 (keep forever)")
+            if int(archive.get("keep_days") or 0) == 730:
+                archive["keep_days"] = 0
+                done.append("archive.keep_days 730 -> 0 (keep forever)")
+            dash = self.data.setdefault("dashboard", {})
+            if int(dash.get("max_listings") or 0) < 2000:
+                dash["max_listings"] = 2000
+                done.append("dashboard.max_listings -> 2000")
+        return done
 
     def save(self, path: Path | None = None) -> Path:
         target = Path(path) if path else self.path
@@ -457,6 +596,49 @@ class Config:
     @property
     def active_searches(self) -> list[Search]:
         return [s for s in self.searches if s.enabled and s.url]
+
+    @property
+    def archive_only_ids(self) -> set[str]:
+        """The searches that record without alerting."""
+        return {s.id for s in self.searches if s.archive_only}
+
+    # ---------------- pinned listings ----------------
+
+    @property
+    def pinned(self) -> list["Pinned"]:
+        out: list[Pinned] = []
+        seen: set[str] = set()
+        for raw in self.data.get("pinned") or []:
+            if not isinstance(raw, dict):
+                continue
+            pin = Pinned.from_dict(raw)
+            if not pin or pin.id in seen:
+                continue
+            seen.add(pin.id)
+            out.append(pin)
+        return out
+
+    def pin_listing(self, url: str, name: str = "", notify: str = "archive") -> "Pinned":
+        """Follow one listing by its link. Returns the stored record."""
+        pin = Pinned.from_dict({"url": url, "name": name, "notify": notify})
+        if pin is None:
+            raise ConfigError("that is not a listing link this bot can follow: "
+                              "paste the address of one car's page on "
+                              "autotrader.ca or Facebook Marketplace.")
+        for existing in self.pinned:
+            if existing.id == pin.id:
+                raise ConfigError(f"that listing is already saved as "
+                                  f"\"{existing.name or existing.id}\".")
+        self.data.setdefault("pinned", []).append(pin.to_dict())
+        return pin
+
+    def unpin_listing(self, listing_id: str) -> bool:
+        before = len(self.data.get("pinned") or [])
+        self.data["pinned"] = [p for p in (self.data.get("pinned") or [])
+                               if isinstance(p, dict)
+                               and Pinned.from_dict(p) is not None
+                               and Pinned.from_dict(p).id != listing_id]
+        return len(self.data["pinned"]) < before
 
     def get(self, path: str, default: Any = None) -> Any:
         node: Any = self.data
@@ -502,6 +684,8 @@ class Config:
         return {
             "filters": filters,
             "notify_on": notify_on,
+            # Everything the search finds is recorded and nothing announced.
+            "archive_only": search.archive_only,
             "price_drop_min_pct": (search.price_drop_min_pct
                                    if search.price_drop_min_pct is not None
                                    else float(settings.get("price_drop_min_pct", 1.0) or 0)),

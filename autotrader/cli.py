@@ -15,7 +15,7 @@ from typing import Any
 from . import dashboard, notifiers, words
 from .archive import prune as prune_archives
 from .archive import size_report
-from .config import (CHANNEL_SECRETS, Config, ConfigError, known_setting,
+from .config import (CHANNEL_SECRETS, PINNED_SEARCH_ID, Config, ConfigError, known_setting,
                      nearest_setting)
 from .http import Fetcher
 from .listing import Listing, name_of, on_marketplace
@@ -165,7 +165,7 @@ def _orphans(cfg: Config, state_path: Path) -> list[str]:
     if not state_path.exists():
         return []
     state = State.load(state_path)
-    keep = {s.id for s in cfg.searches}
+    keep = {s.id for s in cfg.searches} | {PINNED_SEARCH_ID}
     return [lid for lid, entry in state.listings.items()
             if str(entry.get("search_id") or "") not in keep
             and not entry.get("pending")]
@@ -174,7 +174,7 @@ def _orphans(cfg: Config, state_path: Path) -> list[str]:
 def _forget(cfg: Config, state_path: Path, *, yes: bool) -> int:
     """Drop, or offer to drop, the cars that no search watches."""
     state = State.load(state_path)
-    keep = {s.id for s in cfg.searches}
+    keep = {s.id for s in cfg.searches} | {PINNED_SEARCH_ID}
     owed = [lid for lid, entry in state.listings.items()
             if str(entry.get("search_id") or "") not in keep and entry.get("pending")]
     if not yes:
@@ -1222,8 +1222,11 @@ def cmd_weekly(args: argparse.Namespace) -> int:
         if week is None:
             print("The weekly digest is not due.")
             return 0
-    summary = insight.weekly(state.listings.values(),
-                             state.data.get("runs") or [], days=args.days)
+    quiet = cfg.archive_only_ids | {PINNED_SEARCH_ID}
+    summary = insight.weekly(
+        [e for e in state.listings.values()
+         if str(e.get("search_id") or "") not in quiet],
+        state.data.get("runs") or [], days=args.days)
     text = insight.weekly_text(summary)
     print(text)
     if args.notify:
