@@ -309,7 +309,8 @@ class TestWhatTheCollectorSaysOfItself:
         from collector.cycle import build
         from collector.settings import Settings
         b = build(Settings(host="collector-a"), [], polled=False, session="ok", wait=600)
-        assert b["settings"]["every_minutes"] == 25 and b["settings"]["quiet_start"] == "02:00"
+        assert b["settings"]["every_minutes"] == 5 and b["settings"]["quiet_start"] == "23:00"
+        assert b["settings"]["quiet_every_minutes"] == 10 and b["settings"]["quiet_reads"] is True
         assert clock.parse(b["next_at"]) > clock.now()
 
 

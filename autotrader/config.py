@@ -90,7 +90,7 @@ def secrets_present(env: dict[str, str]) -> list[str]:
 NOTIFY_MODES = ("alert", "archive")
 # The settings version this code writes. Loading an older file upgrades it
 # (see Config.upgrade): 2 -> 3 made the archive permanent.
-CONFIG_VERSION = 3
+CONFIG_VERSION = 4
 
 DEFAULTS: dict[str, Any] = {
     "version": CONFIG_VERSION,
@@ -139,9 +139,10 @@ DEFAULTS: dict[str, Any] = {
         "price_drop_min_abs": 250,
         # The drop, from the last price you were told, that earns a
         # notification of its own. Smaller drops over the floor ride along in
-        # the next new-listing notification. 0 sends every drop over the floor
+        # the next new-listing notification (or stay on the dashboard, with
+        # small_drops_ride_along off). 0 sends every drop over the floor
         # straight away.
-        "price_drop_alert_abs": 0,
+        "price_drop_alert_abs": 2000,
         "small_drops_ride_along": True,
         "channels": {
             "telegram": {"enabled": "auto", "photos": True},
@@ -231,11 +232,11 @@ DEFAULTS: dict[str, Any] = {
         # A car unseen for this long while its search reads fine is gone.
         "gone_after_days": 10,
         # The watchdog: no word from the collector, or no successful read.
-        # The collector's overnight pause is six hours, so the last read of
-        # the night and the first of the morning are that far apart already:
-        # nine gives a failing morning a few passes before the alarm.
-        "silent_after_hours": 2,
-        "unread_after_hours": 9,
+        # The collector passes every few minutes and keeps reading overnight,
+        # only more slowly, so an hour without a word and three without a
+        # successful read are many missed passes, not one.
+        "silent_after_hours": 1,
+        "unread_after_hours": 3,
     },
     "health": {
         "alert_after_failures": 3,
@@ -257,8 +258,8 @@ DEFAULTS: dict[str, Any] = {
         # not necessarily where notifications are timed): between `start` and
         # `end` the bot checks every `interval_minutes` instead of
         # expected_interval_minutes. Only ever slows the watch down.
-        "overnight": {"enabled": True, "start": "02:00", "end": "08:00",
-                      "interval_minutes": 120, "timezone": "America/Vancouver"},
+        "overnight": {"enabled": True, "start": "23:00", "end": "08:00",
+                      "interval_minutes": 60, "timezone": "America/Vancouver"},
         # No successful check for this long raises the "gone quiet" alarm.
         # Several intervals, because GitHub drops windows in pairs and an alarm
         # that cries wolf gets muted; tests/test_config.py keeps it at least
@@ -580,6 +581,31 @@ class Config:
             if int(dash.get("max_listings") or 0) < 2000:
                 dash["max_listings"] = 2000
                 done.append("dashboard.max_listings -> 2000")
+        if version < 4:
+            # Version 4: the watch runs faster and alerts less often. A drop
+            # has to be $2,000 to earn an alert of its own; the overnight
+            # window is 23:00 to 08:00, hourly; and the Marketplace watchdog
+            # expects a word every hour and a read every three, since the
+            # collector no longer sleeps the night through. Only a value
+            # still at its old default is touched: a figure the owner set is
+            # the owner's.
+            alerts = self.data.setdefault("notifications", {})
+            if int(alerts.get("price_drop_alert_abs") or 0) == 0:
+                alerts["price_drop_alert_abs"] = 2000
+                done.append("notifications.price_drop_alert_abs 0 -> 2000")
+            night = (self.data.setdefault("health", {})).get("overnight")
+            if isinstance(night, dict) and (night.get("start"), night.get("end"),
+                                            night.get("interval_minutes")) \
+                    == ("02:00", "08:00", 120):
+                night.update({"start": "23:00", "end": "08:00", "interval_minutes": 60})
+                done.append("health.overnight 02:00-08:00 every 120 -> 23:00-08:00 every 60")
+            market = self.data.setdefault("marketplace", {})
+            if market.get("silent_after_hours") == 2:
+                market["silent_after_hours"] = 1
+                done.append("marketplace.silent_after_hours 2 -> 1")
+            if market.get("unread_after_hours") == 9:
+                market["unread_after_hours"] = 3
+                done.append("marketplace.unread_after_hours 9 -> 3")
         return done
 
     def save(self, path: Path | None = None) -> Path:

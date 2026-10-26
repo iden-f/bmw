@@ -60,15 +60,18 @@ class Settings:
     # gone quiet or Facebook will not let it in, so two computers never
     # double the load on one account.
     role: str = "primary"
-    every_minutes: int = 25
-    jitter_minutes: int = 5
-    # Local time. Overnight it only checks in, which also keeps the bot's own
-    # timer going.
-    quiet_start: str = "02:00"
+    every_minutes: int = 5
+    jitter_minutes: int = 1
+    # Local time. Overnight it slows to quiet_every_minutes; each pass still
+    # reads unless quiet_reads is off, in which case it only checks in,
+    # which also keeps the bot's own timer going.
+    quiet_start: str = "23:00"
     quiet_end: str = "08:00"
-    # How often it checks in while resting. Each check-in starts a run of the
-    # bot's check, which is billed by the minute, so it is rare.
-    quiet_every_minutes: int = 120
+    # How often it passes while resting. Each pass starts a run of the bot's
+    # check, which is free on a public repository and billed by the minute
+    # on a private one.
+    quiet_every_minutes: int = 10
+    quiet_reads: bool = True
     # A standby takes over when the primary has not been heard for this long.
     takeover_after_minutes: int = 75
     # Listing pages opened per cycle for cars that pass your rules, for the

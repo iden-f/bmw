@@ -655,8 +655,11 @@ def _take(kept: list[Listing], unpriced: list[Listing], *, state: State,
             worth_mentioning = filters.is_significant_drop(
                 was, now,
                 rules["price_drop_min_pct"], rules["price_drop_min_abs"])
-            big_enough_alone = (worth_mentioning and alert_abs <= 0) or (
-                alert_abs > 0 and was - now >= alert_abs)
+            # The bar for an alert of its own is read on top of the floor,
+            # never instead of it: a search whose own floor is higher than
+            # the bar keeps its floor.
+            big_enough_alone = worth_mentioning and (
+                alert_abs <= 0 or was - now >= alert_abs)
             if worth_mentioning or big_enough_alone:
                 report.price_drops += 1
             if heard is not None and now >= heard:

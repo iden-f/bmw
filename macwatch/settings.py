@@ -69,14 +69,14 @@ class Settings:
     # Collection cadence. The AutoTrader read is plain HTTP and cheap; the
     # Marketplace read drives the collector's browser and shares its profile
     # lock with the existing collector, so it is slower by default.
-    interval_minutes: int = 10
+    interval_minutes: int = 15
     marketplace_interval_minutes: int = 20
     autotrader_enabled: bool = True
     marketplace_enabled: bool = True
     # Overnight, both sources slow to this interval. Local time in `timezone`.
-    quiet_start: str = "02:00"
+    quiet_start: str = "23:00"
     quiet_end: str = "08:00"
-    quiet_interval_minutes: int = 120
+    quiet_interval_minutes: int = 60
     timezone: str = "America/Vancouver"
     # Marketplace reading, mirroring the collector's own knobs.
     details_per_cycle: int = 3
