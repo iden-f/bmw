@@ -1,0 +1,235 @@
+<!doctype html>
+<html lang="en-CA">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<title>Watch on Mac</title>
+<style>
+:root{--bg:#f2f2f7;--surface:#fff;--text:#111;--muted:#6b6b70;--line:#e3e3e8;--accent:#0a84ff;--good:#1f8f4a;--bad:#d1434b;--warn:#b7791f;--radius:20px}
+@media (prefers-color-scheme:dark){:root{--bg:#000;--surface:#1c1c1e;--text:#f2f2f7;--muted:#9a9aa0;--line:#2c2c2e}}
+*{box-sizing:border-box}
+html,body{margin:0;background:var(--bg);color:var(--text);font:16px/1.45 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;-webkit-font-smoothing:antialiased}
+a{color:var(--accent);text-decoration:none}
+main{max-width:980px;margin:0 auto;padding:16px 20px calc(96px + env(safe-area-inset-bottom))}
+h1{font-size:30px;margin:8px 0 12px;font-weight:650;letter-spacing:-.01em}
+h2{font-size:18px;margin:20px 0 8px}
+.row{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+.seg{display:inline-flex;background:var(--line);border-radius:999px;padding:3px}
+.seg button{border:0;background:transparent;color:var(--text);padding:7px 14px;border-radius:999px;font-size:14px;min-height:36px}
+.seg button.on{background:var(--surface);box-shadow:0 1px 2px rgba(0,0,0,.12)}
+select,input[type=text],input[type=number],textarea{font:inherit;color:var(--text);background:var(--surface);border:1px solid var(--line);border-radius:12px;padding:10px 12px;min-height:44px}
+textarea{width:100%;min-height:80px}
+.btn{font:inherit;border:0;border-radius:12px;padding:10px 16px;min-height:44px;background:var(--accent);color:#fff}
+.btn.quiet{background:var(--line);color:var(--text)}
+.btn.danger{background:var(--bad)}
+.grid{display:grid;grid-template-columns:1fr;gap:14px;margin-top:14px}
+@media(min-width:560px){.grid{grid-template-columns:repeat(2,1fr)}}
+@media(min-width:900px){.grid{grid-template-columns:repeat(3,1fr)}}
+.card{background:var(--surface);border-radius:var(--radius);overflow:hidden;display:block;color:inherit}
+.photo{aspect-ratio:4/3;background:var(--line);width:100%;object-fit:cover;display:block}
+.ph{aspect-ratio:4/3;background:linear-gradient(135deg,var(--line),transparent);display:flex;align-items:center;justify-content:center;color:var(--muted);font-size:14px}
+.body{padding:12px 14px 14px}
+.title{font-weight:600;font-size:16px;line-height:1.3;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+.price{font-size:20px;font-weight:700;font-variant-numeric:tabular-nums;margin-top:4px}
+.sub{color:var(--muted);font-size:14px;margin-top:2px;font-variant-numeric:tabular-nums}
+.tag{display:inline-block;font-size:12px;padding:2px 8px;border-radius:999px;background:var(--line);color:var(--muted);margin-right:6px;margin-top:6px}
+.tag.good{background:rgba(31,143,74,.15);color:var(--good)}.tag.bad{background:rgba(209,67,75,.15);color:var(--bad)}.tag.warn{background:rgba(183,121,31,.15);color:var(--warn)}
+.drop{color:var(--good);font-weight:600;font-size:14px}
+nav{position:fixed;left:0;right:0;bottom:0;display:flex;justify-content:space-around;padding:8px 8px calc(8px + env(safe-area-inset-bottom));background:color-mix(in srgb,var(--surface) 82%,transparent);backdrop-filter:blur(18px) saturate(1.4);-webkit-backdrop-filter:blur(18px) saturate(1.4);border-top:1px solid var(--line)}
+@supports not (backdrop-filter:blur(1px)){nav{background:var(--surface)}}
+nav a{color:var(--muted);font-size:12px;display:flex;flex-direction:column;align-items:center;gap:2px;min-width:64px;min-height:44px;justify-content:center;border-radius:12px}
+nav a.on{color:var(--accent)}
+nav a span.i{font-size:20px}
+.list{background:var(--surface);border-radius:var(--radius);overflow:hidden}
+.list .li{display:flex;justify-content:space-between;gap:12px;padding:12px 14px;border-bottom:1px solid var(--line);align-items:center}
+.list .li:last-child{border-bottom:0}
+.muted{color:var(--muted)}
+table{width:100%;border-collapse:collapse;font-variant-numeric:tabular-nums;font-size:14px}
+td,th{text-align:left;padding:8px 6px;border-bottom:1px solid var(--line)}
+th{color:var(--muted);font-weight:500}
+.gallery{display:flex;gap:8px;overflow-x:auto;scroll-snap-type:x mandatory;border-radius:var(--radius)}
+.gallery img{height:240px;border-radius:var(--radius);scroll-snap-align:start;flex:0 0 auto;max-width:92%;object-fit:cover}
+.banner{background:rgba(183,121,31,.12);color:var(--warn);border-radius:14px;padding:10px 14px;margin:8px 0;font-size:14px}
+.banner.bad{background:rgba(209,67,75,.12);color:var(--bad)}
+.field{display:flex;justify-content:space-between;align-items:center;gap:12px;padding:12px 14px;border-bottom:1px solid var(--line)}
+.field label{flex:1}.field input,.field select{max-width:200px}
+.switch{appearance:none;width:51px;height:31px;border-radius:999px;background:var(--line);position:relative;border:0;transition:background .2s}
+.switch:checked{background:var(--good)}
+.switch::after{content:"";position:absolute;top:2px;left:2px;width:27px;height:27px;border-radius:50%;background:#fff;box-shadow:0 2px 4px rgba(0,0,0,.2);transition:left .2s}
+.switch:checked::after{left:22px}
+.toast{position:fixed;left:50%;transform:translateX(-50%);bottom:calc(84px + env(safe-area-inset-bottom));background:var(--text);color:var(--bg);padding:10px 16px;border-radius:999px;font-size:14px;opacity:0;transition:opacity .2s;pointer-events:none}
+.toast.show{opacity:1}
+.empty{padding:40px 20px;text-align:center;color:var(--muted)}
+pre{white-space:pre-wrap;font-size:13px;background:var(--surface);padding:12px;border-radius:14px;overflow:auto}
+@media (prefers-reduced-motion:reduce){*{transition:none!important}}
+</style>
+</head>
+<body>
+<main id="app"><div class="empty">Loading…</div></main>
+<nav id="nav">
+  <a href="#/feed" data-r="feed"><span class="i">🚗</span>Cars</a>
+  <a href="#/archive" data-r="archive"><span class="i">🗂</span>Archive</a>
+  <a href="#/status" data-r="status"><span class="i">💓</span>Status</a>
+  <a href="#/settings" data-r="settings"><span class="i">⚙️</span>Settings</a>
+</nav>
+<div class="toast" id="toast"></div>
+<script>
+(function(){
+const $=s=>document.querySelector(s), app=$('#app');
+const esc=s=>String(s==null?'':s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const money=p=>p==null?'Price not listed':'$'+Number(p).toLocaleString('en-CA');
+const km=k=>k==null?'':Number(k).toLocaleString('en-CA')+' km';
+const ago=s=>{if(!s)return '';const m=(Date.now()-Date.parse(s))/60000;if(m<1)return 'just now';if(m<60)return Math.round(m)+' min ago';if(m<48*60)return Math.round(m/60)+' h ago';return Math.round(m/1440)+' d ago'};
+const when=s=>s?new Date(s).toLocaleString('en-CA',{dateStyle:'medium',timeStyle:'short'}):'';
+let toastT; function toast(t){const e=$('#toast');e.textContent=t;e.classList.add('show');clearTimeout(toastT);toastT=setTimeout(()=>e.classList.remove('show'),2200)}
+async function api(path,opts){const r=await fetch(path,Object.assign({headers:{'Content-Type':'application/json'}},opts||{}));if(r.status===401){location.href='/';return null}const j=await r.json().catch(()=>({}));if(!r.ok){throw new Error(j.detail||JSON.stringify(j.problems||j))}return j}
+const state={filters:JSON.parse(localStorage.getItem('mw.filters')||'{}')};
+function saveF(){try{localStorage.setItem('mw.filters',JSON.stringify(state.filters))}catch(e){}}
+
+function card(l){
+  const img=l.photo_asset?`<img class="photo" loading="lazy" src="/api/media/${l.photo_asset}" alt="">`:(l.images&&l.images[0]?`<img class="photo" loading="lazy" referrerpolicy="no-referrer" src="${esc(l.images[0])}" alt="">`:`<div class="ph">No photo yet</div>`);
+  const drop=(l.highest&&l.price!=null&&l.highest>l.price)?`<span class="drop">▼ $${(l.highest-l.price).toLocaleString('en-CA')} from first seen</span>`:'';
+  const st=l.status==='active'?'':`<span class="tag ${l.status==='unavailable'?'bad':'warn'}">${l.status==='unavailable'?'Gone':'Not seen lately'}</span>`;
+  const q=l.qualified?'':`<span class="tag">Outside your rules</span>`;
+  const sl=l.shortlisted?`<span class="tag good">★ Shortlisted</span>`:'';
+  return `<a class="card" href="#/listing/${encodeURIComponent(l.id)}">${img}<div class="body">
+    <div class="title">${esc(l.title||(l.year||'')+' '+l.make+' '+l.model)}</div>
+    <div class="price">${money(l.price)} ${drop}</div>
+    <div class="sub">${[l.year,l.trim].filter(Boolean).map(esc).join(' · ')}</div>
+    <div class="sub">${[km(l.mileage_km),[l.location,l.province].filter(Boolean).join(', ')].filter(Boolean).map(esc).join(' · ')}</div>
+    <div><span class="tag">${l.site==='marketplace'?'Marketplace':'AutoTrader'}</span>${st}${q}${sl}<span class="tag">seen ${ago(l.last_seen)}</span></div>
+  </div></a>`;
+}
+
+async function feed(){
+  const f=Object.assign({status:'active',qualified:'yes',sort:'last_seen',collection:'',q:''},state.filters);
+  const cols=await api('/api/collections'); if(!cols)return;
+  const qs=new URLSearchParams(Object.fromEntries(Object.entries(f).filter(([k,v])=>v))).toString();
+  app.innerHTML=`<h1>Cars</h1>
+   <div class="row">
+    <div class="seg" id="segS">${['active:For sale','gone:Gone','all:All'].map(x=>{const [v,t]=x.split(':');return `<button data-v="${v}" class="${f.status===v||(v==='all'&&!f.status)?'on':''}">${t}</button>`}).join('')}</div>
+    <div class="seg" id="segQ">${['yes:In my rules','all:Everything seen'].map(x=>{const [v,t]=x.split(':');return `<button data-v="${v}" class="${f.qualified===v||(v==='all'&&!f.qualified)?'on':''}">${t}</button>`}).join('')}</div>
+   </div>
+   <div class="row" style="margin-top:8px">
+    <select id="col"><option value="">All searches</option>${cols.map(c=>`<option value="${esc(c.id)}" ${f.collection===c.id?'selected':''}>${esc(c.name)}${c.notify_mode!=='alert'?' (archive only)':''}</option>`).join('')}</select>
+    <select id="sort">${[['last_seen','Recently seen'],['first_seen','Newest first seen'],['price','Price: low to high'],['price_desc','Price: high to low'],['mileage','Lowest km']].map(([v,t])=>`<option value="${v}" ${f.sort===v?'selected':''}>${t}</option>`).join('')}</select>
+    <input type="text" id="q" placeholder="Search title, model, place" value="${esc(f.q)}">
+   </div>
+   <div id="banner"></div>
+   <div class="grid" id="grid"><div class="empty">Loading…</div></div>
+   <div class="row" style="justify-content:center;margin-top:16px"><button class="btn quiet" id="more" hidden>Show more</button></div>`;
+  const set=(k,v)=>{state.filters[k]=v;saveF();feed()};
+  $('#segS').onclick=e=>{const b=e.target.closest('button');if(b)set('status',b.dataset.v==='all'?'':b.dataset.v)};
+  $('#segQ').onclick=e=>{const b=e.target.closest('button');if(b)set('qualified',b.dataset.v==='all'?'':b.dataset.v)};
+  $('#col').onchange=e=>set('collection',e.target.value);
+  $('#sort').onchange=e=>set('sort',e.target.value);
+  let t;$('#q').oninput=e=>{clearTimeout(t);t=setTimeout(()=>{state.filters.q=e.target.value;saveF();load(0)},350)};
+  try{const h=await api('/api/health');const src=h.sources||{};const bad=Object.entries(src).filter(([k,v])=>v.enabled&&v.last&&!v.last.ok);if(bad.length)$('#banner').innerHTML=`<div class="banner">${bad.map(([k,v])=>esc(k+': '+(v.last.line||'last read failed'))).join('<br>')}</div>`;if(h.vault&&h.vault.last_error)$('#banner').innerHTML+=`<div class="banner">Using the cached searches: GitHub could not be read (${esc(h.vault.last_error)})</div>`}catch(e){}
+  let offset=0;
+  async function load(off){const r=await api('/api/listings?'+qs+'&q='+encodeURIComponent(state.filters.q||'')+'&limit=60&offset='+off);if(!r)return;const g=$('#grid');const html=r.items.map(card).join('');if(off===0)g.innerHTML=html||`<div class="empty">Nothing here yet. ${f.status==='active'?'The first pass records what is already for sale without announcing it.':''}</div>`;else g.insertAdjacentHTML('beforeend',html);offset=off+r.items.length;$('#more').hidden=offset>=r.total;$('#more').onclick=()=>load(offset);document.title=`Watch on Mac · ${r.total}`}
+  load(0);
+}
+
+async function listing(id){
+  const l=await api('/api/listings/'+encodeURIComponent(id)); if(!l)return;
+  const h=await api('/api/listings/'+encodeURIComponent(id)+'/history');
+  const saved=(l.photos||[]).filter(p=>p.status==='saved');
+  const gal=saved.length?`<div class="gallery">${saved.map(p=>`<img src="/api/media/${p.asset_id}" alt="">`).join('')}</div>`:(l.images&&l.images[0]?`<div class="gallery"><img referrerpolicy="no-referrer" src="${esc(l.images[0])}" alt=""></div>`:'');
+  const pend=(l.photos||[]).filter(p=>p.status==='pending').length, failed=(l.photos||[]).filter(p=>p.status!=='saved'&&p.status!=='pending').length;
+  const prices=h.prices||[];
+  app.innerHTML=`<p><a href="#/feed">‹ Back</a></p>${gal}
+   <p class="muted" style="font-size:13px">${saved.length} of ${(l.photos||[]).length} photos saved${pend?`, ${pend} pending`:''}${failed?`, ${failed} unavailable`:''}</p>
+   <h1 style="font-size:24px">${esc(l.title||(l.year+' '+l.make+' '+l.model))}</h1>
+   <div class="price" style="font-size:26px">${money(l.price)} <span class="muted" style="font-size:14px;font-weight:400">${l.price_source?'('+esc(l.price_source)+')':''}</span></div>
+   <div><span class="tag">${l.site==='marketplace'?'Marketplace':'AutoTrader'}</span><span class="tag ${l.status==='active'?'good':'bad'}">${l.status==='active'?'For sale':'Gone'}${l.gone_at?' since '+esc(when(l.gone_at)):''}</span>${l.qualified?'':'<span class="tag">Outside your rules: '+esc(l.hidden_reason)+'</span>'}</div>
+   <div class="row" style="margin:14px 0">
+    <a class="btn" href="${esc(l.url)}" target="_blank" rel="noopener noreferrer">Open ad</a>
+    <button class="btn quiet" id="star">${l.shortlisted?'★ Shortlisted':'☆ Shortlist'}</button>
+    <button class="btn quiet" id="mute">${l.muted?'🔕 Muted':'🔔 Alerts on'}</button>
+   </div>
+   <div class="list">
+    ${[['Year',l.year],['Trim',l.trim],['Odometer',km(l.mileage_km)||'not listed'],['Location',[l.location,l.province].filter(Boolean).join(', ')],['Seller',[l.seller,l.seller_type].filter(Boolean).join(' · ')],['Colour',l.facts&&l.facts.color],['Transmission',l.facts&&l.facts.transmission],['Drivetrain',l.facts&&l.facts.drivetrain],['Fuel',l.facts&&l.facts.fuel],['Engine',l.facts&&l.facts.engine],['VIN',l.facts&&l.facts.vin],['First seen',when(l.first_seen)],['Last seen',when(l.last_seen)],['Record from',l.provenance]].filter(x=>x[1]).map(([k,v])=>`<div class="li"><span class="muted">${k}</span><span style="text-align:right">${esc(v)}</span></div>`).join('')}
+   </div>
+   <h2>Asking price history <span class="muted" style="font-weight:400;font-size:14px">${prices.length} observation${prices.length===1?'':'s'}</span></h2>
+   <div class="list" style="padding:0 8px">${prices.length?`<table><tr><th>When</th><th>Price</th><th>Source</th></tr>${prices.map((p,i)=>{const prev=prices.slice(0,i).reverse().find(x=>x.price!=null);const d=prev&&p.price!=null?p.price-prev.price:0;return `<tr><td>${esc(when(p.at))}</td><td>${p.price==null?'<span class="muted">withdrawn</span>':money(p.price)} ${d?`<span class="${d<0?'drop':'muted'}">${d<0?'▼':'▲'} $${Math.abs(d).toLocaleString('en-CA')}</span>`:''}</td><td class="muted">${esc(p.price_source||p.provenance)}</td></tr>`}).join('')}</table>`:'<div class="empty">No price recorded</div>'}</div>
+   <p class="muted" style="font-size:13px">Observed prices only. Gaps between observations are gaps in watching, not proof the price held.</p>
+   <h2>In searches</h2>
+   <div class="list">${(l.collections||[]).map(c=>`<div class="li"><span>${esc(c.name)} <span class="tag">${c.notify_mode==='alert'?'alerts':'archive only'}</span></span><span class="muted" style="font-size:13px">${c.qualified?'in rules':'hidden: '+esc(c.reason)}</span></div>`).join('')||'<div class="li muted">None</div>'}</div>
+   <h2>Notifications</h2>
+   <div class="list">${(l.notifications||[]).map(n=>`<div class="li"><span>${esc(n.kind)} <span class="tag ${n.status==='accepted'?'good':n.status==='failed'?'bad':''}">${esc(n.status)}</span></span><span class="muted" style="font-size:13px;text-align:right">${esc(n.reason||when(n.accepted_at||n.created_at))}</span></div>`).join('')||'<div class="li muted">None yet</div>'}</div>
+   <h2>Notes</h2>
+   <textarea id="note" placeholder="Your notes on this car">${esc(l.note||'')}</textarea>
+   <div class="row" style="justify-content:flex-end"><button class="btn" id="saveNote">Save note</button></div>
+   <h2>Changes</h2>
+   <div class="list">${(h.revisions||[]).slice().reverse().map(r=>`<div class="li"><span style="font-size:13px">${esc(Object.entries(r.changes||{}).map(([k,v])=>v&&typeof v==='object'&&'to'in v?`${k}: ${v.from==null?'—':v.from} → ${v.to==null?'—':v.to}`:k).join(', '))}</span><span class="muted" style="font-size:13px;white-space:nowrap">${esc(when(r.at))}</span></div>`).join('')}</div>`;
+  const mark=async(body,msg)=>{try{await api('/api/listings/'+encodeURIComponent(id)+'/marks',{method:'PATCH',body:JSON.stringify(body)});toast(msg);listing(id)}catch(e){toast('Not saved: '+e.message)}};
+  $('#star').onclick=()=>mark({shortlisted:!l.shortlisted},l.shortlisted?'Removed from shortlist':'Shortlisted');
+  $('#mute').onclick=()=>mark({muted:!l.muted},l.muted?'Alerts on for this car':'Muted');
+  $('#saveNote').onclick=()=>mark({note:$('#note').value},'Note saved');
+}
+
+async function archive(){
+  const cols=await api('/api/collections'); if(!cols)return;
+  app.innerHTML=`<h1>Archive</h1><p class="muted">Everything observed for each search since tracking started, kept after the ad goes.</p>
+  <div class="list">${cols.map(c=>`<a class="li" href="#/feed" data-c="${esc(c.id)}" style="color:inherit"><span><strong>${esc(c.name)}</strong><br><span class="muted" style="font-size:13px">${c.listings} saved · ${c.active} for sale${c.tracking_since?' · since '+esc(new Date(c.tracking_since).toLocaleDateString('en-CA')):''}</span></span><span><span class="tag ${c.notify_mode==='alert'?'good':''}">${c.notify_mode==='alert'?'Alert me':'Archive only'}</span>${c.enabled?'':'<span class="tag warn">Paused</span>'}<br><a style="font-size:13px" href="/api/export/${esc(c.id)}.json">Export JSON</a></span></a>`).join('')||'<div class="empty">No searches yet. They come from the watch\'s settings.</div>'}</div>`;
+  app.querySelectorAll('a.li').forEach(a=>a.onclick=e=>{if(e.target.tagName==='A'&&e.target!==a)return;state.filters=Object.assign({},state.filters,{collection:a.dataset.c,status:'',qualified:''});saveF()});
+}
+
+async function status(){
+  const h=await api('/api/health'); if(!h)return;
+  const src=h.sources||{};
+  app.innerHTML=`<h1>Status</h1>
+   <div class="list">${Object.entries(src).map(([k,v])=>`<div class="li"><span><strong>${k==='autotrader'?'AutoTrader':'Marketplace'}</strong><br><span class="muted" style="font-size:13px">${v.enabled?(v.running?'Reading now':'Next read '+(v.next_due?ago(v.next_due).replace(' ago','').replace('just now','soon')+(Date.parse(v.next_due)>Date.now()?' from now':' (due)'):'soon'))+' · every '+v.interval_minutes+' min':'Switched off'}${v.last?'<br>Last: '+esc(v.last.line):''}</span></span><span class="tag ${v.last?(v.last.ok?'good':'bad'):''}">${v.last?(v.last.ok?'OK':'Failed')+' '+ago(v.last.at):'Not yet'}</span></div>`).join('')}
+   <div class="li"><span><strong>Searches from the vault</strong><br><span class="muted" style="font-size:13px">${h.vault?(h.vault.fetched_at?'Read '+ago(h.vault.fetched_at):'Not read yet')+(h.vault.last_error?' · '+esc(h.vault.last_error):''):'n/a'}</span></span></div>
+   <div class="li"><span><strong>Alerts</strong><br><span class="muted" style="font-size:13px">Topic ${esc(h.ntfy_topic||'not set')} · ${h.counts.outbox_pending} pending · ownership: ${esc(h.ownership)} (GitHub sends the real alerts during the trial)</span></span><button class="btn quiet" id="test">Test alert</button></div>
+   <div class="li"><span><strong>Archive</strong><br><span class="muted" style="font-size:13px">${h.counts.listings} listings (${h.counts.listings_active} for sale) · ${h.counts.price_events} price observations · ${h.counts.media_assets} photos saved, ${h.counts.photos_pending} pending${h.media_paused?' · photo capture paused: '+esc(h.media_paused.why):''}</span></span></div>
+   ${h.quiet_hours?'<div class="li muted">Quiet hours: reading slowed</div>':''}
+   </div>
+   <div class="row" style="margin:14px 0"><button class="btn" id="check">Check now</button><span class="muted" id="job"></span></div>
+   <h2>Recent reads</h2>
+   <div class="list">${(h.runs||[]).map(r=>`<div class="li"><span style="font-size:13px">${esc(r.site)} · ${esc(r.collection_id)}<br><span class="muted">${esc(r.note||r.error||'')}</span></span><span class="tag ${r.ok?'good':(r.ok===0?'bad':'')}" style="white-space:nowrap">${ago(r.started_at)}</span></div>`).join('')}</div>
+   <h2>Recent notifications</h2>
+   <div class="list">${(h.outbox||[]).map(n=>`<div class="li"><span style="font-size:13px">${esc((n.payload&&n.payload.title)||n.kind)}<br><span class="muted">${esc(n.reason||n.error||'')}</span></span><span class="tag ${n.status==='accepted'?'good':n.status==='failed'?'bad':''}">${esc(n.status)}</span></div>`).join('')||'<div class="li muted">None yet</div>'}</div>`;
+  $('#check').onclick=async()=>{try{const r=await api('/api/checks',{method:'POST',body:JSON.stringify({site:'all'})});$('#job').textContent='Queued…';const poll=async()=>{const j=await api('/api/jobs/'+r.job);$('#job').textContent=j.status+(j.result&&j.result.line?': '+j.result.line:'');if(j.status==='queued'||j.status==='running')setTimeout(poll,3000);else status()};setTimeout(poll,3000)}catch(e){toast(e.message)}};
+  $('#test').onclick=async()=>{try{await api('/api/test-alert',{method:'POST'});toast('Test alert sent to '+h.ntfy_topic)}catch(e){toast('Not sent: '+e.message)}};
+}
+
+async function settings(){
+  const r=await api('/api/settings'); if(!r)return; const s=r.settings;
+  const F=(k,label,type,extra)=>`<div class="field"><label for="f_${k}">${label}</label>${type==='bool'?`<input class="switch" type="checkbox" id="f_${k}" data-k="${k}" ${s[k]?'checked':''}>`:type==='select'?`<select id="f_${k}" data-k="${k}">${extra.map(([v,t])=>`<option value="${v}" ${String(s[k])===String(v)?'selected':''}>${t}</option>`).join('')}</select>`:`<input type="${type}" id="f_${k}" data-k="${k}" value="${esc(s[k])}" ${extra||''}>`}</div>`;
+  const iv=[[5,'Every 5 min'],[10,'Every 10 min'],[15,'Every 15 min'],[20,'Every 20 min'],[30,'Every 30 min'],[60,'Every hour'],[120,'Every 2 hours']];
+  const withCustom=(k)=>iv.some(([v])=>v===s[k])?iv:iv.concat([[s[k],'Every '+s[k]+' min (custom)']]);
+  app.innerHTML=`<h1>Settings</h1>
+   <h2>Monitoring</h2><div class="list">
+   ${F('autotrader_enabled','Read AutoTrader','bool')}${F('interval_minutes','AutoTrader cadence','select',withCustom('interval_minutes'))}
+   ${F('marketplace_enabled','Read Marketplace','bool')}${F('marketplace_interval_minutes','Marketplace cadence','select',withCustom('marketplace_interval_minutes'))}
+   ${F('quiet_start','Quiet hours from','text','placeholder="02:00"')}${F('quiet_end','Quiet hours until','text','placeholder="08:00"')}${F('quiet_interval_minutes','Cadence in quiet hours (min)','number','min="1"')}
+   ${F('details_per_cycle','Marketplace ads opened per pass','number','min="0" max="20"')}
+   </div><p class="muted" style="font-size:13px">A cadence is a target. The site's own limits, slow pages and backoff can make the real gap longer. Searches and rules come from the dashboard's settings, as before.</p>
+   <h2>Notifications</h2><div class="list">
+   ${F('ntfy_topic','ntfy topic (trial)','text')}${F('ntfy_label','Alert label','text')}${F('app_url','App address for links','text','placeholder="https://idenair.…ts.net"')}
+   </div>
+   <h2>Archive</h2><div class="list">
+   ${F('photos_per_listing','Photos saved per listing','number','min="0" max="40"')}${F('media_budget_mb','Photo storage limit (MB)','number','min="100"')}
+   </div>
+   <h2>Service</h2><div class="list">
+   ${F('config_refresh_minutes','Re-read searches from GitHub every (min)','number','min="1"')}${F('heartbeat_url','Heartbeat URL (optional)','text')}
+   </div>
+   <div class="row" style="justify-content:flex-end;margin:14px 0"><button class="btn" id="save">Save</button></div>
+   <p class="muted" style="font-size:13px">Saved settings take effect on the next tick (within 15 s) and survive a restart.</p>`;
+  $('#save').onclick=async()=>{const body={};app.querySelectorAll('[data-k]').forEach(el=>{const k=el.dataset.k;body[k]=el.type==='checkbox'?el.checked:(el.type==='number'||el.tagName==='SELECT'&&/_minutes$/.test(k))?Number(el.value):el.value});try{await api('/api/settings',{method:'PATCH',body:JSON.stringify(body)});toast('Saved');settings()}catch(e){toast('Not saved: '+e.message)}};
+}
+
+function route(){
+  const h=location.hash||'#/feed'; const m=h.match(/^#\/(\w+)(?:\/(.+))?/); const r=m?m[1]:'feed';
+  document.querySelectorAll('#nav a').forEach(a=>a.classList.toggle('on',a.dataset.r===r||(r==='listing'&&a.dataset.r==='feed')));
+  window.scrollTo(0,0);
+  ({feed,archive,status,settings,listing:()=>listing(decodeURIComponent(m[2]||''))}[r]||feed)().catch(e=>{app.innerHTML=`<div class="banner bad">${esc(e.message)}</div><p><a href="#/feed">Back</a></p>`});
+}
+window.addEventListener('hashchange',route); route();
+})();
+</script>
+</body>
+</html>
