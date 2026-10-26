@@ -20,18 +20,24 @@ check timer plus the Pages builds it triggers used well over half the month.
 - Never delete or skip tests to save minutes; save them by running fewer
   workflows. `ci.yml` runs on pushes to `main` and on pull requests only, and
   Cold start runs weekly or by hand.
-- The dashboard is published at most every `PAGE_MIN_GAP_MINUTES` (default 120)
-  and at least every `PAGE_MAX_AGE_MINUTES` (default 360), set as repository
-  variables. Each publish is a billed Pages build.
-- The check interval is the main cost: one check is about one billed minute.
-  The owner wants a check every 30 minutes by day and every 2 hours from 02:00
-  to 08:00 Pacific time (`health.overnight`, in `config.py`; the interval
-  itself is `health.expected_interval_minutes` in the vault's config.json).
-  What fires most checks is the Marketplace collector on the owner's Mac
-  (`collector/`, `repository_dispatch` type `marketplace`), not an outside
-  timer: each pass starts a run, so its overnight pause (`quiet_start`,
-  `quiet_end`, `quiet_every_minutes` in its settings.json) is what saves
-  minutes. A run the bot turns away still bills a minute.
+- **This repository is public, so its Actions minutes bill $0** (confirmed on
+  the owner's billing page, Oct 26 2026: 4,862 minutes, billed $0, and not
+  counted against the 3,000 included). The rules above are about hygiene and
+  about keeping forks cheap, not about this repository's cost. Never cut its
+  cadence to "save minutes" while it is public; keep `budget` enabled so it
+  stops itself if it ever goes private.
+- The dashboard is published at most every `PAGE_MIN_GAP_MINUTES` (default 0:
+  every check whose data changed) and at least every `PAGE_MAX_AGE_MINUTES`
+  (default 360), set as repository variables.
+- The owner wants a check every 10 minutes by day and every 2 hours from 02:00
+  to 08:00 Pacific time. The cron in `watch.yml` fires every 5 minutes, and a
+  workflow step writes `CHECK_INTERVAL_MINUTES` (10) and `CHECK_FLOOR_MINUTES`
+  (7) into the vault's config (`health.expected_interval_minutes`,
+  `health.min_interval_minutes`) on every run; overnight is `health.overnight`
+  in `config.py`. The Marketplace collector on the owner's Mac (`collector/`,
+  `repository_dispatch` type `marketplace`) also starts a run each pass
+  (every 10 minutes by day, every 2 hours overnight: `every_minutes`,
+  `quiet_start`, `quiet_end`, `quiet_every_minutes` in its settings.json).
 
 ## Standing permission: merge to main
 

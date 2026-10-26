@@ -6,10 +6,11 @@ name: Check AutoTrader
 
 on:
   schedule:
-    # Every half hour, because GitHub drops scheduled runs, often in
-    # clusters. The bot stands down unless a check is due (every two hours
-    # by default).
-    - cron: '7,37 * * * *'
+    # Every five minutes, because GitHub drops scheduled runs, often in
+    # clusters, and this repository is public, so Actions minutes bill
+    # nothing. The bot stands down unless a check is due (see
+    # CHECK_INTERVAL_MINUTES below).
+    - cron: '2,7,12,17,22,27,32,37,42,47,52,57 * * * *'
   # A change sent from the dashboard lands as a file in control/.
   push:
     branches: [main]
@@ -96,6 +97,20 @@ jobs:
           fi
           python -m autotrader vault pull
           python -m autotrader vault open
+
+      # The cadence the schedule above keeps, written into the vault's
+      # config so the bot's stand-down floor, coverage tile and watchdog
+      # agree with it. Set as repository variables to change them without a
+      # commit; the fallbacks are this repository's own. Overnight
+      # (health.overnight) stays as the config has it.
+      - name: Keep the check interval in step with the schedule
+        if: ${{ !steps.guard.outputs.stop }}
+        env:
+          INTERVAL: ${{ vars.CHECK_INTERVAL_MINUTES || '10' }}
+          FLOOR:    ${{ vars.CHECK_FLOOR_MINUTES || '7' }}
+        run: |
+          python -m autotrader --no-colour set health.expected_interval_minutes "$INTERVAL" > /dev/null 2>&1
+          python -m autotrader --no-colour set health.min_interval_minutes "$FLOOR" > /dev/null 2>&1
 
       - name: Check
         id: bot
@@ -190,11 +205,12 @@ jobs:
           exit 1
 
       # Every publish also costs a "pages build and deployment" run, billed
-      # like any other job: with a check every half hour that was over half
-      # this repository's minutes. A changed page waits until the last
-      # publish is PAGE_MIN_GAP_MINUTES old, and the page is published
-      # regardless once it is PAGE_MAX_AGE_MINUTES old, so a change held
-      # back is never lost. A hand-started check always publishes.
+      # like any other job, which is nothing on a public repository. A
+      # changed page waits until the last publish is PAGE_MIN_GAP_MINUTES
+      # old (0 here: publish every time it changed; a private copy should
+      # raise it), and the page is published regardless once it is
+      # PAGE_MAX_AGE_MINUTES old, so a change held back is never lost. A
+      # hand-started check always publishes.
       - name: Decide whether to publish
         id: when
         if: ${{ !steps.guard.outputs.stop && !inputs.dry_run }}
@@ -202,7 +218,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           CHANGED: ${{ steps.save.outputs.page }}
           MANUAL: ${{ github.event_name == 'workflow_dispatch' && !inputs.automatic && !inputs.from }}
-          MIN_GAP: ${{ vars.PAGE_MIN_GAP_MINUTES || '120' }}
+          MIN_GAP: ${{ vars.PAGE_MIN_GAP_MINUTES || '0' }}
           MAX_AGE: ${{ vars.PAGE_MAX_AGE_MINUTES || '360' }}
         run: |
           last=$(gh api "repos/$GITHUB_REPOSITORY/commits/gh-pages" --jq .commit.committer.date 2>/dev/null || true)

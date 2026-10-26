@@ -189,7 +189,7 @@ overwrite a check that saved in the meantime.
 
 | File | Name | Runs | What it does |
 |---|---|---|---|
-| `watch.yml` | Check AutoTrader | Fires every 30 minutes (`7,37 * * * *`); on a push to `control/`; on `repository_dispatch` of type `marketplace` (the collector) or `check`; by hand, optionally as a dry run, and by an outside timer the same way (`scripts/keep-time.sh`) | The check, as above, taking in a Marketplace batch first when one came with it. A push only counts when the repository owner made it. |
+| `watch.yml` | Check AutoTrader | Fires every 5 minutes (`2,7,12,17,22,27,32,37,42,47,52,57 * * * *`), and writes the interval it keeps (`CHECK_INTERVAL_MINUTES`, `CHECK_FLOOR_MINUTES`) into the config; on a push to `control/`; on `repository_dispatch` of type `marketplace` (the collector) or `check`; by hand, optionally as a dry run, and by an outside timer the same way (`scripts/keep-time.sh`) | The check, as above, taking in a Marketplace batch first when one came with it. A push only counts when the repository owner made it. |
 | `events.yml` | Watchdog | Every two hours (`41 */2 * * *`) | Alerts when no check has succeeded for six hours. A crash fails the run, so GitHub tells you even then. |
 | `pages.yml` | Publish dashboard | A push to `docs/` or the dashboard code; by hand | Rebuilds and publishes the site from the vault. |
 | `coldstart.yml` | Cold start | Weekly (`23 6 * * 0`); a push to `autotrader/` | Sets up from nothing, watches a generic public search, and checks it once. Never pushes, never touches the vault. |
