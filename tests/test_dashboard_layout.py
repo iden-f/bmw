@@ -830,11 +830,15 @@ def test_the_placeholder_is_the_size_of_the_thing_it_stands_in_for(browser, site
 
     ctx, page, _ = _page(browser, site, width, "light")
     try:
-        row = page.evaluate(
-            "() => document.querySelector('.ev').getBoundingClientRect().height")
+        rows = page.evaluate(
+            "() => [...document.querySelectorAll('.ev')].map(e => e.getBoundingClientRect().height)")
     finally:
         ctx.close()
-    assert abs(placeholder - row) < 1.5, (placeholder, row)
+    # On a phone a long name wraps to a second line rather than being cut,
+    # and a placeholder cannot know how long a name will be: it stands in
+    # for the one-line row, the shortest. Every row is at least that tall.
+    row = min(rows)
+    assert abs(placeholder - row) < 1.5, (placeholder, rows)
 
 
 class TestTheEmptyStateBlamesTheRightControl:
