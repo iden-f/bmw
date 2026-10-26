@@ -40,6 +40,13 @@ SEARCH_REMOVED = "its search was removed, so it is no longer watched"
 SWITCHED_OFF = "Marketplace is switched off for this search"
 # The quiet reason forget_searches writes, which is all an older row has.
 SEARCH_REMOVED_QUIET = "the search that was watching this was removed"
+# Why a car on an archive-only search, or a pinned listing kept for the
+# record, was recorded without an alert. A prefix, like HIDDEN_REASON_PREFIX:
+# the rest names what happened, so the page can still show the change.
+ARCHIVE_ONLY_PREFIX = "archive only: "
+# A pinned Marketplace listing that only the Mac can read, and has not yet.
+AWAITING_MAC = ("saved from its link; it is read when the Marketplace "
+                "collector next sees it")
 
 log = logging.getLogger(__name__)
 
@@ -59,11 +66,21 @@ RUNS_DROPPED = "earlier_runs_dropped"
 _STAND_DOWN_KEEPS = ("at", "ok", "skipped", "duration_s", "trigger")
 # Keys record() sets itself; everything else on an entry is carried forward.
 _MANAGED_KEYS = {"first_seen", "last_seen", "status", "notified", "price_history",
-                 "price_disputed"}
-MAX_PRICE_POINTS = 40
+                 "price_disputed", "revisions"}
+# Price points kept per car. Zero: every observed change, for good. The cap
+# of forty this used to be made a long-listed car's early history disposable,
+# which is exactly the history the archive exists to keep.
+MAX_PRICE_POINTS = 0
+# Facts whose changes are written to a car's `revisions`, an append-only
+# record beside price_history: what the seller changed, and when.
+REVISED_FIELDS = ("mileage_km", "title", "trim", "seller_type", "seller",
+                  "location", "province", "color", "transmission", "drivetrain")
 # How many alert times each car keeps. notified_at holds only the last, which
 # is the wrong answer for every earlier event on the car's timeline.
 TOLD_KEPT = 10
+
+
+UNPINNED = "you stopped following this listing"
 
 
 def retired_by_owner(entry: dict[str, Any]) -> bool:
@@ -77,8 +94,45 @@ def retired_by_owner(entry: dict[str, Any]) -> bool:
         return False
     why = entry.get("gone_reason")
     if why:
-        return why in (SEARCH_REMOVED, SWITCHED_OFF)
+        return why in (SEARCH_REMOVED, SWITCHED_OFF, UNPINNED)
     return entry.get("quiet_reason") == SEARCH_REMOVED_QUIET
+
+
+def archive_reason(what: str) -> str:
+    """The quiet reason for a change recorded on an archive-only search."""
+    return f"{ARCHIVE_ONLY_PREFIX}{what}"[:200]
+
+
+def archived_quietly(entry: dict[str, Any]) -> bool:
+    """Was this car kept quiet because its search only archives?"""
+    return str(entry.get("quiet_reason") or "").startswith(ARCHIVE_ONLY_PREFIX)
+
+
+def _revise(entry: dict[str, Any], existing: dict[str, Any], now: str) -> None:
+    """Append what changed about the car itself to its revision record.
+
+    Only facts a seller edits (REVISED_FIELDS), and only when both the old
+    and the new value are known: a field the page did not carry this time is
+    not a field the seller cleared. Prices live in price_history; status
+    changes are stamped by the status functions.
+    """
+    revisions = list(existing.get("revisions") or [])
+    for name in REVISED_FIELDS:
+        was, now_value = existing.get(name), entry.get(name)
+        if was in (None, "", []) or now_value in (None, "", []):
+            continue
+        if was != now_value:
+            revisions.append({"at": now, "field": name, "from": was, "to": now_value})
+    if revisions:
+        entry["revisions"] = revisions
+
+
+def _note_status(entry: dict[str, Any], status: str, now: str, why: str = "") -> None:
+    """Record a change of status in the car's revision record."""
+    note: dict[str, Any] = {"at": now, "field": "status", "to": status}
+    if why:
+        note["why"] = why[:200]
+    entry["revisions"] = [*(entry.get("revisions") or []), note]
 
 
 def _stood_down(run: dict[str, Any]) -> dict[str, Any]:
@@ -357,6 +411,8 @@ class State:
         came_back = existing.get("status") == "gone"
         if came_back:
             entry["relisted_at"] = now
+            _note_status(entry, "active", now, "back on the market")
+        _revise(entry, existing, now)
         entry["filtered"] = filtered
         # Why it was hidden, so the dashboard can say so instead of just
         # showing a smaller number than the site does.
@@ -459,7 +515,8 @@ class State:
             change = Change(Change.QUALIFIED, merged, old_price=old_price,
                             new_price=entry.get("price"))
 
-        entry["price_history"] = history[-MAX_PRICE_POINTS:]
+        entry["price_history"] = (history[-MAX_PRICE_POINTS:] if MAX_PRICE_POINTS > 0
+                                  else history)
         # Set last, from the entry rather than this observation: a card with
         # no price does not make a car call-for-price when its listing page
         # gave one.
@@ -671,6 +728,8 @@ class State:
 
             entry["status"] = "gone"
             entry["removed_at"] = utcnow()
+            _note_status(entry, "gone", entry["removed_at"],
+                         "no longer among the search's results")
             changes.append(Change(Change.REMOVED, Listing.from_dict(entry)))
         return changes
 
@@ -683,6 +742,7 @@ class State:
         entry["removed_at"] = utcnow()
         entry["gone_reason"] = why
         entry["misses"] = 0
+        _note_status(entry, "gone", entry["removed_at"], why)
         return Change(Change.REMOVED, Listing.from_dict(entry))
 
     # ---------------- run + search health ----------------
@@ -952,7 +1012,7 @@ class State:
         gone: list[str] = []
         for lid in list(listing_ids):
             entry = self.listings.get(lid)
-            if entry is None or entry.get("you"):
+            if entry is None or entry.get("you") or entry.get("pinned"):
                 continue
             del self.listings[lid]
             gone.append(lid)
@@ -961,17 +1021,33 @@ class State:
                      len(gone))
         return gone
 
-    def prune(self, *, keep_days: int = 730, keep_max: int = 5000) -> int:
-        """Forget cars that went away a long time ago, so state stays small."""
-        if keep_days <= 0 and keep_max <= 0:
+    def prune(self, *, keep_days: int = 0, keep_max: int = 0,
+              protect: Iterable[str] = (), compact: bool = False) -> int:
+        """Forget cars that went away a long time ago, when asked to.
+
+        Both limits default to zero, which means keep everything: the
+        archive is permanent unless the owner sets a limit. ``protect`` names
+        cars never pruned whatever the limits say (pinned listings, cars on
+        an archive-only search, cars you marked); a car still owed an alert
+        is never pruned either. ``compact`` thins old price points to one a
+        week, which the archive does not want and so is off by default.
+        """
+        if keep_days <= 0 and keep_max <= 0 and not compact:
             return 0
+        protected = set(protect)
+
+        def disposable(lid: str, entry: dict[str, Any]) -> bool:
+            return (entry.get("status") == "gone" and not entry.get("pending")
+                    and lid not in protected and not entry.get("you")
+                    and not entry.get("pinned"))
+
         removed = 0
         if keep_days > 0:
             # Zero means "no age limit", as it does for keep_max.
             cutoff = (clock.now()
                       - timedelta(days=keep_days)).isoformat()
             for lid, entry in list(self.listings.items()):
-                if entry.get("status") != "gone" or entry.get("pending"):
+                if not disposable(lid, entry):
                     continue          # never forget a car still owed an alert
                 if (entry.get("removed_at") or entry.get("last_seen") or "") < cutoff:
                     del self.listings[lid]
@@ -980,21 +1056,21 @@ class State:
             # Only history is disposable: dropping a car still for sale would
             # make the next run re-announce it.
             ordered = sorted((kv for kv in self.listings.items()
-                              if kv[1].get("status") == "gone"
-                              and not kv[1].get("pending")),
+                              if disposable(*kv)),
                              key=lambda kv: kv[1].get("last_seen") or "")
             for lid, _ in ordered[: len(self.listings) - keep_max]:
                 del self.listings[lid]
                 removed += 1
 
-        # Thin old price points: every observation for a month, then one a
-        # week. The endpoints are always kept, since the history's numbers
-        # depend on them.
-        from . import insight
-        for entry in self.listings.values():
-            history = entry.get("price_history") or []
-            if len(history) > 8:
-                entry["price_history"] = insight.compact_history(history)
+        if compact:
+            # Thin old price points: every observation for a month, then one
+            # a week. The endpoints are always kept, since the history's
+            # numbers depend on them.
+            from . import insight
+            for entry in self.listings.values():
+                history = entry.get("price_history") or []
+                if len(history) > 8:
+                    entry["price_history"] = insight.compact_history(history)
         return removed
 
     def stats(self) -> dict[str, Any]:

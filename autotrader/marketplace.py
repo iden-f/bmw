@@ -824,6 +824,7 @@ def ingest(cfg, state: State, batch: dict[str, Any], *,
     by_id = {s.id: s for s in cfg.active_searches}
     wanted = {item["search"]: item for item in plan(cfg)}
     owned: set[str] = set()
+    _fill_in_pinned(cfg, state, batch, report, queue=queue, silence=silence)
     rejected: dict[str, tuple[Listing, filters.Verdict]] = {}
     read_ok: set[str] = set()
     settled: list[tuple[dict[str, Any], Judged]] = []
@@ -929,7 +930,9 @@ def ingest(cfg, state: State, batch: dict[str, Any], *,
             change = state.mark_gone(lid, "marked sold on Marketplace")
             if change is not None:
                 report.removed += 1
-                if search_notify.get("removed", False) and not baseline:
+                if search.archive_only:
+                    report.archived += 1
+                elif search_notify.get("removed", False) and not baseline:
                     queue(change)
 
     _hide(rejected, owned, state=state, report=report, silence=silence)
@@ -991,7 +994,9 @@ def ingest(cfg, state: State, batch: dict[str, Any], *,
                 report.removed += 1
                 search = by_id.get(str(entry.get("search_id")))
                 notify_on = cfg.rules_for(search)["notify_on"] if search else {}
-                if notify_on.get("removed", False):
+                if search is not None and search.archive_only:
+                    report.archived += 1
+                elif notify_on.get("removed", False):
                     queue(change)
 
     changes = _deliver(cfg, state, report, changes, env=env, notify=notify,
@@ -1000,7 +1005,7 @@ def ingest(cfg, state: State, batch: dict[str, Any], *,
     if not dry_run and fetcher is not None and cfg.get("dashboard.photos", True):
         from . import thumbs
         try:
-            shots = thumbs.sync(state.listings.values(), fetcher)
+            shots = thumbs.sync(state.listings.values(), fetcher, **thumbs.settings(cfg))
             report.photos = {"kept": shots.kept, "fetched": shots.fetched,
                              "failed": shots.failed, "pruned": shots.pruned,
                              "bytes": shots.total_bytes, "samples": shots.samples[:6]}
@@ -1016,6 +1021,53 @@ def ingest(cfg, state: State, batch: dict[str, Any], *,
                         "notified": bool(report.notified)})
         del runs[48:]
     return report
+
+
+def _fill_in_pinned(cfg, state: State, batch: dict[str, Any], report, *,
+                    queue, silence) -> None:
+    """Record the pinned Marketplace cars this batch happens to carry.
+
+    A saved Marketplace link can only be read by the collector, and the
+    collector reads searches, not single cars. So a pinned car is filled in
+    whenever a search's results include it, whatever that search's rules
+    would have said about it, and announced by the pin's own setting.
+    """
+    from types import SimpleNamespace
+    from .config import PINNED_SEARCH_ID, PINNED_SEARCH_NAME
+    from .state import archive_reason
+    pins = {p.id: p for p in cfg.pinned if p.site == "marketplace"}
+    if not pins:
+        return
+    for part in batch.get("searches") or []:
+        for raw in part.get("listings") or []:
+            if not isinstance(raw, dict):
+                continue
+            lid = MARKETPLACE_PREFIX + str(raw.get("id") or "")
+            pin = pins.get(lid)
+            if pin is None:
+                continue
+            entry = state.listings.get(lid) or {}
+            if entry.get("search_id") not in ("", None, PINNED_SEARCH_ID):
+                continue          # a search owns it and judges it
+            try:
+                listing = to_listing(raw, SimpleNamespace(id=PINNED_SEARCH_ID,
+                                                          name=PINNED_SEARCH_NAME))
+            except Exception:  # noqa: BLE001 - one odd record must not stop the batch
+                continue
+            change = state.record(listing)
+            entry = state.listings[lid]
+            entry.update({"pinned": True, "pinned_notify": pin.notify})
+            entry.pop("awaiting_mac", None)
+            if change is None:
+                continue
+            if change.kind == Change.NEW or entry.pop("placeholder", False):
+                silence(lid, archive_reason("saved from its link, so recorded as "
+                                            "a starting point"))
+            elif pin.archive_only:
+                report.archived += 1
+                silence(lid, archive_reason(change.describe()))
+            else:
+                queue(change)
 
 
 def _collector_settings(raw: Any) -> dict[str, Any]:

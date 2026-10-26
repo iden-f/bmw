@@ -1,11 +1,18 @@
-"""Local copies of listing photos.
+"""Local copies of listing photos: the archive's pictures.
 
 Photos hotlinked from the seller's CDN do not show offline or in the
 installed app, and vanish when the car is delisted. So the bot fetches small
-copies itself on runs with network access and publishes them beside the data.
-The CDN serves resized variants, so there is nothing to re-encode and no image
-library to install: the work is requesting a small variant, checking that the
-response is really an image, and staying inside a budget.
+copies itself on runs with network access and publishes them beside the data,
+and keeps them once the car has gone: a car that left the market is the
+archive's point, and its pictures are most of what makes its record worth
+opening. The CDN serves resized variants, so there is nothing to re-encode
+and no image library to install: the work is requesting a small variant,
+checking that the response is really an image, and staying inside a budget.
+
+Copies go only when the car itself is forgotten (its row leaves state) or a
+rule hides it. The budget is a visible setting (dashboard.photo_budget_mb),
+and when it is full the page says which cars have no photo rather than
+quietly dropping an old car's gallery.
 
 Nothing here may fail a run. A photo is a nicety; a check is the job.
 """
@@ -27,16 +34,20 @@ log = logging.getLogger(__name__)
 THUMB_DIR = Path("docs/thumbs")
 INDEX = THUMB_DIR / "index.json"
 
-# Photos are committed to the published branch, so every byte stays in its
-# history for anyone who clones it.
-MAX_BYTES_EACH = 60_000
-MAX_TOTAL_BYTES = 12_000_000
+# Photos live on two single-commit branches (the vault and the published
+# site), each replaced on every write, so the cost is the size of the store,
+# not its history. A photo over this is refused: AutoTrader's CDN serves a
+# 480x360 variant well under it, and a Marketplace photo arrives at its own
+# size, usually inside it.
+MAX_BYTES_EACH = 200_000
+# The default room for every copy together; dashboard.photo_budget_mb sets it.
+MAX_TOTAL_BYTES = 600_000_000
 # How many new photos one check may fetch, so a first run does not pull every
 # car's photos at once on top of its own requests.
-MAX_PER_RUN = 24
-# Photos kept per car, for the card and the detail gallery: on most listings
-# a front, a side and an interior.
-KEEP_PER_CAR = 3
+MAX_PER_RUN = 40
+# Photos kept per car; dashboard.photos_per_car sets it. Enough for the
+# gallery a listing page shows: front, sides, interior, odometer, engine.
+KEEP_PER_CAR = 12
 # A photo that has failed this many times running is left alone for a while
 # rather than asked for on every check. A Marketplace photo link expires, and
 # one over the size cap fails the same way every time; asking again only
@@ -182,26 +193,48 @@ def _existing_bytes() -> int:
                if p.is_file() and p.name != INDEX.name)
 
 
+def settings(cfg: Any) -> dict[str, int]:
+    """The photo store's size, as the config sets it: for ``sync``."""
+    try:
+        per_car = int(cfg.get("dashboard.photos_per_car", KEEP_PER_CAR) or KEEP_PER_CAR)
+    except (TypeError, ValueError):
+        per_car = KEEP_PER_CAR
+    try:
+        budget_mb = float(cfg.get("dashboard.photo_budget_mb",
+                                  MAX_TOTAL_BYTES / 1e6) or MAX_TOTAL_BYTES / 1e6)
+    except (TypeError, ValueError):
+        budget_mb = MAX_TOTAL_BYTES / 1e6
+    return {"per_car": max(1, min(per_car, 24)),
+            "budget": int(max(1.0, budget_mb) * 1_000_000)}
+
+
 def sync(entries: Iterable[dict[str, Any]], fetcher: Any,
          *, limit: int = MAX_PER_RUN, budget: int = MAX_TOTAL_BYTES,
-         per_car: int = KEEP_PER_CAR, dry_run: bool = False) -> Report:
-    """Fetch what is missing, drop what is no longer watched.
+         per_car: int = KEEP_PER_CAR, dry_run: bool = False,
+         keep_gone: bool = True) -> Report:
+    """Fetch what is missing, drop what is no longer kept.
 
     ``fetcher`` is the bot's own rate-limited, retrying, budgeted HTTP client,
     so photos queue behind the same politeness the searches use rather than
     opening a second uncontrolled connection to somebody's CDN.
+
+    A car that has gone keeps its copies (``keep_gone``): they are the record.
+    Its missing photos are no longer fetched, since the seller's links expire
+    with the listing; what was saved while it was live is what there is.
     """
     report = Report()
     entries = list(entries)
     index = _load_index()
 
     # Only visible cars: a hidden car's photos are not published in the data
-    # file either, so fetching them would be wasted.
+    # file either, so fetching them would be wasted. Gone cars are kept, not
+    # fetched for.
     wanted = {str(e["id"]): e for e in entries
-              if e.get("status") == "active" and not e.get("filtered")
-              and (e.get("images") or [])}
+              if (e.get("status") == "active" or (keep_gone and e.get("status") == "gone"))
+              and not e.get("filtered") and (e.get("images") or [])}
+    fetch_for = {lid for lid, e in wanted.items() if e.get("status") == "active"}
 
-    # Prune first, so space freed by delisted cars goes to live ones.
+    # Prune first, so space freed by forgotten cars goes to live ones.
     for listing_id in list(index):
         if listing_id in wanted:
             continue
@@ -219,7 +252,7 @@ def sync(entries: Iterable[dict[str, Any]], fetcher: Any,
     # Newest cars first, and every car's first photo before any car's second:
     # when the budget runs short, the old cars' extra angles go without
     # rather than the new cars an alert has just pointed at.
-    order = sorted(wanted, key=lambda lid: str(wanted[lid].get("first_seen") or ""),
+    order = sorted(fetch_for, key=lambda lid: str(wanted[lid].get("first_seen") or ""),
                    reverse=True)
     full = False
     failed_now: set[str] = set()
@@ -305,12 +338,13 @@ def sync(entries: Iterable[dict[str, Any]], fetcher: Any,
     if full:
         # Once, not once per car: the run copies every note into its
         # warnings, and a page of the same line pushes out the ones that
-        # matter.
-        bare = sum(1 for lid in wanted if not _files_of(index.get(lid) or {}))
+        # matter. Said of the live cars, which are the ones still asked for.
+        bare = sum(1 for lid in fetch_for if not _files_of(index.get(lid) or {}))
         report.notes.append(
             f"photo budget of {budget / 1e6:.0f} MB is full - {bare} of "
-            f"{len(wanted)} {'car' if len(wanted) == 1 else 'cars'} "
-            f"{'has' if bare == 1 else 'have'} no photo")
+            f"{len(fetch_for)} live {'car' if len(fetch_for) == 1 else 'cars'} "
+            f"{'has' if bare == 1 else 'have'} no photo; raise "
+            f"dashboard.photo_budget_mb to keep more")
 
     # Cars with a photo, not rows: a row can hold only a failure note.
     report.kept = sum(1 for row in index.values() if _files_of(row))

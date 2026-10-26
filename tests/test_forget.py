@@ -161,6 +161,10 @@ class TestPruneActuallyCompacts:
     Nothing failed. Nothing looked wrong. State simply grew one price point
     per car per check, forever, while the test covering the compaction called
     insight.compact_history directly and passed the whole time.
+
+    Compaction is now opt-in (``compact=True``): the archive keeps every
+    observed price, and state grows one point per car per *change*, not per
+    check, since a repeated price is not appended.
     """
 
     def history(self, points: int) -> list[dict]:
@@ -172,15 +176,22 @@ class TestPruneActuallyCompacts:
     def test_a_year_of_daily_prices_is_thinned(self, bench):
         state = bench.state()
         state.listings["keep-1"]["price_history"] = self.history(200)
-        state.prune()
+        state.prune(compact=True)
         kept = state.listings["keep-1"]["price_history"]
         assert 20 < len(kept) < 100, len(kept)
+
+    def test_by_default_every_price_point_is_kept(self, bench):
+        state = bench.state()
+        full = self.history(200)
+        state.listings["keep-1"]["price_history"] = list(full)
+        state.prune()
+        assert state.listings["keep-1"]["price_history"] == full
 
     def test_the_endpoints_survive(self, bench):
         state = bench.state()
         full = self.history(200)
         state.listings["keep-1"]["price_history"] = list(full)
-        state.prune()
+        state.prune(compact=True)
         kept = state.listings["keep-1"]["price_history"]
         assert kept[0] == full[0] and kept[-1] == full[-1]
 
@@ -188,5 +199,5 @@ class TestPruneActuallyCompacts:
         state = bench.state()
         full = self.history(6)
         state.listings["keep-1"]["price_history"] = list(full)
-        state.prune()
+        state.prune(compact=True)
         assert state.listings["keep-1"]["price_history"] == full
