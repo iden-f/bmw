@@ -405,12 +405,12 @@ def fit(key: bytes, batch: dict[str, Any], memory: dict[str, Any],
         sealed = M.seal_batch(key, batch)
     for part in batch["searches"]:
         for rec in part["listings"]:
-            mine = cars.setdefault(rec["id"], {}) if rec.get("photo") or rec.get("photo_data") else None
             if rec.get("photo"):
+                mine = cars.setdefault(rec["id"], {})
                 mine["photos"] = int(mine.get("photos", 0)) + 1
             if rec.get("photo_data"):
                 # Carried once: a picture is most of a batch's weight.
-                mine["picture"] = clock.stamp()
+                cars.setdefault(rec["id"], {})["picture"] = clock.stamp()
     return sealed
 
 
