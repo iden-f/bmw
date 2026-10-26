@@ -480,7 +480,7 @@ def test_every_year_on_the_chart_shares_one_scale(browser, site, payload):
 class TestACardSaysWhatItShows:
 
     def label(self, page, car_id):
-        return page.evaluate(f"card(byId('{car_id}')).getAttribute('aria-label')")
+        return page.evaluate(f"card(byId('{car_id}')).querySelector('.card').getAttribute('aria-label')")
 
     def test_a_gone_card_says_it_has_gone(self, browser, site, payload):
         ctx, page, _ = _open(browser, site, payload, "#/listings")

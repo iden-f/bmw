@@ -308,6 +308,46 @@ class TestYourMarks:
         finally:
             ctx.close()
 
+    def test_a_card_can_be_hidden_and_shown_again_without_opening_it(self, browser, site, payload):
+        """One tap on the card's own control hides the car: it leaves the Live
+        list, keeps its record under "Not interested", and one more tap
+        there brings it back. The control is outside the card button (a
+        button may not hold a button), so a tap on it never opens the car."""
+        ctx, page, _, _ = _open(browser, site, payload, "#/listings", width=390)
+        try:
+            hide = page.locator('.card__hide[data-id="1"]')
+            assert hide.get_attribute("aria-pressed") == "false"
+            assert hide.get_attribute("aria-label").startswith("Hide: ")
+            box = hide.bounding_box()
+            assert box["width"] >= 30 and box["height"] >= 30, box
+            hide.click()
+            page.wait_for_timeout(200)
+            assert page.get_attribute("#sheet", "data-open") != "1"
+            assert _card(page, "1").count() == 0
+            assert page.evaluate("marks.of('1').dismissed") is True
+            # The keyboard went on to the next car's control, not nowhere.
+            assert page.evaluate("document.activeElement.className") == "card__hide"
+            page.click('.chip[data-chip="dropped"]')
+            again = page.locator('.card__hide[data-id="1"]')
+            assert again.get_attribute("aria-pressed") == "true"
+            assert again.get_attribute("aria-label").startswith("Show again: ")
+            again.click()
+            page.wait_for_timeout(200)
+            assert page.evaluate("marks.of('1').dismissed") is False
+            page.click('.chip[data-chip="all"]')
+            assert _card(page, "1").count() == 1
+        finally:
+            ctx.close()
+
+    def test_the_alerts_switch_sits_with_the_mode_it_switches(self, browser, site, payload):
+        ctx, page, _, _ = _open(browser, site, payload, "#/searches")
+        try:
+            line = page.locator(".modeline").first
+            assert line.locator(".mode").count() == 1
+            assert line.locator(".btn", has_text="Archive only, no alerts").count() == 1
+        finally:
+            ctx.close()
+
     def test_shortlisting_and_dismissing_exclude_each_other(self, browser, site, payload):
         ctx, page, _, _ = _open(browser, site, payload, "#/listings")
         try:

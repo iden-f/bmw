@@ -511,18 +511,18 @@ class TestTheCounts:
         try:
             page.select_option("#sort", "price")
             page.wait_for_timeout(200)
-            assert page.locator(".grid > .card").count() == 300
+            assert page.locator(".grid .card").count() == 300
             more = page.locator("button", has_text="Show 154 more")
             more.click()
             page.wait_for_timeout(200)
             # All 454 live cars, the one with no asking price last, under its
             # own divider.
-            assert page.locator(".grid > .card").count() == 454
+            assert page.locator(".grid .card").count() == 454
             assert page.locator("button", has_text=re.compile(r"^Show \d+ more$")).count() == 0
             assert page.text_content(".grid__split") == "1 car with no asking price"
             assert _card(page, "4").count() == 1
             # The keyboard is on the first car that was not there before.
-            assert page.evaluate("[...document.querySelectorAll('.grid > .card')]"
+            assert page.evaluate("[...document.querySelectorAll('.grid .card')]"
                                  ".indexOf(document.activeElement)") == 300
             assert not errors, errors
         finally:

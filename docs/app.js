@@ -1693,7 +1693,7 @@ function renderListingResults() {
       app.limit = limit + LISTING_PAGE;
       renderListingResults();
       // On to the first car that was not there before.
-      document.querySelectorAll('#listing-results .grid > .card')[drawn]?.focus();
+      document.querySelectorAll('#listing-results .grid .card')[drawn]?.focus();
     });
     more.appendChild(b);
     host.appendChild(more);
@@ -2020,7 +2020,45 @@ function siteName(l) {
   return l.site === 'marketplace' ? 'Facebook Marketplace' : 'autotrader.ca';
 }
 
+/* A card and, beside it in the same box, the one control that is yours on
+   it: hide this car from the lists you scroll, or show it again. It sits
+   outside the card button (a button may not hold another button) and over
+   its corner. The card itself opens the car. */
 function card(l) {
+  const wrap = el('div', 'cardwrap');
+  const b = cardButton(l);
+  wrap.appendChild(b);
+  const dropped = Boolean(marks.of(l.id).dismissed);
+  const hide = el('button', 'card__hide');
+  hide.type = 'button';
+  hide.dataset.id = String(l.id);
+  hide.dataset.hide = '1';
+  hide.setAttribute('aria-pressed', String(dropped));
+  hide.setAttribute('aria-label', `${dropped ? 'Show again' : 'Hide'}: ${carName(l)}`);
+  hide.title = dropped ? 'Show this car in the lists again'
+    : 'Hide this car — it keeps its record under "Not interested"';
+  hide.innerHTML = dropped
+    ? `<svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="M1.5 8s2.5-4.5 6.5-4.5S14.5 8 14.5 8 12 12.5 8 12.5 1.5 8 1.5 8z"/><circle cx="8" cy="8" r="2.2"/></svg>`
+    : `<svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="M1.5 8s2.5-4.5 6.5-4.5S14.5 8 14.5 8 12 12.5 8 12.5 1.5 8 1.5 8z"/><circle cx="8" cy="8" r="2.2"/><path d="M2.5 13.5l11-11"/></svg>`;
+  hide.addEventListener('click', e => {
+    e.stopPropagation();
+    recordMark(l, 'dismissed', !dropped);
+    // The list is drawn again without (or with) this car; the keyboard goes
+    // to the next car's control, or back to the list when it was the last.
+    const all = [...document.querySelectorAll('#listing-results .card__hide, [data-view="archive"] .card__hide')];
+    const next = all[all.indexOf(hide) + 1] || all[all.indexOf(hide) - 1];
+    const nextId = next?.dataset.id;
+    if (app.view === 'listings') renderListingResults(); else render();
+    // Drawn with the mark already, so the clock's tick has nothing to redraw.
+    app.renderPending = false;
+    const twin = nextId && document.querySelector(`.card__hide[data-id="${CSS.escape(nextId)}"]`);
+    if (twin) twin.focus(); else document.getElementById('main').focus({ preventScroll: true });
+  });
+  wrap.appendChild(hide);
+  return wrap;
+}
+
+function cardButton(l) {
   const b = el('button', 'card');
   b.type = 'button';
   // So focus can find this car again once a re-render has replaced the card.
@@ -2586,22 +2624,27 @@ function renderSearches() {
       (bad ? `<dt>Trouble</dt><dd class="err">${h.consecutive_failures} failure${
         h.consecutive_failures === 1 ? '' : 's'} in a row — ${esc(h.last_error || '')}</dd>` : '') +
       (shutOut ? `<dt>Note</dt><dd class="warnt">Reads fine, keeps nothing: ${esc(shutOut)}</dd>` : '') +
-      `<dt>Mode</dt><dd>${s.notify === 'archive'
+      `<dt>Mode</dt><dd class="modeline">${s.notify === 'archive'
         ? '<span class="mode mode--archive">Archive only</span> <span class="note" style="margin:0">— recorded in full, never announced</span>'
         : '<span class="mode mode--alert">Alerts</span> <span class="note" style="margin:0">— each change goes to your phone</span>'}</dd>`;
+    // The switch sits with the mode it switches, at the top of the search,
+    // rather than at the foot of its rule boxes.
+    const line = kv.querySelector('.modeline');
+    const sw = modeSwitch(s);
+    sw.classList.add('btn--small');
+    line.appendChild(sw);
     sec.appendChild(kv);
     sec.appendChild(rulesEditor(s));
     const alias = aliasesEditor(s);
     if (alias) sec.appendChild(alias);
     if (usesMarketplace()) sec.appendChild(marketplaceSwitch(s));
-    const stop = el('div', 'bar');
-    stop.style.marginTop = 'var(--s3)';
-    stop.appendChild(modeSwitch(s));
     if ((app.data.searches || []).length > 1) {
+      const stop = el('div', 'bar');
+      stop.style.marginTop = 'var(--s3)';
       stop.appendChild(askButton('Stop watching this search', 'Remove a search',
         [{ action: 'remove-search', search: s.id }]));
+      sec.appendChild(stop);
     }
-    sec.appendChild(stop);
     host.appendChild(sec);
   }
 
@@ -4190,6 +4233,29 @@ const marks = {
 };
 
 /* ----------------------------------------------------------------- sheet */
+/* Set a mark on a car: instant on this device, and sent to the bot so it
+   survives a new device. With a token held here it goes straight to the
+   repository with nothing to look at; without one, the GitHub page opens
+   with the change filled in, as every other change from this page does. */
+function recordMark(l, key, on) {
+  const name = carName(l);
+  const verb = { shortlisted: ['shortlist', 'unshortlist'],
+                 muted: ['mute-listing', 'unmute-listing'],
+                 dismissed: ['dismiss', 'undismiss'] }[key][on ? 0 : 1];
+  marks.set(l.id, { [key]: on });
+  // The Listings count sits outside the sheet, and takes the mark now.
+  renderTabs();
+  const instructions = [{ action: verb, listing: String(l.id) }];
+  const title = `${verb}: ${name}`;
+  const prose = `${verb} for ${name} — opened from the dashboard.`;
+  if (hasToken()) {
+    askedAt = Date.now();
+    sendChange(instructions).catch(() => openAsk(title, instructions, prose));
+  } else {
+    openAsk(title, instructions, prose);
+  }
+}
+
 let lastFocus = null;
 // Whether a car is open, from the moment openSheet runs: data-open follows
 // a frame later, for the slide.
@@ -4277,6 +4343,7 @@ function refocus(was) {
   if (twinChip) { twinChip.focus(); return; }
   const id = was?.dataset?.id;
   const drawn = was?.classList?.contains('card') ? '.card'
+    : was?.classList?.contains('card__hide') ? '.card__hide'
     : was?.classList?.contains('ev') ? '.ev' : '';
   const within = `[data-view="${app.view}"] ${drawn}[data-id="${CSS.escape(id || '')}"]`;
   const twin = id && drawn && (document.querySelector(
@@ -4508,15 +4575,9 @@ function sheetBody(l) {
     b.dataset.key = key;
     b.setAttribute('aria-pressed', String(active));
     b.addEventListener('click', () => {
-      marks.set(l.id, { [key]: !active });
-      // The Listings count sits outside the sheet, and takes the mark now.
-      renderTabs();
       // Instant here, permanent there: the tap lands now, and the change
       // file makes it survive a new device.
-      openAsk(
-        `${active ? undo : action}: ${name}`,
-        [{ action: active ? undo : action, listing: String(l.id) }],
-        `${active ? undo : action} for ${name} — opened from the dashboard.`);
+      recordMark(l, key, !active);
       openSheet(l.id);
       document.querySelector(`#sheet-body [data-key="${key}"]`)?.focus();
     });
