@@ -617,6 +617,30 @@ a{ color:var(--ev-new); text-underline-offset:2px; }
 .card--hidden{ background:none; box-shadow:0 0 0 1px var(--line-strong); }
 .card--hidden:hover{ background:var(--surface); }
 
+/* The box a card and its hide control share: the card fills it, and the
+   control sits over the card's top right corner. */
+.cardwrap{ position:relative; display:grid; min-width:0; }
+.cardwrap > .card{ min-width:0; }
+.card__hide{
+  position:absolute; top:var(--s2); right:var(--s2); z-index:2;
+  width:32px; height:32px; border-radius:50%; border:0; cursor:pointer;
+  display:grid; place-items:center; padding:0;
+  background:var(--bar); color:var(--text);
+  -webkit-backdrop-filter:saturate(180%) blur(14px); backdrop-filter:saturate(180%) blur(14px);
+  box-shadow:0 0 0 1px var(--line);
+  transition:background var(--m-state) var(--ease), transform var(--m-state) var(--ease);
+}
+.card__hide:hover{ background:var(--surface); }
+.card__hide:active{ transform:scale(.94); }
+.card__hide[aria-pressed="true"]{ background:var(--text); color:var(--bg); box-shadow:none; }
+/* A card with no photo has words in that corner; they keep clear of it. */
+.card--hidden .card__price, .card--hidden .flag{ padding-right:40px; }
+/* The dimming of a dismissed card never reaches the control that undoes it. */
+.cardwrap > .card--dropped{ opacity:.62; }
+.cardwrap > .card--dropped:hover{ opacity:1; }
+/* The switch beside a search's mode. */
+.modeline{ display:flex; flex-wrap:wrap; align-items:center; gap:var(--s2) var(--s3); }
+
 /* On a phone a 4:3 photo at full width is one car per screen, and this is a
    comparison task. Defined after the card itself so it actually wins. */
 @media (max-width:559px){
@@ -625,6 +649,10 @@ a{ color:var(--ev-new); text-underline-offset:2px; }
      the text, which would crop it to a narrow portrait. The fixed width
      reserves the space, so nothing shifts when the image arrives. */
   .card__shot{ flex:none; width:128px; aspect-ratio:4/3; align-self:flex-start; }
+  /* Over the photo's corner the control would cover the car; on a phone it
+     sits at the card's top right, where the foot line has room. */
+  .card__hide{ top:var(--s2); right:var(--s2); width:30px; height:30px; }
+  .card__body{ padding-right:44px; }
   .card__body{ flex:1; min-width:0; padding:var(--s3); gap:var(--s1); }
   .card__title{ -webkit-line-clamp:2; min-height:0; }
   .card__foot{ padding-top:var(--s1); }

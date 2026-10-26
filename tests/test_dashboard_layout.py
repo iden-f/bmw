@@ -697,7 +697,7 @@ class TestNoMetricRanksWhatItCannotRead:
         page.select_option("#sort", sort_id)
         page.wait_for_timeout(200)
         return page.evaluate("""() => [...document.querySelectorAll(
-            '.grid > .card, .grid > .grid__split')].map(n =>
+            '.grid .card, .grid > .grid__split')].map(n =>
             n.classList.contains('grid__split')
               ? {split: n.textContent.trim()}
               : {car: n.innerText.replace(/\\n/g, ' ').slice(0, 80)})""")
@@ -761,7 +761,7 @@ class TestNoMetricRanksWhatItCannotRead:
         reason is about the ratio rather than about the car."""
         ctx, page, _ = _page(browser, site, 1440, "light", view="listings")
         try:
-            page.click(".grid > .card")
+            page.click(".grid .card")
             page.wait_for_timeout(300)
             rows = page.evaluate("""() => {
               const kv = document.querySelector('.sheet .kv');
@@ -786,16 +786,16 @@ class TestNoMetricRanksWhatItCannotRead:
         card carries none, the sheet says why rather than staying silent."""
         ctx, page, _ = _page(browser, site, 1440, "light", view="listings")
         try:
-            n = page.evaluate("() => document.querySelectorAll('.grid > .card').length")
+            n = page.evaluate("() => document.querySelectorAll('.grid .card').length")
             for i in range(n):
                 page.wait_for_timeout(120)
-                page.evaluate(f"() => document.querySelectorAll('.grid > .card')[{i}].click()")
+                page.evaluate(f"() => document.querySelectorAll('.grid .card')[{i}].click()")
                 page.wait_for_timeout(250)
                 said = page.evaluate(
                     "() => (document.querySelector('.sheet .note--cmp') || {})"
                     ".textContent || ''").strip()
                 badge = page.evaluate(
-                    f"() => (document.querySelectorAll('.grid > .card')[{i}]"
+                    f"() => (document.querySelectorAll('.grid .card')[{i}]"
                     ".querySelector('.card__foot span') || {}).textContent || ''")
                 assert said, f"card {i}: the sheet says nothing about comparables"
                 if "%" in badge or "cheapest of" in badge:
@@ -884,7 +884,7 @@ class TestTheEmptyStateBlamesTheRightControl:
             page.wait_for_timeout(150)
             page.click('[data-view="listings"] .state button')
             page.wait_for_timeout(200)
-            cards = page.evaluate("() => document.querySelectorAll('.grid > .card').length")
+            cards = page.evaluate("() => document.querySelectorAll('.grid .card').length")
             assert cards, "the way out led back to the same empty page"
         finally:
             ctx.close()
@@ -949,7 +949,7 @@ class TestOneReaderTwoAnswers:
                   return c ? parseInt(c.querySelector('.n').textContent.replace(/,/g, ''), 10) : null;
                 }""")
                 drawn = page.evaluate(
-                    "() => document.querySelectorAll('.grid > .card').length")
+                    "() => document.querySelectorAll('.grid .card').length")
                 assert said == drawn, (said, drawn)
                 toggled = page.evaluate("""() => {
                   const b = [...document.querySelectorAll('.chips .chip')]
@@ -981,7 +981,7 @@ class TestOneReaderTwoAnswers:
         of a figure, and the car it belonged to was the grey line beneath."""
         ctx, page, _ = _page(browser, site, 1440, "light", view="listings")
         try:
-            heads = page.evaluate("""() => [...document.querySelectorAll('.grid > .card')]
+            heads = page.evaluate("""() => [...document.querySelectorAll('.grid .card')]
                 .map(c => ({ head: (c.querySelector('.card__price') || {}).textContent || '',
                              sub: (c.querySelector('.card__title') || {}).textContent || '' }))""")
             assert heads, "no cards"
