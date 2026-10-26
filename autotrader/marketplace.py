@@ -708,18 +708,37 @@ def plan(cfg) -> list[dict[str, Any]]:
             "aliases": [str(a).strip() for a in filters._as_list(rules.get("aliases"))
                         if str(a).strip()] if models else [],
         }
+        # Each model is asked twice: newest first, and in Marketplace's own
+        # order. Marketplace's "newest first" leaves some listings out
+        # altogether (a dealer's post for days, in October 2026) that its
+        # default order shows on the first screen, so the two are read
+        # together and the cars of both are one list.
         item["queries"] = [{"query": " ".join(p for p in (make, model) if p),
-                            "url": search_url(item, " ".join(p for p in (make, model) if p))}
-                           for model in (models or [""])]
+                            "url": search_url(item, " ".join(p for p in (make, model) if p),
+                                              order=order),
+                            "order": order}
+                           for model in (models or [""]) for order in ORDERS]
+        # The scope is what Marketplace is asked, and the second order asks
+        # the same thing another way: it is not a new starting point.
+        scoped = dict(item, queries=[{"query": q["query"], "url": q["url"]}
+                                     for q in item["queries"] if q["order"] == ORDERS[0]])
         item["scope"] = hashlib.sha256(json.dumps(
-            {k: item[k] for k in SCOPE_KEYS}, sort_keys=True,
+            {k: scoped[k] for k in SCOPE_KEYS}, sort_keys=True,
             default=str).encode()).hexdigest()[:16]
         out.append(item)
     return out
 
 
-def search_url(item: dict[str, Any], query: str) -> str:
-    """The Marketplace search for one query, newest first."""
+# The orders each query is read in. "newest" asks for creation_time_descend;
+# "best match" leaves the sort to Marketplace, which is the order its own
+# page opens in and the only one some listings appear in.
+ORDERS = ("newest", "best match")
+
+
+def search_url(item: dict[str, Any], query: str, *, order: str = ORDERS[0]) -> str:
+    """The Marketplace search for one query, in one of the ``ORDERS``."""
+    if order not in ORDERS:
+        raise ValueError(f"unknown order {order!r}")
     params: list[tuple[str, Any]] = [("query", query)]
     for key, name in (("min_price", "minPrice"), ("max_price", "maxPrice"),
                       ("min_year", "minYear"), ("max_year", "maxYear")):
@@ -727,8 +746,9 @@ def search_url(item: dict[str, Any], query: str) -> str:
             params.append((name, int(item[key])))
     if item.get("radius_km"):
         params.append(("radius", int(item["radius_km"])))
-    params += [("sortBy", "creation_time_descend"),
-               ("exact", "true" if item.get("exact") else "false")]
+    if order == "newest":
+        params.append(("sortBy", "creation_time_descend"))
+    params.append(("exact", "true" if item.get("exact") else "false"))
     place = item.get("place") or "search"
     base = SEARCH_URL.format(place=place) if place != "search" \
         else "https://www.facebook.com/marketplace/search/"

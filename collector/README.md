@@ -15,8 +15,10 @@ rules, sends the alerts and updates the dashboard, exactly as for a car from
 AutoTrader. The collector writes none of the bot's data.
 
 What it searches is read from your watch: each active search becomes a
-Marketplace search for the same make and model, years and prices, newest
-first, within the search's distance (Marketplace offers up to 500 km). Change
+Marketplace search for the same make and model, years and prices, within
+the search's distance (Marketplace offers up to 500 km). Each model is read
+twice, newest first and in Marketplace's own order, because the newest-first
+page leaves some listings out that the default order shows. Change
 a search on the dashboard and the next pass searches the new thing.
 
 ## Before you start

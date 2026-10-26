@@ -255,7 +255,8 @@ def read(cfg: Config, plan: list[dict[str, Any]], browser: Browser,
         found = M.collect(texts)
         part = {"search": item["search"], "scope": item["scope"],
                 "landed": landed[0] if landed else "",
-                "ok": bool(found), "error": "; ".join(errors)[:300],
+                "ok": bool(found),
+                "error": "; ".join(dict.fromkeys(errors))[:300],
                 "listings": list(found.values())}
         if not found and not errors:
             # A loose Marketplace search always shows something, so a page

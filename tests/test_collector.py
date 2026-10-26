@@ -210,9 +210,10 @@ class TestAPass:
         ids = {r["id"] for r in part["listings"]}
         # The first result came with the page, the rest with the scroll.
         assert ids == {"200000001", "200000002", "200000003"}
-        # The search it asked for is the one the bot planned.
-        [search] = [v for v in FakeFacebook.visited if "/search/" in v]
-        assert "query=Honda+Civic" in search and "sortBy=creation_time_descend" in search
+        # The search it asked for is the one the bot planned, in both orders.
+        newest, best = [v for v in FakeFacebook.visited if "/search/" in v]
+        assert "query=Honda+Civic" in newest and "sortBy=creation_time_descend" in newest
+        assert "query=Honda+Civic" in best and "sortBy=" not in best
 
     def test_opens_the_page_of_a_car_worth_hearing_about(self, world):
         from collector.cycle import once
