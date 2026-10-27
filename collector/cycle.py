@@ -10,8 +10,10 @@ from __future__ import annotations
 import base64
 import json
 import logging
+import os
 import random
 import secrets
+import threading
 import time
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -565,11 +567,52 @@ def _send_failed() -> None:
     save_memory(memory)
 
 
-def forever(settings: S.Settings) -> None:
-    """Pass after pass, until stopped. A failed pass waits and tries again."""
-    while True:
+# A pass reads a handful of pages and fetches up to 40 pictures: a few
+# minutes. One that has run this long is hung (on Oct 26 2026 the Playwright
+# driver died under a pass and the process sat in a call that never returned
+# for four hours, with launchd showing it running), and nothing inside the
+# process can be trusted to notice.
+PASS_DEADLINE_SECONDS = 20 * 60
+
+
+def _give_up(started_at: float) -> None:
+    """Leave a hung pass the only way that works: end the process.
+
+    launchd (KeepAlive) starts a fresh one. The browser the pass was driving
+    is killed first, since an orphaned Chromium still holding the profile
+    would fail the next pass at launch.
+    """
+    log.error("pass hung for %d minutes; exiting so launchd restarts the collector",
+              int((time.monotonic() - started_at) // 60))
+    try:
+        memory = load_memory()
+        memory["last_error"] = {"at": clock.stamp(),
+                                "error": "a pass hung and the collector restarted itself"}
+        save_memory(memory)
+    except Exception:  # noqa: BLE001 - leaving matters more than the note
+        pass
+    try:
+        import subprocess
+        subprocess.run(["pkill", "-P", str(os.getpid())], timeout=10, check=False)
+    except Exception:  # noqa: BLE001
+        pass
+    os._exit(75)
+
+
+def forever(settings: S.Settings, *, deadline: float = PASS_DEADLINE_SECONDS,
+            give_up: Callable[[float], None] = _give_up, rounds: int | None = None) -> None:
+    """Pass after pass, until stopped. A failed pass waits and tries again.
+
+    A pass that outlives ``deadline`` is hung, and ``give_up`` ends it.
+    """
+    done = 0
+    while rounds is None or done < rounds:
+        done += 1
         started = time.monotonic()
         planned = next_wait(settings)
+        watchdog = threading.Timer(deadline, give_up, args=(started,))
+        watchdog.daemon = True
+        watchdog.start()
         try:
             summary = once(settings, wait=planned)
             log.info("%s", _line(summary))
@@ -578,6 +621,8 @@ def forever(settings: S.Settings) -> None:
             memory = load_memory()
             memory["last_error"] = {"at": clock.stamp(), "error": str(exc)[:300]}
             save_memory(memory)
+        finally:
+            watchdog.cancel()
         wait = planned - (time.monotonic() - started)
         time.sleep(max(60.0, wait))
 
