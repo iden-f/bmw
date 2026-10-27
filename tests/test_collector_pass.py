@@ -755,3 +755,48 @@ class TestAStandby:
         browser = FakeBrowser()
         assert a_pass(home, browser, settings=self.standby())["polled"]
         assert browser.searches()
+
+
+class TestAHungPass:
+    """The Playwright driver died under a pass on Oct 26 2026 and the process
+    sat in the call for four hours with launchd showing it running."""
+
+    def test_a_pass_that_outlives_its_deadline_is_ended(self, monkeypatch):
+        import threading
+        ended = threading.Event()
+        monkeypatch.setattr(cycle, "next_wait", lambda s: 0.0)
+        monkeypatch.setattr(cycle.time, "sleep", lambda s: None)
+        release = threading.Event()
+
+        def hang(settings, **kw):
+            assert ended.wait(5), "the watchdog never fired"
+            release.set()
+            raise RuntimeError("driver gone")
+
+        monkeypatch.setattr(cycle, "once", hang)
+        monkeypatch.setattr(cycle, "load_memory", lambda: {})
+        monkeypatch.setattr(cycle, "save_memory", lambda m: None)
+        cycle.forever(settings(), deadline=0.05, rounds=1,
+                      give_up=lambda started: ended.set())
+        assert ended.is_set() and release.is_set()
+
+    def test_a_pass_that_finishes_in_time_is_left_alone(self, monkeypatch):
+        fired = []
+        monkeypatch.setattr(cycle, "next_wait", lambda s: 0.0)
+        monkeypatch.setattr(cycle.time, "sleep", lambda s: None)
+        monkeypatch.setattr(cycle, "once", lambda s, **kw: {"polled": False, "note": "x"})
+        cycle.forever(settings(), deadline=0.2, rounds=2, give_up=fired.append)
+        import time as real
+        real.sleep(0.4)
+        assert fired == []
+
+    def test_giving_up_ends_the_process_and_says_why(self, monkeypatch):
+        import subprocess
+        notes, exits, ran = {}, [], []
+        monkeypatch.setattr(cycle, "load_memory", lambda: {})
+        monkeypatch.setattr(cycle, "save_memory", lambda m: notes.update(m))
+        monkeypatch.setattr(cycle.os, "_exit", exits.append)
+        monkeypatch.setattr(subprocess, "run", lambda *a, **kw: ran.append(a[0]))
+        cycle._give_up(cycle.time.monotonic())
+        assert exits == [75] and ran and ran[0][0] == "pkill"
+        assert "hung" in notes["last_error"]["error"]
