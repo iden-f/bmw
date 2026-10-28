@@ -15,6 +15,7 @@ import random
 import secrets
 import threading
 import time
+from dataclasses import replace
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Callable
@@ -515,11 +516,13 @@ def once(settings: S.Settings, *, github: GitHub | None = None,
         note = why
     else:
         polled = True
+        settings, plan = _lighter(settings, plan, memory)
         with browser_factory(settings).open() as browser:
             if not browser.signed_in():
                 session = "signed_out"
             else:
                 parts, session = read(cfg, plan, browser, settings, memory)
+        _count_empty(memory, parts, session)
         if settings.role == "standby":
             note = "the primary is not reading, so this one is"
         if session in CANNOT_READ:
@@ -557,6 +560,41 @@ def once(settings: S.Settings, *, github: GitHub | None = None,
     memory["last"] = summary
     save_memory(memory)
     return summary
+
+
+def _count_empty(memory: dict[str, Any], parts: list[dict], session: str) -> None:
+    """Passes in a row that read no car at all though the session was fine.
+
+    Facebook answering every search with an empty result is not a quiet
+    market: it is the account being slowed. The count lightens the next reads
+    and stretches the wait, and the watchdog reports it.
+    """
+    if session != "ok" or not parts:
+        return
+    if any(p["listings"] for p in parts):
+        memory.pop("empty_passes", None)
+    else:
+        memory["empty_passes"] = int(memory.get("empty_passes") or 0) + 1
+
+
+def _lighter(settings: S.Settings, plan: list[dict[str, Any]],
+             memory: dict[str, Any]) -> tuple[S.Settings, list[dict[str, Any]]]:
+    """After an empty pass, ask for less: fewer scrolls and one order per model."""
+    if int(memory.get("empty_passes") or 0) < 1:
+        return settings, plan
+    lighter = []
+    for item in plan:
+        seen: set[str] = set()
+        once_each = [q for q in item["queries"]
+                     if not (q["query"] in seen or seen.add(q["query"]))]
+        lighter.append(dict(item, queries=once_each))
+    return replace(settings, scrolls=min(settings.scrolls, 1)), lighter
+
+
+def backoff(planned: float, memory: dict[str, Any]) -> float:
+    """The wait doubles with each empty pass in a row, up to an hour."""
+    empty = int(memory.get("empty_passes") or 0)
+    return planned if not empty else max(planned, min(3600.0, planned * 2 ** min(empty, 4)))
 
 
 def _send_failed() -> None:
@@ -616,14 +654,18 @@ def forever(settings: S.Settings, *, deadline: float = PASS_DEADLINE_SECONDS,
         try:
             summary = once(settings, wait=planned)
             log.info("%s", _line(summary))
+            memory = load_memory()
+            if memory.pop("failed_passes", None) is not None:
+                save_memory(memory)
         except Exception as exc:          # noqa: BLE001 - the loop must survive
             log.error("pass failed: %s", exc)
             memory = load_memory()
+            memory["failed_passes"] = int(memory.get("failed_passes") or 0) + 1
             memory["last_error"] = {"at": clock.stamp(), "error": str(exc)[:300]}
             save_memory(memory)
         finally:
             watchdog.cancel()
-        wait = planned - (time.monotonic() - started)
+        wait = backoff(planned, load_memory()) - (time.monotonic() - started)
         time.sleep(max(60.0, wait))
 
 

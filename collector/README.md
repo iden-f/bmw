@@ -211,3 +211,17 @@ log says why.
   the `NTFY_TOKEN` secret, run it as `NTFY_TOKEN=... collector/run test-alert`.
   Other channels need secrets only the repository has; test those with
   **Check AutoTrader**.
+
+## When Facebook slows the account, and when the collector fails
+
+If every search comes back empty though the session is fine, the collector
+reads less on the next pass (one order per model, one scroll) and waits twice
+as long, up to an hour, until cars come back. It never tries to look like
+anyone else.
+
+`collector/run install` also installs a watchdog agent that runs every 15
+minutes. After 6 empty passes in a row, or 3 failed ones, it opens (or adds to)
+an issue labelled `collector-failure` in the repository and starts a headless
+Claude on this Mac to diagnose, fix, merge and deploy. At most 3 times a day,
+3 hours apart. The issue holds counts and error text only: the repository is
+public.
