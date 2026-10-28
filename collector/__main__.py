@@ -138,17 +138,25 @@ def cmd_status(args) -> int:
     return 0
 
 
+def cmd_watchdog(args) -> int:
+    from . import watchdog
+    print(watchdog.check())
+    return 0
+
+
 def cmd_install(args) -> int:
-    from . import launchd
+    from . import launchd, watchdog
     path = launchd.install()
+    watchdog.install()
     print(f"Installed {path}. It runs now, at every login, and restarts if it stops.")
     print(f"Its log is {launchd.log_path()}")
     return 0
 
 
 def cmd_uninstall(args) -> int:
-    from . import launchd
+    from . import launchd, watchdog
     launchd.uninstall()
+    watchdog.uninstall()
     print("Stopped, and it will not start at login.")
     return 0
 
@@ -193,6 +201,8 @@ def main(argv: list[str] | None = None) -> int:
                    ).set_defaults(func=cmd_status)
     sub.add_parser("install", help="run it now and at every login"
                    ).set_defaults(func=cmd_install)
+    sub.add_parser("watchdog", help="report a failing collector and ask for a fix"
+                   ).set_defaults(func=cmd_watchdog)
     sub.add_parser("uninstall", help="stop it running").set_defaults(func=cmd_uninstall)
     sub.add_parser("forget", help="remove the service, secrets and browser profile"
                    ).set_defaults(func=cmd_forget)
