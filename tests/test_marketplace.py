@@ -1014,3 +1014,10 @@ class TestAskingMarketplaceByAnotherName:
         assert "query=Honda+Civic+Type+R" in changed["queries"][0]["url"]
         # What is asked changed, so it is a new starting point.
         assert changed["scope"] != plan["scope"]
+
+
+def test_feed_url_asks_for_the_newest_vehicles_of_the_make():
+    url = M.feed_url({"make": "BMW", "min_year": 2015, "max_year": 2020, "radius_km": 500,
+                      "place": "vancouver"})
+    assert url.startswith("https://www.facebook.com/marketplace/vancouver/vehicles?")
+    assert "make=BMW" in url and "minYear=2015" in url and "sortBy=creation_time_descend" in url

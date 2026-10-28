@@ -800,3 +800,38 @@ class TestAHungPass:
         cycle._give_up(cycle.time.monotonic())
         assert exits == [75] and ran and ran[0][0] == "pkill"
         assert "hung" in notes["last_error"]["error"]
+
+
+class TestWhenTheSearchPageIsEmpty:
+    """Facebook can answer every search with nothing while the vehicles page
+    still lists cars. Those cars are read from the vehicles page, said to be
+    only part of what the search would show, and the search is retried only
+    now and then."""
+
+    class EmptySearch(FakeBrowser):
+        def visit(self, url, *, scrolls=0):
+            page = super().visit(url, scrolls=scrolls)
+            if "/search/" in url:
+                page.texts = []
+            return page
+
+    def test_the_vehicles_page_is_read_and_called_partial(self, tmp_path):
+        cfg = watch_config(tmp_path)
+        memory: dict = {}
+        browser = self.EmptySearch()
+        [part], session = cycle.read(cfg, M.plan(cfg), browser, settings(), memory)
+        assert session == "ok" and part["ok"] and part["listings"]
+        assert "vehicles" in " ".join(browser.log) and "sortBy=creation_time_descend" in " ".join(browser.log)
+        assert "missing" in part["error"]
+        cycle._note_search(memory)
+        assert memory["search_blank"] == 1
+
+    def test_search_is_tried_again_only_every_sixth_pass(self):
+        assert not cycle._skip_search({})
+        assert [cycle._skip_search({"search_blank": n}) for n in range(1, 8)] == \
+            [True, True, True, True, True, False, True]
+
+    def test_a_search_that_works_again_ends_it(self):
+        memory = {"search_blank": 6, "search_read": True}
+        cycle._note_search(memory)
+        assert "search_blank" not in memory
