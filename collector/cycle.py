@@ -580,7 +580,8 @@ def _count_empty(memory: dict[str, Any], parts: list[dict], session: str) -> Non
 def _lighter(settings: S.Settings, plan: list[dict[str, Any]],
              memory: dict[str, Any]) -> tuple[S.Settings, list[dict[str, Any]]]:
     """After an empty pass, ask for less: fewer scrolls and one order per model."""
-    if int(memory.get("empty_passes") or 0) < 1:
+    empty = int(memory.get("empty_passes") or 0) >= 1
+    if not empty and settings.both_orders:
         return settings, plan
     lighter = []
     for item in plan:
@@ -588,7 +589,7 @@ def _lighter(settings: S.Settings, plan: list[dict[str, Any]],
         once_each = [q for q in item["queries"]
                      if not (q["query"] in seen or seen.add(q["query"]))]
         lighter.append(dict(item, queries=once_each))
-    return replace(settings, scrolls=min(settings.scrolls, 1)), lighter
+    return (replace(settings, scrolls=min(settings.scrolls, 1)) if empty else settings), lighter
 
 
 def backoff(planned: float, memory: dict[str, Any]) -> float:
