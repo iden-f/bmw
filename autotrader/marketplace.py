@@ -831,6 +831,29 @@ def search_url(item: dict[str, Any], query: str, *, order: str = ORDERS[0]) -> s
     return f"{base}?{urlencode(params)}"
 
 
+def feed_url(item: dict[str, Any]) -> str:
+    """The newest vehicles for the item's make, from Marketplace's vehicles page.
+
+    Read when the search page itself comes back empty: the vehicles page still
+    lists cars, newest first, and the rules choose from them. It is not the
+    search, so what it shows is only part of what the search would.
+    """
+    params: list[tuple[str, Any]] = []
+    if item.get("make"):
+        params.append(("make", item["make"]))
+    for key, name in (("min_price", "minPrice"), ("max_price", "maxPrice"),
+                      ("min_year", "minYear"), ("max_year", "maxYear")):
+        if item.get(key):
+            params.append((name, int(item[key])))
+    if item.get("radius_km"):
+        params.append(("radius", int(item["radius_km"])))
+    params.append(("sortBy", "creation_time_descend"))
+    place = item.get("place") or "search"
+    base = f"https://www.facebook.com/marketplace/{place}/vehicles" if place != "search" \
+        else "https://www.facebook.com/marketplace/category/vehicles"
+    return f"{base}?{urlencode(params)}"
+
+
 # ------------------------------------------------------- taking a batch in
 
 GONE_AFTER_DAYS = 10

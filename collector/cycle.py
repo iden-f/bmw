@@ -254,7 +254,10 @@ def read(cfg: Config, plan: list[dict[str, Any]], browser: Browser,
     for item in plan:
         texts: list[str] = []
         landed, errors = [], []
-        for q in item["queries"]:
+        # While Facebook answers the search pages with nothing, the search is
+        # only tried now and then, and the vehicles page is read instead.
+        skip = _skip_search(memory)
+        for q in ([] if skip else item["queries"]):
             # The pause a person takes between pages, between the models
             # of one search as between searches.
             if opened:
@@ -274,11 +277,31 @@ def read(cfg: Config, plan: list[dict[str, Any]], browser: Browser,
         if session != "ok":
             break
         found = M.collect(texts)
+        via_feed = False
+        if not found and not errors:
+            if opened:
+                browser.rest()
+            opened += 1
+            page = browser.visit(M.feed_url(item), scrolls=settings.scrolls)
+            if page.session != "ok":
+                session = page.session
+                break
+            found = M.collect(page.texts)
+            via_feed = bool(found)
+            if via_feed:
+                memory["feed_used"] = True
+            if page.error:
+                errors.append(page.error)
+        elif found:
+            memory["search_read"] = True
         part = {"search": item["search"], "scope": item["scope"],
                 "landed": landed[0] if landed else "",
                 "ok": bool(found),
                 "error": "; ".join(dict.fromkeys(errors))[:300],
                 "listings": list(found.values())}
+        if via_feed:
+            part["error"] = ("the search page was empty, so the newest vehicles for "
+                             "the make were read instead, and some cars may be missing")
         if not found and not errors:
             # A loose Marketplace search always shows something, so a page
             # with nothing readable on it is a page this code no longer
@@ -523,6 +546,7 @@ def once(settings: S.Settings, *, github: GitHub | None = None,
             else:
                 parts, session = read(cfg, plan, browser, settings, memory)
         _count_empty(memory, parts, session)
+        _note_search(memory)
         if settings.role == "standby":
             note = "the primary is not reading, so this one is"
         if session in CANNOT_READ:
@@ -560,6 +584,28 @@ def once(settings: S.Settings, *, github: GitHub | None = None,
     memory["last"] = summary
     save_memory(memory)
     return summary
+
+
+SEARCH_RETRY_EVERY = 6
+
+
+def _skip_search(memory: dict[str, Any]) -> bool:
+    """Whether to go straight to the vehicles page this pass.
+
+    After searches have come back empty, only every sixth pass tries them
+    again, to notice when they work.
+    """
+    blank = int(memory.get("search_blank") or 0)
+    return blank > 0 and blank % SEARCH_RETRY_EVERY != 0
+
+
+def _note_search(memory: dict[str, Any]) -> None:
+    """Count passes in a row where only the vehicles page gave cars."""
+    fed, searched = memory.pop("feed_used", False), memory.pop("search_read", False)
+    if searched:
+        memory.pop("search_blank", None)
+    elif fed:
+        memory["search_blank"] = int(memory.get("search_blank") or 0) + 1
 
 
 def _count_empty(memory: dict[str, Any], parts: list[dict], session: str) -> None:
