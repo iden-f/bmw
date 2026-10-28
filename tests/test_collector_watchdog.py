@@ -36,3 +36,11 @@ def test_lighter_reads_once_per_query_and_scrolls_less():
     assert cycle._lighter(s, plan, {}) == (s, plan)
     s2, p2 = cycle._lighter(s, plan, {"empty_passes": 1})
     assert s2.scrolls == 1 and [q["query"] for q in p2[0]["queries"]] == ["a", "b"]
+
+
+def test_one_order_setting_without_an_empty_pass():
+    from collector.settings import Settings
+    plan = [{"queries": [{"query": "a", "order": 1}, {"query": "a", "order": 2}]}]
+    s = Settings(scrolls=2, both_orders=False)
+    s2, p2 = cycle._lighter(s, plan, {})
+    assert s2.scrolls == 2 and len(p2[0]["queries"]) == 1

@@ -79,6 +79,9 @@ class Settings:
     details_per_cycle: int = 3
     # Scrolls per search: each brings another screenful of results.
     scrolls: int = 2
+    # Each query is read in both orders (newest first, then Marketplace's own).
+    # Off, only the first: half the page loads, at the risk of missing a car.
+    both_orders: bool = True
     show_browser: bool = False
     # "chrome" uses the installed Google Chrome; "" the Playwright Chromium.
     channel: str = "chrome"
