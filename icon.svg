@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="AutoTrader Watch">
+  <rect width="64" height="64" rx="14" fill="#17181a"/>
+  <path d="M14 38h36" stroke="#71aef8" stroke-width="3" stroke-linecap="round"/>
+  <path d="M18 38l4-11a4 4 0 013.7-2.5h12.6A4 4 0 0142 27l4 11" stroke="#fbfbfa" stroke-width="3" fill="none" stroke-linejoin="round"/>
+  <circle cx="22" cy="43" r="3.5" fill="#fbfbfa"/><circle cx="42" cy="43" r="3.5" fill="#fbfbfa"/>
+  <path d="M32 12v6" stroke="#4cc98d" stroke-width="3" stroke-linecap="round"/>
+</svg>
